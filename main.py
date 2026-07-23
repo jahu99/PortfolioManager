@@ -2,6 +2,11 @@ from data.universe import get_sp500_universe
 from data.market_data import get_stock_data
 from data.fundamentals import get_fundamentals
 
+from data.database import (
+    initialise_database,
+    save_recommendations
+)
+
 from analysis.indicators import add_indicators
 from analysis.scorer import score_stock
 from analysis.quality import score_quality
@@ -32,6 +37,14 @@ from reports.excel_report import create_report
 def main():
 
     print("MAIN STARTED")
+
+
+    # ---------------------------------
+    # Initialise database
+    # ---------------------------------
+
+    initialise_database()
+
 
 
     # ---------------------------------
@@ -69,7 +82,6 @@ def main():
 
             if df.empty:
                 continue
-
 
 
             df = add_indicators(
@@ -141,6 +153,8 @@ def main():
                     "Signal": signal,
 
                     "Score": technical_score,
+
+                    "Technical Score": technical_score,
 
                     "Quality Score": quality_score,
 
@@ -254,6 +268,16 @@ def main():
 
 
 
+    # ---------------------------------
+    # Save recommendation history
+    # ---------------------------------
+
+    save_recommendations(
+        results
+    )
+
+
+
     print(
         "\nTOP STOCKS"
     )
@@ -355,33 +379,14 @@ def main():
 
 
 
-        print(
-            "\nPORTFOLIO HEALTH"
-        )
+        print("\nPORTFOLIO HEALTH")
+        print(portfolio_health)
 
-        print(
-            portfolio_health
-        )
+        print("\nINVESTMENT DECISIONS")
+        print(decisions)
 
-
-
-        print(
-            "\nINVESTMENT DECISIONS"
-        )
-
-        print(
-            decisions
-        )
-
-
-
-        print(
-            "\nTRADE PLAN"
-        )
-
-        print(
-            trade_plan
-        )
+        print("\nTRADE PLAN")
+        print(trade_plan)
 
 
 
