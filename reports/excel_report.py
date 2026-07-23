@@ -378,7 +378,8 @@ def create_report(
     rebalance_recommendations=None,
     portfolio_health=None,
     decisions=None,
-    trade_plan=None
+    trade_plan=None,
+    performance_summary=None
 ):
         # ---------------------------------
     # File location
@@ -403,9 +404,16 @@ def create_report(
     # Convert inputs
     # ---------------------------------
 
-    stocks = pd.DataFrame(
+    stocks = (
+    stock_results
+    if isinstance(
+        stock_results,
+        pd.DataFrame
+    )
+    else pd.DataFrame(
         stock_results
     )
+)
 
 
     portfolio = (
@@ -431,6 +439,7 @@ def create_report(
         )
     )
 
+       
 
     alerts_df = (
         alerts
@@ -517,6 +526,17 @@ def create_report(
         )
     )
 
+    performance_df = (
+        performance_summary
+        if isinstance(
+            performance_summary,
+            pd.DataFrame
+        )
+        else pd.DataFrame(
+            performance_summary
+        )
+    )
+       
 
 
     print(
@@ -897,7 +917,37 @@ def create_report(
             )
 
 
+        # ---------------------------------
+        # Recommendation Performance
+        # ---------------------------------
 
+        print(
+            "Creating Recommendation Performance tab"
+        )
+
+
+        if performance_df.empty:
+
+            pd.DataFrame(
+                {
+                    "Message":
+                    [
+                        "No recommendation performance data"
+                    ]
+                }
+            ).to_excel(
+                writer,
+                sheet_name="Recommendation Performance",
+                index=False
+            )
+
+        else:
+
+            performance_df.to_excel(
+                writer,
+                sheet_name="Recommendation Performance",
+                index=False
+            )
         # ---------------------------------
         # Alerts
         # ---------------------------------

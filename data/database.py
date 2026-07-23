@@ -10,6 +10,10 @@ DATABASE_FILE = os.path.join(
 
 
 
+# ---------------------------------
+# Connection
+# ---------------------------------
+
 def get_connection():
 
     return sqlite3.connect(
@@ -18,6 +22,10 @@ def get_connection():
 
 
 
+# ---------------------------------
+# Initialise database
+# ---------------------------------
+
 def initialise_database():
 
     conn = get_connection()
@@ -25,8 +33,9 @@ def initialise_database():
     cursor = conn.cursor()
 
 
+
     # ---------------------------------
-    # Recommendations table
+    # Recommendations
     # ---------------------------------
 
     cursor.execute(
@@ -56,7 +65,7 @@ def initialise_database():
 
 
     # ---------------------------------
-    # Outcomes table
+    # Outcomes
     # ---------------------------------
 
     cursor.execute(
@@ -65,18 +74,13 @@ def initialise_database():
 
             id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-            recommendation_id INTEGER,
+            ticker TEXT NOT NULL,
 
-            check_date TEXT,
+            check_date TEXT NOT NULL,
 
             price REAL,
 
-            return_percent REAL,
-
-            FOREIGN KEY(
-                recommendation_id
-            )
-            REFERENCES recommendations(id)
+            return_percent REAL
 
         )
         """
@@ -89,6 +93,10 @@ def initialise_database():
     conn.close()
 
 
+
+# ---------------------------------
+# Save daily recommendations
+# ---------------------------------
 
 def save_recommendations(
     stock_results
@@ -114,7 +122,7 @@ def save_recommendations(
 
 
     # ---------------------------------
-    # Prevent duplicate daily snapshots
+    # Prevent duplicate daily saves
     # ---------------------------------
 
     cursor.execute(
@@ -139,11 +147,9 @@ def save_recommendations(
 
     if existing > 0:
 
-
         print(
             f"Recommendations already saved for {today}. Skipping database update."
         )
-
 
         conn.close()
 
@@ -152,7 +158,7 @@ def save_recommendations(
 
 
     # ---------------------------------
-    # Save today's recommendations
+    # Insert recommendations
     # ---------------------------------
 
     for stock in stock_results:
@@ -181,7 +187,6 @@ def save_recommendations(
 
             )
 
-
             VALUES (?, ?, ?, ?, ?, ?, ?)
 
             """,
@@ -190,34 +195,28 @@ def save_recommendations(
 
                 today,
 
-
                 stock.get(
                     "Ticker"
                 ),
 
-
                 stock.get(
                     "Signal"
                 ),
-
 
                 stock.get(
                     "Investment Score",
                     0
                 ),
 
-
                 stock.get(
                     "Technical Score",
                     0
                 ),
 
-
                 stock.get(
                     "Quality Score",
                     0
                 ),
-
 
                 stock.get(
                     "Price",
@@ -238,4 +237,83 @@ def save_recommendations(
 
     print(
         f"Saved {len(stock_results)} recommendations to database"
+    )
+
+
+
+# ---------------------------------
+# Save outcomes
+# ---------------------------------
+
+def save_outcomes(
+    outcomes
+):
+
+
+    if outcomes is None:
+
+        return
+
+
+
+    if outcomes.empty:
+
+        return
+
+
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+
+
+    for _, row in outcomes.iterrows():
+
+
+        cursor.execute(
+            """
+
+            INSERT INTO outcomes
+
+            (
+
+                ticker,
+
+                check_date,
+
+                price,
+
+                return_percent
+
+            )
+
+            VALUES (?, ?, ?, ?)
+
+            """,
+
+            (
+
+                row["Ticker"],
+
+                row["Check Date"],
+
+                row["Current Price"],
+
+                row["Return %"]
+
+            )
+
+        )
+
+
+
+    conn.commit()
+
+    conn.close()
+
+
+
+    print(
+        f"Saved {len(outcomes)} outcomes"
     )

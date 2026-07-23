@@ -31,12 +31,71 @@ from portfolio.portfolio import get_portfolio
 from portfolio.targets import get_targets
 
 from reports.excel_report import create_report
+from analysis.outcome_tracker import calculate_outcomes
+from data.database_queries import get_open_recommendations
+from data.database import save_outcomes
+
+from data.database_queries import get_performance_summary
 
 
 
 def main():
 
     print("MAIN STARTED")
+
+        # ---------------------------------
+    # Update recommendation outcomes
+    # ---------------------------------
+
+    try:
+
+        previous_recommendations = (
+            get_open_recommendations()
+        )
+
+
+        if (
+            previous_recommendations is not None
+            and not previous_recommendations.empty
+        ):
+
+            print(
+                f"Checking {len(previous_recommendations)} previous recommendations"
+            )
+
+
+            outcomes = calculate_outcomes(
+                previous_recommendations
+            )
+
+
+            if (
+                outcomes is not None
+                and not outcomes.empty
+            ):
+
+                save_outcomes(
+                    outcomes
+                )
+
+
+                print(
+                    f"Updated {len(outcomes)} recommendation outcomes"
+                )
+
+
+        else:
+
+            print(
+                "No previous recommendations to evaluate"
+            )
+
+
+    except Exception as e:
+
+        print(
+            f"Outcome tracking skipped: {e}"
+        )
 
 
     # ---------------------------------
@@ -412,6 +471,29 @@ def main():
     # ---------------------------------
     # Excel report
     # ---------------------------------
+        # ---------------------------------
+    # Recommendation Performance
+    # ---------------------------------
+
+    try:
+
+        performance_summary = (
+            get_performance_summary()
+        )
+
+
+    except Exception as e:
+
+        print(
+            f"Performance analysis skipped: {e}"
+        )
+
+
+    print("\nPERFORMANCE SUMMARY")
+    print(performance_summary)
+    print(type(performance_summary))
+
+    performance_summary = None
 
     create_report(
         results,
@@ -423,7 +505,8 @@ def main():
         rebalance_recommendations,
         portfolio_health,
         decisions,
-        trade_plan
+        trade_plan,
+        performance_summary
     )
 
 
