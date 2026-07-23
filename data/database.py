@@ -35,9 +35,9 @@ def initialise_database():
 
             id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-            date TEXT,
+            date TEXT NOT NULL,
 
-            ticker TEXT,
+            ticker TEXT NOT NULL,
 
             signal TEXT,
 
@@ -56,7 +56,7 @@ def initialise_database():
 
 
     # ---------------------------------
-    # Future outcomes table
+    # Outcomes table
     # ---------------------------------
 
     cursor.execute(
@@ -94,6 +94,7 @@ def save_recommendations(
     stock_results
 ):
 
+
     if not stock_results:
 
         return
@@ -112,21 +113,74 @@ def save_recommendations(
 
 
 
+    # ---------------------------------
+    # Prevent duplicate daily snapshots
+    # ---------------------------------
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+
+        FROM recommendations
+
+        WHERE date = ?
+
+        """,
+
+        (
+            today,
+        )
+    )
+
+
+    existing = cursor.fetchone()[0]
+
+
+
+    if existing > 0:
+
+
+        print(
+            f"Recommendations already saved for {today}. Skipping database update."
+        )
+
+
+        conn.close()
+
+        return
+
+
+
+    # ---------------------------------
+    # Save today's recommendations
+    # ---------------------------------
+
     for stock in stock_results:
 
 
         cursor.execute(
             """
+
             INSERT INTO recommendations
+
             (
+
                 date,
+
                 ticker,
+
                 signal,
+
                 investment_score,
+
                 technical_score,
+
                 quality_score,
+
                 price
+
             )
+
 
             VALUES (?, ?, ?, ?, ?, ?, ?)
 
@@ -136,28 +190,34 @@ def save_recommendations(
 
                 today,
 
+
                 stock.get(
                     "Ticker"
                 ),
 
+
                 stock.get(
                     "Signal"
                 ),
+
 
                 stock.get(
                     "Investment Score",
                     0
                 ),
 
+
                 stock.get(
                     "Technical Score",
                     0
                 ),
 
+
                 stock.get(
                     "Quality Score",
                     0
                 ),
+
 
                 stock.get(
                     "Price",
@@ -165,6 +225,7 @@ def save_recommendations(
                 )
 
             )
+
         )
 
 
