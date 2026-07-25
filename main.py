@@ -1,11 +1,17 @@
+import pandas as pd
+
+
 from data.universe import get_sp500_universe
 from data.market_data import get_stock_data
 from data.fundamentals import get_fundamentals
 
+
 from data.database import (
     initialise_database,
-    save_recommendations
+    save_recommendations,
+    save_recommendation_evaluations
 )
+
 
 from analysis.indicators import add_indicators
 from analysis.scorer import score_stock
@@ -13,29 +19,45 @@ from analysis.quality import score_quality
 from analysis.signals import generate_signal
 from analysis.recommendations import generate_recommendation
 
+
 from analysis.rebalance import generate_rebalance_recommendations
 from analysis.portfolio_health import calculate_portfolio_health
 from analysis.decision_engine import generate_decisions
 from analysis.trade_sizing import generate_trade_plan
 
+
 from analysis.portfolio_recommendations import (
     generate_portfolio_recommendations
 )
+
 
 from analysis.portfolio_analysis import analyse_portfolio
 from analysis.sector_analysis import analyse_sectors
 from analysis.portfolio_optimizer import optimise_portfolio
 from analysis.alerts import generate_alerts
 
+
 from portfolio.portfolio import get_portfolio
 from portfolio.targets import get_targets
 
-from reports.excel_report import create_report
-from analysis.outcome_tracker import calculate_outcomes
-from data.database_queries import get_open_recommendations
-from data.database import save_outcomes
 
-from data.database_queries import get_performance_summary
+from reports.excel_report import create_report
+
+
+from analysis.outcome_tracker import calculate_evaluations
+
+
+from data.database_queries import (
+    get_open_recommendations,
+    get_performance_summary,
+    get_signal_performance,
+    get_horizon_performance,
+    get_score_performance,
+    get_signal_horizon_performance,
+    get_score_horizon_performance
+)
+
+from data.database import save_recommendation_evaluations
 
 
 
@@ -43,8 +65,17 @@ def main():
 
     print("MAIN STARTED")
 
+
+    # ---------------------------------
+    # Initialise database
+    # ---------------------------------
+
+    initialise_database()
+
+
+
         # ---------------------------------
-    # Update recommendation outcomes
+    # Update recommendation evaluations
     # ---------------------------------
 
     try:
@@ -64,23 +95,30 @@ def main():
             )
 
 
-            outcomes = calculate_outcomes(
+            evaluations = calculate_evaluations(
                 previous_recommendations
             )
 
 
             if (
-                outcomes is not None
-                and not outcomes.empty
+                evaluations is not None
+                and not evaluations.empty
             ):
 
-                save_outcomes(
-                    outcomes
+                save_recommendation_evaluations(
+                    evaluations
                 )
 
 
                 print(
-                    f"Updated {len(outcomes)} recommendation outcomes"
+                    f"Saved {len(evaluations)} recommendation evaluations"
+                )
+
+
+            else:
+
+                print(
+                    "No evaluation milestones reached"
                 )
 
 
@@ -94,15 +132,8 @@ def main():
     except Exception as e:
 
         print(
-            f"Outcome tracking skipped: {e}"
+            f"Evaluation tracking skipped: {e}"
         )
-
-
-    # ---------------------------------
-    # Initialise database
-    # ---------------------------------
-
-    initialise_database()
 
 
 
@@ -112,9 +143,11 @@ def main():
 
     universe = get_sp500_universe()
 
+
     print(
         f"Scanning {len(universe)} stocks"
     )
+
 
 
     results = []
@@ -127,7 +160,9 @@ def main():
 
     for ticker in universe:
 
+
         try:
+
 
             print(
                 f"Scanning {ticker}"
@@ -140,7 +175,9 @@ def main():
 
 
             if df.empty:
+
                 continue
+
 
 
             df = add_indicators(
@@ -149,6 +186,7 @@ def main():
 
 
             if df.empty:
+
                 continue
 
 
@@ -205,6 +243,7 @@ def main():
 
 
             results.append(
+
                 {
 
                     "Ticker": ticker,
@@ -219,38 +258,44 @@ def main():
 
                     "Investment Score": investment_score,
 
+
                     "Confidence":
                         recommendation["Confidence"],
 
 
-                    "Price": round(
-                        float(latest["Close"]),
-                        2
-                    ),
+                    "Price":
+                        round(
+                            float(latest["Close"]),
+                            2
+                        ),
 
 
-                    "RSI": round(
-                        float(latest["RSI"]),
-                        1
-                    ),
+                    "RSI":
+                        round(
+                            float(latest["RSI"]),
+                            1
+                        ),
 
 
-                    "SMA50": round(
-                        float(latest["SMA50"]),
-                        2
-                    ),
+                    "SMA50":
+                        round(
+                            float(latest["SMA50"]),
+                            2
+                        ),
 
 
-                    "SMA200": round(
-                        float(latest["SMA200"]),
-                        2
-                    ),
+                    "SMA200":
+                        round(
+                            float(latest["SMA200"]),
+                            2
+                        ),
 
 
-                    "3M Return %": round(
-                        float(latest["Return_3m"]) * 100,
-                        2
-                    ),
+                    "3M Return %":
+                        round(
+                            float(latest["Return_3m"]) * 100,
+                            2
+                        ),
 
 
                     "Revenue Growth":
@@ -303,16 +348,17 @@ def main():
                         recommendation["Risks"]
 
                 }
+
             )
 
 
 
         except Exception as e:
 
+
             print(
                 f"Error processing {ticker}: {e}"
             )
-
 
 
     # ---------------------------------
@@ -369,6 +415,7 @@ def main():
 
 
     try:
+
 
         holdings = get_portfolio()
 
@@ -438,18 +485,36 @@ def main():
 
 
 
-        print("\nPORTFOLIO HEALTH")
-        print(portfolio_health)
+        print(
+            "\nPORTFOLIO HEALTH"
+        )
 
-        print("\nINVESTMENT DECISIONS")
-        print(decisions)
+        print(
+            portfolio_health
+        )
 
-        print("\nTRADE PLAN")
-        print(trade_plan)
+
+        print(
+            "\nINVESTMENT DECISIONS"
+        )
+
+        print(
+            decisions
+        )
+
+
+        print(
+            "\nTRADE PLAN"
+        )
+
+        print(
+            trade_plan
+        )
 
 
 
     except Exception as e:
+
 
         print(
             f"Portfolio analysis skipped: {e}"
@@ -469,16 +534,45 @@ def main():
 
 
     # ---------------------------------
-    # Excel report
-    # ---------------------------------
-        # ---------------------------------
     # Recommendation Performance
     # ---------------------------------
+
+    performance_summary = pd.DataFrame()
+    signal_performance = pd.DataFrame()
+    horizon_performance = pd.DataFrame()
+    score_performance = pd.DataFrame()
+    signal_horizon_performance = pd.DataFrame()
+    score_horizon_performance = pd.DataFrame()
+
 
     try:
 
         performance_summary = (
             get_performance_summary()
+        )
+
+
+        signal_performance = (
+            get_signal_performance()
+        )
+
+
+        horizon_performance = (
+            get_horizon_performance()
+        )
+
+
+        score_performance = (
+            get_score_performance()
+        )
+
+        signal_horizon_performance = (
+            get_signal_horizon_performance()
+        )
+
+
+        score_horizon_performance = (
+            get_score_horizon_performance()
         )
 
 
@@ -489,25 +583,67 @@ def main():
         )
 
 
-    print("\nPERFORMANCE SUMMARY")
-    print(performance_summary)
-    print(type(performance_summary))
 
-    performance_summary = None
+    print(
+        "\nPERFORMANCE SUMMARY"
+    )
 
-    create_report(
-        results,
-        portfolio_summary,
-        alerts,
-        sector_summary,
-        portfolio_actions,
-        portfolio_optimisation,
-        rebalance_recommendations,
-        portfolio_health,
-        decisions,
-        trade_plan,
+    print(
         performance_summary
     )
+
+
+
+    print(
+        "\nSIGNAL PERFORMANCE"
+    )
+
+    print(
+        signal_performance
+    )
+
+
+
+    print(
+        "\nHORIZON PERFORMANCE"
+    )
+
+    print(
+        horizon_performance
+    )
+
+
+
+    print(
+        "\nSCORE PERFORMANCE"
+    )
+
+    print(
+        score_performance
+    )
+
+
+
+    # ---------------------------------
+    # Excel report
+    # ---------------------------------
+
+    create_report(
+    results,
+    portfolio_summary,
+    alerts,
+    sector_summary,
+    portfolio_actions,
+    portfolio_optimisation,
+    rebalance_recommendations,
+    portfolio_health,
+    decisions,
+    trade_plan,
+    performance_summary,
+    signal_performance,
+    horizon_performance,
+    score_performance
+)
 
 
 

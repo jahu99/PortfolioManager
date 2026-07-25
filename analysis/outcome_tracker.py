@@ -1,14 +1,24 @@
 import pandas as pd
+from datetime import datetime
 
 from data.market_data import get_stock_data
 
 
 
-def calculate_outcomes(
+EVALUATION_PERIODS = [
+    5,
+    21,
+    63
+]
+
+
+
+def calculate_evaluations(
     recommendations
 ):
 
-    outcomes = []
+
+    evaluations = []
 
 
     if (
@@ -20,101 +30,161 @@ def calculate_outcomes(
 
 
 
-    for _, row in recommendations.iterrows():
+    today = pd.Timestamp.now()
 
-        ticker = row["ticker"]
+
+
+    for _, row in recommendations.iterrows():
 
 
         try:
 
-            df = get_stock_data(
-                ticker
+            recommendation_date = pd.to_datetime(
+                row["date"]
             )
 
 
-            if df.empty:
-                continue
+            calendar_days_elapsed = (
+                today - recommendation_date
+            ).days
 
 
 
-            latest = df.iloc[-1]
-
-
-            current_price = float(
-                latest["Close"]
-            )
-
-
-            start_price = float(
-                row["price"]
-            )
+            ticker = row["ticker"]
 
 
 
-            if start_price <= 0:
-                continue
+            # ---------------------------------
+            # Check evaluation milestones
+            # ---------------------------------
+
+            for period in EVALUATION_PERIODS:
+
+
+                if calendar_days_elapsed < period:
+                    continue
 
 
 
-            return_percent = (
-
-                (
-                    current_price
-                    -
-                    start_price
+                df = get_stock_data(
+                    ticker
                 )
-                /
-                start_price
-
-            ) * 100
 
 
 
-            outcomes.append(
-                {
+                if df.empty:
 
-                    "Ticker":
-                        ticker,
+                    continue
 
-                    "Signal":
-                        row["signal"],
 
-                    "Investment Score":
-                        row["investment_score"],
 
-                    "Start Price":
-                        start_price,
+                latest = df.iloc[-1]
 
-                    "Current Price":
-                        round(
-                            current_price,
-                            2
-                        ),
 
-                    "Return %":
-                        round(
-                            return_percent,
-                            2
-                        ),
 
-                    "Check Date":
-                        pd.Timestamp.now().strftime(
-                            "%Y-%m-%d"
-                        )
+                current_price = float(
+                    latest["Close"]
+                )
 
-                }
-            )
+
+                start_price = float(
+                    row["price"]
+                )
+
+
+
+                if start_price <= 0:
+
+                    continue
+
+
+
+                return_percent = (
+
+                    (
+                        current_price
+                        -
+                        start_price
+                    )
+                    /
+                    start_price
+
+                ) * 100
+
+
+
+                if return_percent > 0.5:
+
+                    outcome = "WIN"
+
+
+                elif return_percent < -0.5:
+
+                     outcome = "LOSS"
+
+
+                else:
+
+                    outcome = "FLAT"
+
+
+
+                evaluations.append(
+                    {
+
+                        "recommendation_id":
+                            row["id"],
+
+
+                        "ticker":
+                            ticker,
+
+
+                        "signal":
+                            row["signal"],
+
+
+                        "evaluation_date":
+                            today.strftime(
+                                "%Y-%m-%d"
+                            ),
+
+
+                        "days_after":
+                            period,
+
+
+                        "price":
+                            round(
+                                current_price,
+                                2
+                            ),
+
+
+                        "return_percent":
+                            round(
+                                return_percent,
+                                2
+                            ),
+
+
+                        "outcome":
+                            outcome
+
+                    }
+                )
 
 
 
         except Exception as e:
 
+
             print(
-                f"Outcome error {ticker}: {e}"
+                f"Evaluation error {row.get('ticker')}: {e}"
             )
 
 
 
     return pd.DataFrame(
-        outcomes
+        evaluations
     )
