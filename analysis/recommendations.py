@@ -1,3 +1,9 @@
+import pandas as pd
+
+from analysis.confidence import calculate_confidence
+
+
+
 def generate_recommendation(
     ticker,
     signal,
@@ -5,11 +11,15 @@ def generate_recommendation(
     technical_score,
     quality_score,
     technical_reasons,
-    quality_reasons
+    quality_reasons,
+    signal_performance=None,
+    score_bucket_performance=None
 ):
+
 
     explanation = []
     risks = []
+
 
 
     # ---------------------------------
@@ -41,7 +51,8 @@ def generate_recommendation(
         "Overbought",
         "High debt",
         "Negative revenue growth",
-        "Negative earnings growth"
+        "Negative earnings growth",
+        "Weak volume"
 
     ]
 
@@ -55,15 +66,21 @@ def generate_recommendation(
 
 
     # ---------------------------------
-    # Final recommendation
+    # Quality-adjusted recommendation
     # ---------------------------------
 
-    if investment_score >= 85:
+    if (
+        investment_score >= 85
+        and quality_score >= 75
+    ):
 
         recommendation = "STRONG BUY"
 
 
-    elif investment_score >= 75:
+    elif (
+        investment_score >= 75
+        and quality_score >= 65
+    ):
 
         recommendation = "BUY"
 
@@ -75,12 +92,10 @@ def generate_recommendation(
 
     else:
 
-        recommendation = "HOLD"
-
-
+        recommendation = "HOLD" 
 
     # ---------------------------------
-    # Confidence calculation
+    # Internal conviction score
     # ---------------------------------
 
     conviction = 0
@@ -112,8 +127,40 @@ def generate_recommendation(
 
 
 
+    # ---------------------------------
+    # Historical confidence engine
+    # ---------------------------------
+
+    historical_confidence = calculate_confidence(
+
+        investment_score,
+
+        signal_performance,
+
+        score_bucket_performance
+
+    )
+
+
+    confidence_score = historical_confidence.get(
+        "Confidence",
+        50
+    )
+
+
+    confidence_reasons = historical_confidence.get(
+        "Confidence Reasons",
+        []
+    )
+
+
+
+    # ---------------------------------
+    # Combine conviction + evidence
+    # ---------------------------------
+
     if (
-        investment_score >= 85
+        confidence_score >= 80
         and conviction >= 4
     ):
 
@@ -121,7 +168,7 @@ def generate_recommendation(
 
 
     elif (
-        investment_score >= 70
+        confidence_score >= 60
         and conviction >= 2
     ):
 
@@ -140,20 +187,40 @@ def generate_recommendation(
 
     return {
 
+
         "Ticker": ticker,
+
+
+        "Signal": signal,
+
 
         "Recommendation": recommendation,
 
+
         "Investment Score": investment_score,
+
 
         "Technical Score": technical_score,
 
+
         "Quality Score": quality_score,
+
 
         "Confidence": confidence,
 
-        "Reasons": explanation[:6],
 
-        "Risks": risks[:5]
+        "Confidence Score": confidence_score,
+
+
+        "Confidence Reasons":
+            confidence_reasons,
+
+
+        "Reasons":
+            explanation[:6],
+
+
+        "Risks":
+            risks[:5]
 
     }

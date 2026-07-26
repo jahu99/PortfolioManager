@@ -687,3 +687,369 @@ def get_score_horizon_performance():
 
 
     return df
+
+def get_score_bucket_performance():
+
+    import pandas as pd
+    from data.database import get_connection
+
+
+    conn = get_connection()
+
+
+    query = """
+    SELECT
+        r.investment_score,
+        e.return_percent
+
+    FROM recommendations r
+
+    JOIN recommendation_evaluations e
+
+        ON r.id = e.recommendation_id
+
+    WHERE r.investment_score IS NOT NULL
+
+    AND e.return_percent IS NOT NULL
+    """
+
+
+    df = pd.read_sql_query(
+        query,
+        conn
+    )
+
+
+    conn.close()
+
+
+    if df.empty:
+
+        return pd.DataFrame()
+
+
+
+    def score_bucket(score):
+
+        if score >= 90:
+            return "90-100"
+
+        elif score >= 80:
+            return "80-89"
+
+        elif score >= 70:
+            return "70-79"
+
+        elif score >= 60:
+            return "60-69"
+
+        else:
+            return "<60"
+
+
+
+    df["Score Bucket"] = (
+        df["investment_score"]
+        .apply(score_bucket)
+    )
+
+
+    summary = (
+        df
+        .groupby("Score Bucket")
+        .agg(
+
+            Evaluations=(
+                "return_percent",
+                "count"
+            ),
+
+            Average_Return_Percent=(
+                "return_percent",
+                "mean"
+            ),
+
+            Win_Rate_Percent=(
+                "return_percent",
+                lambda x:
+                    (x > 0).mean() * 100
+            )
+        )
+        .reset_index()
+    )
+
+
+    summary[
+        "Average_Return_Percent"
+    ] = summary[
+        "Average_Return_Percent"
+    ].round(2)
+
+
+    summary[
+        "Win_Rate_Percent"
+    ] = summary[
+        "Win_Rate_Percent"
+    ].round(2)
+
+
+
+    return summary
+
+def get_component_score_performance():
+
+    import pandas as pd
+    from data.database import get_connection
+
+
+    conn = get_connection()
+
+
+    query = """
+    SELECT
+
+        r.technical_score,
+        r.quality_score,
+        e.return_percent
+
+    FROM recommendations r
+
+    JOIN recommendation_evaluations e
+
+        ON r.id = e.recommendation_id
+
+    WHERE e.return_percent IS NOT NULL
+
+    AND r.technical_score IS NOT NULL
+
+    AND r.quality_score IS NOT NULL
+
+    """
+
+
+    df = pd.read_sql_query(
+        query,
+        conn
+    )
+
+
+    conn.close()
+
+
+
+    if df.empty:
+
+        return pd.DataFrame()
+
+
+
+    results = []
+
+
+
+    def bucket(score):
+
+        if score >= 90:
+            return "90-100"
+
+        elif score >= 80:
+            return "80-89"
+
+        elif score >= 70:
+            return "70-79"
+
+        elif score >= 60:
+            return "60-69"
+
+        else:
+            return "<60"
+
+
+
+    for component in [
+        "Technical Score",
+        "Quality Score"
+    ]:
+
+
+        column = (
+            "technical_score"
+            if component == "Technical Score"
+            else "quality_score"
+        )
+
+
+        temp = df.copy()
+
+
+        temp["Score Bucket"] = (
+            temp[column]
+            .apply(bucket)
+        )
+
+
+        summary = (
+            temp
+            .groupby("Score Bucket")
+            .agg(
+
+                Evaluations=(
+                    "return_percent",
+                    "count"
+                ),
+
+                Average_Return_Percent=(
+                    "return_percent",
+                    "mean"
+                ),
+
+                Win_Rate_Percent=(
+                    "return_percent",
+                    lambda x:
+                        (x > 0).mean() * 100
+                )
+
+            )
+            .reset_index()
+        )
+
+
+        summary.insert(
+            0,
+            "Component",
+            component
+        )
+
+
+        results.append(
+            summary
+        )
+
+
+
+    output = pd.concat(
+        results,
+        ignore_index=True
+    )
+
+
+    output[
+        "Average_Return_Percent"
+    ] = output[
+        "Average_Return_Percent"
+    ].round(2)
+
+
+    output[
+        "Win_Rate_Percent"
+    ] = output[
+        "Win_Rate_Percent"
+    ].round(2)
+
+
+
+    return output
+
+def get_signal_horizon_performance():
+
+    import pandas as pd
+    from data.database import get_connection
+
+
+    conn = get_connection()
+
+
+    query = """
+
+    SELECT
+
+        r.signal,
+
+        e.days_after,
+
+        e.return_percent
+
+    FROM recommendations r
+
+
+    JOIN recommendation_evaluations e
+
+        ON r.id = e.recommendation_id
+
+
+    WHERE e.return_percent IS NOT NULL
+
+    """
+
+
+
+    df = pd.read_sql_query(
+        query,
+        conn
+    )
+
+
+    conn.close()
+
+
+
+    if df.empty:
+
+        return pd.DataFrame()
+
+
+
+    summary = (
+
+        df
+
+        .groupby(
+            [
+                "signal",
+                "days_after"
+            ]
+        )
+
+        .agg(
+
+            Evaluations=(
+                "return_percent",
+                "count"
+            ),
+
+            Average_Return_Percent=(
+                "return_percent",
+                "mean"
+            ),
+
+            Win_Rate_Percent=(
+                "return_percent",
+                lambda x:
+                (x > 0).mean() * 100
+            )
+
+        )
+
+        .reset_index()
+
+    )
+
+
+
+    summary[
+        "Average_Return_Percent"
+    ] = summary[
+        "Average_Return_Percent"
+    ].round(2)
+
+
+
+    summary[
+        "Win_Rate_Percent"
+    ] = summary[
+        "Win_Rate_Percent"
+    ].round(2)
+
+
+
+    return summary

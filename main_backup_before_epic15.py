@@ -1,5 +1,4 @@
 import pandas as pd
-import traceback
 
 
 from data.universe import get_sp500_universe
@@ -60,11 +59,8 @@ from data.database_queries import (
     get_component_score_performance
 )
 
-from analysis.growth import score_growth
+from data.database import save_recommendation_evaluations
 
-from analysis.recommendation_intelligence import (
-    generate_recommendation_intelligence
-)
 
 
 def main():
@@ -80,7 +76,7 @@ def main():
 
 
 
-    # ---------------------------------
+        # ---------------------------------
     # Update recommendation evaluations
     # ---------------------------------
 
@@ -141,65 +137,7 @@ def main():
             f"Evaluation tracking skipped: {e}"
         )
 
-    # ---------------------------------
-    # Load recommendation learning data
-    # ---------------------------------
 
-    performance_summary = pd.DataFrame()
-    signal_performance = pd.DataFrame()
-    horizon_performance = pd.DataFrame()
-    score_performance = pd.DataFrame()
-    signal_horizon_performance = pd.DataFrame()
-    score_horizon_performance = pd.DataFrame()
-    score_bucket_performance = pd.DataFrame()
-    component_score_performance = pd.DataFrame()
-
-
-    try:
-
-        performance_summary = (
-            get_performance_summary()
-        )
-
-        signal_performance = (
-            get_signal_performance()
-        )
-
-        horizon_performance = (
-            get_horizon_performance()
-        )
-
-        score_performance = (
-            get_score_performance()
-        )
-
-        signal_horizon_performance = (
-            get_signal_horizon_performance()
-        )
-
-        score_horizon_performance = (
-            get_score_horizon_performance()
-        )
-
-        score_bucket_performance = (
-            get_score_bucket_performance()
-        )
-
-        component_score_performance = (
-            get_component_score_performance()
-        )
-
-
-        print(
-            "Recommendation learning data loaded"
-        )
-
-
-    except Exception as e:
-
-        print(
-            f"Learning data unavailable: {e}"
-        )
 
     # ---------------------------------
     # Load universe
@@ -271,36 +209,12 @@ def main():
                 fundamentals
             )
 
-            print("Passed quality")
-
-            growth_results = score_growth(
-                fundamentals
-            )
-
-            print("Passed growth")
-
-
-            growth_score = growth_results["Growth Score"]
-
-            growth_reasons = growth_results["Growth Reasons"]
-
-            growth_risks = growth_results["Growth Risks"]
-
-
 
 
             investment_score = round(
-
-                (technical_score * 0.45)
-
+                (technical_score * 0.6)
                 +
-
-                (quality_score * 0.30)
-
-                +
-
-                (growth_score * 0.25)
-
+                (quality_score * 0.4)
             )
 
 
@@ -313,6 +227,7 @@ def main():
             )
 
 
+
             recommendation = generate_recommendation(
                 ticker,
                 signal,
@@ -320,53 +235,122 @@ def main():
                 technical_score,
                 quality_score,
                 technical_reasons,
-                quality_reasons,
-                signal_performance,
-                score_bucket_performance
+                quality_reasons
             )
 
-            print("Passed recommendation")
+
 
             latest = df.iloc[-1]
 
-            print(
-                f"ADDING {ticker}: Investment {investment_score}, Quality {quality_score}"
-            )
 
-            print("About to append")
 
             results.append(
-                {
-                    "Ticker": ticker,
-                    "Signal": signal,
-                    "Score": technical_score,
-                    "Technical Score": technical_score,
-                    "Quality Score": quality_score,
-                    "Investment Score": investment_score,
-                    "Confidence": recommendation["Confidence"],
-                    "Confidence Score": recommendation.get("Confidence Score", 0),
-                    "Confidence Reasons": recommendation.get("Confidence Reasons", []),
-                    "Price": round(float(latest["Close"]), 2),
-                    "RSI": round(float(latest["RSI"]), 1),
-                    "SMA50": round(float(latest["SMA50"]), 2),
-                    "SMA200": round(float(latest["SMA200"]), 2),
-                    "3M Return %": round(float(latest["Return_3m"]) * 100, 2),
-                    "Revenue Growth": fundamentals.get("Revenue Growth", 0),
-                    "Profit Margin": fundamentals.get("Profit Margin", 0),
-                    "Return on Equity": fundamentals.get("Return on Equity", 0),
-                    "Debt to Equity": fundamentals.get("Debt to Equity", 0),
-                    "Sector": fundamentals.get("Sector", "Unknown"),
-                    "Industry": fundamentals.get("Industry", "Unknown"),
-                    "Recommendation Reasons": recommendation["Reasons"],
-                    "Recommendation Risks": recommendation["Risks"],
-                    "Growth Score": growth_score,
-                    "Growth Reasons": growth_reasons,
-                    "Growth Risks": growth_risks
-                }
-            )
 
-            print(
-                f"RESULTS COUNT NOW: {len(results)}"
+                {
+
+                    "Ticker": ticker,
+
+                    "Signal": signal,
+
+                    "Score": technical_score,
+
+                    "Technical Score": technical_score,
+
+                    "Quality Score": quality_score,
+
+                    "Investment Score": investment_score,
+
+
+                    "Confidence":
+                        recommendation["Confidence"],
+
+
+                    "Price":
+                        round(
+                            float(latest["Close"]),
+                            2
+                        ),
+
+
+                    "RSI":
+                        round(
+                            float(latest["RSI"]),
+                            1
+                        ),
+
+
+                    "SMA50":
+                        round(
+                            float(latest["SMA50"]),
+                            2
+                        ),
+
+
+                    "SMA200":
+                        round(
+                            float(latest["SMA200"]),
+                            2
+                        ),
+
+
+                    "3M Return %":
+                        round(
+                            float(latest["Return_3m"]) * 100,
+                            2
+                        ),
+
+
+                    "Revenue Growth":
+                        fundamentals.get(
+                            "Revenue Growth",
+                            0
+                        ),
+
+
+                    "Profit Margin":
+                        fundamentals.get(
+                            "Profit Margin",
+                            0
+                        ),
+
+
+                    "Return on Equity":
+                        fundamentals.get(
+                            "Return on Equity",
+                            0
+                        ),
+
+
+                    "Debt to Equity":
+                        fundamentals.get(
+                            "Debt to Equity",
+                            0
+                        ),
+
+
+                    "Sector":
+                        fundamentals.get(
+                            "Sector",
+                            "Unknown"
+                        ),
+
+
+                    "Industry":
+                        fundamentals.get(
+                            "Industry",
+                            "Unknown"
+                        ),
+
+
+                    "Recommendation Reasons":
+                        recommendation["Reasons"],
+
+
+                    "Recommendation Risks":
+                        recommendation["Risks"]
+
+                }
+
             )
 
 
@@ -374,17 +358,14 @@ def main():
         except Exception as e:
 
 
-            print(f"\nERROR processing {ticker}")
-
-            traceback.print_exc()
+            print(
+                f"Error processing {ticker}: {e}"
+            )
 
 
     # ---------------------------------
     # Rank stocks
     # ---------------------------------
-    print(
-    f"RESULTS BEFORE SORT: {len(results)}"
-    )
 
     results = sorted(
         results,
@@ -392,9 +373,7 @@ def main():
         reverse=True
     )
 
-    print(
-    f"RESULTS AFTER SORT: {len(results)}"
-    )
+
 
     # ---------------------------------
     # Save recommendation history
@@ -555,31 +534,132 @@ def main():
     )
 
 
+
     # ---------------------------------
-    # Recommendation Intelligence
+    # Recommendation Performance
     # ---------------------------------
+
+    performance_summary = pd.DataFrame()
+    signal_performance = pd.DataFrame()
+    horizon_performance = pd.DataFrame()
+    score_performance = pd.DataFrame()
+    signal_horizon_performance = pd.DataFrame()
+    score_horizon_performance = pd.DataFrame()
+
 
     try:
 
-        recommendation_intelligence = (
-            generate_recommendation_intelligence(
-                results,
-                signal_performance,
-                score_bucket_performance,
-                component_score_performance
-            )
+        performance_summary = (
+            get_performance_summary()
+        )
+
+        component_score_performance = (
+            get_component_score_performance()
+        )
+
+        print(
+            "\nCOMPONENT SCORE PERFORMANCE"
+        )
+
+        print(
+            component_score_performance
+        )
+
+        signal_horizon_performance = (
+            get_signal_horizon_performance()
+        )
+
+        print(
+             "\nSIGNAL HORIZON PERFORMANCE"
+        )
+
+        print(
+            signal_horizon_performance
+        )
+
+        score_bucket_performance = (
+            get_score_bucket_performance()
+        )
+
+        print(
+            "\nSCORE BUCKET PERFORMANCE"
+        )       
+
+        print(
+            score_bucket_performance
+        )
+
+        signal_performance = (
+            get_signal_performance()
+        )
+
+
+        horizon_performance = (
+            get_horizon_performance()
+        )
+
+
+        score_performance = (
+            get_score_performance()
+        )
+
+        signal_horizon_performance = (
+            get_signal_horizon_performance()
+        )
+
+
+        score_horizon_performance = (
+            get_score_horizon_performance()
         )
 
 
     except Exception as e:
 
         print(
-            f"Recommendation Intelligence skipped: {e}"
+            f"Performance analysis skipped: {e}"
         )
 
-    
 
-    
+
+    print(
+        "\nPERFORMANCE SUMMARY"
+    )
+
+    print(
+        performance_summary
+    )
+
+
+
+    print(
+        "\nSIGNAL PERFORMANCE"
+    )
+
+    print(
+        signal_performance
+    )
+
+
+
+    print(
+        "\nHORIZON PERFORMANCE"
+    )
+
+    print(
+        horizon_performance
+    )
+
+
+
+    print(
+        "\nSCORE PERFORMANCE"
+    )
+
+    print(
+        score_performance
+    )
+
+
 
     # ---------------------------------
     # Excel report
@@ -602,8 +682,7 @@ def main():
     score_performance,
     score_bucket_performance,
     component_score_performance,
-    signal_horizon_performance,
-    recommendation_intelligence
+    signal_horizon_performance
 )
 
 

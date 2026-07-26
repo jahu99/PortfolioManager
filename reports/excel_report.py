@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 from datetime import datetime
-
+from openpyxl import load_workbook
 
 
 def create_report(
@@ -18,62 +18,101 @@ def create_report(
     performance_summary=None,
     signal_performance=None,
     horizon_performance=None,
-    score_performance=None
+    score_performance=None,
+    score_bucket_performance=None,
+    component_score_performance=None,
+    signal_horizon_performance=None,
+    recommendation_intelligence=None
 ):
 
+    print("STARTING REPORT CREATION")
 
-    # -------------------------------
+    # --------------------------------
     # Safety handling
-    # -------------------------------
+    # --------------------------------
 
     if results is None:
         results = []
 
-    if portfolio_summary is None:
-        portfolio_summary = pd.DataFrame()
 
-    if alerts is None:
-        alerts = pd.DataFrame()
+    dataframes = {
 
-    if sector_summary is None:
-        sector_summary = pd.DataFrame()
+        "portfolio_summary": portfolio_summary,
+        "alerts": alerts,
+        "sector_summary": sector_summary,
+        "portfolio_actions": portfolio_actions,
+        "portfolio_optimisation": portfolio_optimisation,
+        "rebalance_recommendations": rebalance_recommendations,
+        "decisions": decisions,
+        "trade_plan": trade_plan,
 
-    if portfolio_actions is None:
-        portfolio_actions = pd.DataFrame()
+        "performance_summary": performance_summary,
+        "signal_performance": signal_performance,
+        "horizon_performance": horizon_performance,
+        "score_performance": score_performance,
+        "score_bucket_performance": score_bucket_performance,
+        "component_score_performance": component_score_performance,
+        "signal_horizon_performance": signal_horizon_performance,
 
-    if portfolio_optimisation is None:
-        portfolio_optimisation = pd.DataFrame()
+        "recommendation_intelligence": recommendation_intelligence
 
-    if rebalance_recommendations is None:
-        rebalance_recommendations = pd.DataFrame()
+    }
 
-    if decisions is None:
-        decisions = pd.DataFrame()
 
-    if trade_plan is None:
-        trade_plan = pd.DataFrame()
+    for key, value in dataframes.items():
 
-    if performance_summary is None:
-        performance_summary = pd.DataFrame()
-
-    if signal_performance is None:
-        signal_performance = pd.DataFrame()
-
-    if horizon_performance is None:
-        horizon_performance = pd.DataFrame()
-
-    if score_performance is None:
-        score_performance = pd.DataFrame()
+        if value is None:
+            dataframes[key] = pd.DataFrame()
 
 
 
-    # -------------------------------
-    # Create filename
-    # -------------------------------
+    portfolio_summary = dataframes["portfolio_summary"]
+    alerts = dataframes["alerts"]
+    sector_summary = dataframes["sector_summary"]
+    portfolio_actions = dataframes["portfolio_actions"]
+    portfolio_optimisation = dataframes["portfolio_optimisation"]
+    rebalance_recommendations = dataframes["rebalance_recommendations"]
+    decisions = dataframes["decisions"]
+    trade_plan = dataframes["trade_plan"]
+
+    performance_summary = dataframes["performance_summary"]
+
+    signal_performance = dataframes["signal_performance"]
+    horizon_performance = dataframes["horizon_performance"]
+    score_performance = dataframes["score_performance"]
+    score_bucket_performance = dataframes["score_bucket_performance"]
+    component_score_performance = dataframes["component_score_performance"]
+    signal_horizon_performance = dataframes["signal_horizon_performance"]
+
+    recommendation_intelligence = dataframes["recommendation_intelligence"]
+
+
+
+    print(
+        "RECOMMENDATION INTELLIGENCE SHAPE:",
+        recommendation_intelligence.shape
+    )
+
+    print(
+        "ALERTS SHAPE:",
+        alerts.shape
+    )
+
+
+
+    # --------------------------------
+    # Filename
+    # --------------------------------
 
     report_path = (
         "/Users/jameshulin/Documents/"
         "stock-momentum-agent/reports/"
+    )
+
+
+    os.makedirs(
+        report_path,
+        exist_ok=True
     )
 
 
@@ -83,11 +122,23 @@ def create_report(
     )
 
 
-    print("CREATING REPORT:")
-    print(f"Stocks: {len(results)}")
-    print(f"Portfolio: {len(portfolio_summary)}")
-    print(f"Sectors: {len(sector_summary)}")
-    print(f"Alerts: {len(alerts)}")
+
+    print("CREATING REPORT")
+
+    print(
+        "Stocks:",
+        len(results)
+    )
+
+    print(
+        "Portfolio:",
+        len(portfolio_summary)
+    )
+
+    print(
+        "Alerts:",
+        len(alerts)
+    )
 
 
 
@@ -97,59 +148,183 @@ def create_report(
     ) as writer:
 
 
-
-        # -------------------------------
+        # =================================
         # Executive Summary
-        # -------------------------------
+        # =================================
 
         print(
-            "Creating Executive Summary tab"
+            "Creating Executive Summary"
         )
 
 
-        pd.DataFrame(
-            {
-                "Metric": [
-                    "Stocks Scanned",
-                    "Portfolio Holdings",
-                    "Alerts"
-                ],
+        summary_rows = [
 
-                "Value": [
-                    len(results),
-                    len(portfolio_summary),
-                    len(alerts)
+            [
+                "STOCK MOMENTUM AGENT - EXECUTIVE SUMMARY"
+            ],
+
+            [
+                "Generated",
+                datetime.now().strftime(
+                    "%d %B %Y %H:%M"
+                )
+            ],
+
+            [],
+
+            [
+                "PORTFOLIO OVERVIEW"
+            ],
+
+            [
+                "Metric",
+                "Value"
+            ],
+
+            [
+                "Stocks Scanned",
+                len(results)
+            ],
+
+            [
+                "Portfolio Holdings",
+                len(portfolio_summary)
+            ],
+
+            [
+                "Alerts",
+                len(alerts)
+            ],
+
+            [],
+
+            [
+                "PORTFOLIO HEALTH"
+            ]
+
+        ]
+
+
+        if isinstance(
+            portfolio_health,
+            dict
+        ):
+
+            summary_rows.append(
+                [
+                    "Health Score",
+                    portfolio_health.get(
+                        "Health Score",
+                        ""
+                    )
                 ]
-            }
+            )
 
+            summary_rows.append(
+                [
+                    "Rating",
+                    portfolio_health.get(
+                        "Rating",
+                        ""
+                    )
+                ]
+            )
+
+            summary_rows.append(
+                [
+                    "Risks",
+                    portfolio_health.get(
+                        "Risks",
+                        ""
+                    )
+                ]
+            )
+
+
+        summary_rows.append([])
+
+
+        summary_rows.append(
+            [
+                "TOP OPPORTUNITIES"
+            ]
+        )
+
+
+        summary_rows.append(
+            [
+                "Ticker",
+                "Signal",
+                "Investment Score"
+            ]
+        )
+
+
+        if len(results) > 0:
+
+            opportunities = (
+                pd.DataFrame(results)
+                .sort_values(
+                    "Investment Score",
+                    ascending=False
+                )
+                .head(5)
+            )
+
+
+            for _, stock in opportunities.iterrows():
+
+                summary_rows.append(
+                    [
+                        stock.get(
+                            "Ticker",
+                            ""
+                        ),
+
+                        stock.get(
+                            "Signal",
+                            ""
+                        ),
+
+                        stock.get(
+                            "Investment Score",
+                            ""
+                        )
+                    ]
+                )
+
+
+        pd.DataFrame(
+            summary_rows
         ).to_excel(
             writer,
             sheet_name="Executive Summary",
-            index=False
+            index=False,
+            header=False
         )
 
 
 
-        # -------------------------------
+        # =================================
         # How To Use
-        # -------------------------------
+        # =================================
 
         print(
-            "Creating How To Use tab"
+            "Creating How To Use"
         )
 
 
         pd.DataFrame(
             {
-                "Instructions": [
+                "Instructions":[
 
-                    "Stock Rankings shows opportunities",
+                    "Executive Summary provides portfolio overview",
 
-                    "Portfolio shows holdings",
+                    "Stock Rankings shows investment opportunities",
 
-                    "Investment Decisions shows recommended actions",
+                    "Portfolio Actions shows recommended changes",
 
-                    "Recommendation Performance shows historical accuracy"
+                    "Recommendation Intelligence measures historical recommendation quality"
 
                 ]
             }
@@ -160,22 +335,30 @@ def create_report(
             index=False
         )
 
-
-
-        # -------------------------------
+                # =================================
         # Main Data Tabs
-        # -------------------------------
+        # =================================
 
-        print("Creating Stock Rankings tab")
 
-        pd.DataFrame(results).to_excel(
+        print(
+            "Creating Stock Rankings"
+        )
+
+
+        pd.DataFrame(
+            results
+        ).to_excel(
             writer,
             sheet_name="Stock Rankings",
             index=False
         )
 
 
-        print("Creating Portfolio tab")
+
+        print(
+            "Creating Portfolio"
+        )
+
 
         portfolio_summary.to_excel(
             writer,
@@ -184,7 +367,11 @@ def create_report(
         )
 
 
-        print("Creating Portfolio Actions tab")
+
+        print(
+            "Creating Portfolio Actions"
+        )
+
 
         portfolio_actions.to_excel(
             writer,
@@ -193,7 +380,11 @@ def create_report(
         )
 
 
-        print("Creating Portfolio Optimisation tab")
+
+        print(
+            "Creating Portfolio Optimisation"
+        )
+
 
         portfolio_optimisation.to_excel(
             writer,
@@ -202,7 +393,11 @@ def create_report(
         )
 
 
-        print("Creating Rebalance Recommendations tab")
+
+        print(
+            "Creating Rebalance Recommendations"
+        )
+
 
         rebalance_recommendations.to_excel(
             writer,
@@ -211,7 +406,11 @@ def create_report(
         )
 
 
-        print("Creating Sector Analysis tab")
+
+        print(
+            "Creating Sector Analysis"
+        )
+
 
         sector_summary.to_excel(
             writer,
@@ -221,7 +420,10 @@ def create_report(
 
 
 
-        print("Creating Portfolio Health tab")
+        print(
+            "Creating Portfolio Health"
+        )
+
 
         pd.DataFrame(
             [portfolio_health]
@@ -233,7 +435,10 @@ def create_report(
 
 
 
-        print("Creating Investment Decisions tab")
+        print(
+            "Creating Investment Decisions"
+        )
+
 
         decisions.to_excel(
             writer,
@@ -243,7 +448,10 @@ def create_report(
 
 
 
-        print("Creating Trade Plan tab")
+        print(
+            "Creating Trade Plan"
+        )
+
 
         trade_plan.to_excel(
             writer,
@@ -253,12 +461,13 @@ def create_report(
 
 
 
-        # -------------------------------
-        # Performance
-        # -------------------------------
+        # =================================
+        # Recommendation Performance
+        # =================================
+
 
         print(
-            "Creating Recommendation Performance tab"
+            "Creating Recommendation Performance"
         )
 
 
@@ -270,19 +479,44 @@ def create_report(
 
 
 
-        # -------------------------------
-        # Intelligence
-        # -------------------------------
+        # =================================
+        # Recommendation Intelligence
+        # =================================
+
 
         print(
-            "Creating Recommendation Intelligence tab"
+            "Creating Recommendation Intelligence"
         )
 
 
-        row = 0
+        intelligence_sheet = (
+            "Recommendation Intelligence"
+        )
 
 
-        intelligence = [
+        # Force sheet creation even if some sections are empty
+
+        pd.DataFrame(
+            {
+                "Status": [
+                    "Recommendation Intelligence Report"
+                ]
+            }
+
+        ).to_excel(
+            writer,
+            sheet_name=intelligence_sheet,
+            index=False
+        )
+
+
+
+        row = 2
+
+
+
+        intelligence_sections = [
+
             (
                 "Signal Performance",
                 signal_performance
@@ -294,26 +528,56 @@ def create_report(
             ),
 
             (
+                "Recommendation Intelligence",
+                recommendation_intelligence
+            ),
+
+            (
                 "Score Performance",
                 score_performance
+            ),
+
+            (
+                "Score Bucket Performance",
+                score_bucket_performance
+            ),
+
+            (
+                "Component Score Performance",
+                component_score_performance
+            ),
+
+            (
+                "Signal Horizon Performance",
+                signal_horizon_performance
             )
+
         ]
 
 
 
-        for title, dataframe in intelligence:
+        for title, dataframe in intelligence_sections:
 
 
-            if dataframe.empty:
-
+            if dataframe is None:
                 continue
 
 
+            if dataframe.empty:
+                continue
+
+
+
             pd.DataFrame(
-                [title]
+                [
+                    [
+                        title
+                    ]
+                ]
+
             ).to_excel(
                 writer,
-                sheet_name="Recommendation Intelligence",
+                sheet_name=intelligence_sheet,
                 startrow=row,
                 index=False,
                 header=False
@@ -323,24 +587,36 @@ def create_report(
             row += 1
 
 
+
             dataframe.to_excel(
                 writer,
-                sheet_name="Recommendation Intelligence",
+                sheet_name=intelligence_sheet,
                 startrow=row,
                 index=False
             )
 
 
-            row += len(dataframe) + 3
+            row += len(dataframe) + 4
 
-
-
-        # -------------------------------
+                    # =================================
         # Alerts
-        # -------------------------------
+        # =================================
+
 
         print(
-            "Creating Alerts tab"
+            "ALERTS SHAPE:",
+            alerts.shape
+        )
+
+
+        print(
+            "ALERTS EMPTY:",
+            alerts.empty
+        )
+
+
+        print(
+            "Creating Alerts"
         )
 
 
@@ -352,9 +628,45 @@ def create_report(
 
 
 
+    # =================================
+    # Workbook verification
+    # =================================
+
     print(
-        f"\nReport created: {filename}"
+        "Report created:",
+        filename
     )
+
+
+    # Verify sheets actually exist
+
+    try:
+
+        from openpyxl import load_workbook
+
+
+        workbook = load_workbook(
+            filename,
+            read_only=True
+        )
+
+
+        print(
+            "FINAL WORKBOOK SHEETS:",
+            workbook.sheetnames
+        )
+
+
+        workbook.close()
+
+
+    except Exception as e:
+
+        print(
+            "Workbook verification failed:",
+            e
+        )
+
 
 
     return filename
