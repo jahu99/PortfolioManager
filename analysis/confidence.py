@@ -1,8 +1,9 @@
-import pandas as pd
-
-
 def calculate_confidence(
-    score,
+    investment_score,
+    technical_score,
+    quality_score,
+    growth_score,
+    risks=None,
     signal_performance=None,
     score_bucket_performance=None
 ):
@@ -10,14 +11,114 @@ def calculate_confidence(
     confidence = 50
     reasons = []
 
+    risks = risks or []
 
-    # -----------------------------
-    # Score confidence
-    # -----------------------------
 
-    if score_bucket_performance is not None and not score_bucket_performance.empty:
+    # --------------------------------
+    # Investment score strength
+    # --------------------------------
 
-        bucket = get_score_bucket(score)
+    if investment_score >= 80:
+
+        confidence += 15
+
+        reasons.append(
+            "High investment score"
+        )
+
+    elif investment_score >= 70:
+
+        confidence += 8
+
+        reasons.append(
+            "Good investment score"
+        )
+
+
+
+    # --------------------------------
+    # Technical strength
+    # --------------------------------
+
+    if technical_score >= 80:
+
+        confidence += 10
+
+        reasons.append(
+            "Strong technical setup"
+        )
+
+    elif technical_score >= 70:
+
+        confidence += 5
+
+
+
+    # --------------------------------
+    # Quality strength
+    # --------------------------------
+
+    if quality_score >= 80:
+
+        confidence += 10
+
+        reasons.append(
+            "High quality company"
+        )
+
+    elif quality_score >= 65:
+
+        confidence += 5
+
+
+
+    # --------------------------------
+    # Growth strength
+    # --------------------------------
+
+    if growth_score >= 80:
+
+        confidence += 10
+
+        reasons.append(
+            "Strong growth profile"
+        )
+
+    elif growth_score >= 65:
+
+        confidence += 5
+
+
+
+    # --------------------------------
+    # Risk adjustment
+    # --------------------------------
+
+    confidence -= (
+        len(risks) * 5
+    )
+
+
+    if risks:
+
+        reasons.append(
+            f"{len(risks)} risk factors identified"
+        )
+
+
+
+    # --------------------------------
+    # Historical performance
+    # --------------------------------
+
+    if (
+        score_bucket_performance is not None
+        and not score_bucket_performance.empty
+    ):
+
+        bucket = get_score_bucket(
+            investment_score
+        )
 
 
         match = score_bucket_performance[
@@ -35,43 +136,11 @@ def calculate_confidence(
 
             confidence += (
                 win_rate - 50
-            ) * 0.5
-
-
-            reasons.append(
-                f"Historical {bucket} win rate {win_rate}%"
-            )
-
-
-
-    # -----------------------------
-    # Signal confidence
-    # -----------------------------
-
-    if signal_performance is not None and not signal_performance.empty:
-
-
-        signal_match = signal_performance[
-            signal_performance["Signal"]
-            == "BUY"
-        ]
-
-
-        if not signal_match.empty:
-
-
-            win_rate = float(
-                signal_match.iloc[0]["Win_Rate_Percent"]
-            )
-
-
-            confidence += (
-                win_rate - 50
             ) * 0.25
 
 
             reasons.append(
-                f"BUY signal history {win_rate}%"
+                f"Historical {bucket} win rate {win_rate}%"
             )
 
 
@@ -86,19 +155,18 @@ def calculate_confidence(
 
 
     return {
-        "Confidence": round(
-            confidence,
-            1
-        ),
+
+        "Confidence":
+            round(confidence,1),
 
         "Confidence Reasons":
             reasons
+
     }
 
 
 
 def get_score_bucket(score):
-
 
     if score >= 90:
         return "90+"

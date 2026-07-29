@@ -181,9 +181,7 @@ def generate_recommendation_intelligence(
         )
 
 
-        print(
-            f"INTELLIGENCE ROWS CREATED: {len(intelligence)}"
-        )
+       
 
 
 

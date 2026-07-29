@@ -10,6 +10,7 @@ def generate_recommendation(
     investment_score,
     technical_score,
     quality_score,
+    growth_score,
     technical_reasons,
     quality_reasons,
     signal_performance=None,
@@ -119,7 +120,11 @@ def generate_recommendation(
 
         conviction += 1
 
+    if growth_score >= 80:
+        conviction += 2
 
+    elif growth_score >= 65:
+        conviction += 1
 
     if len(risks) == 0:
 
@@ -134,9 +139,11 @@ def generate_recommendation(
     historical_confidence = calculate_confidence(
 
         investment_score,
-
-        signal_performance,
-
+        technical_score,
+        quality_score,
+        growth_score,
+        risks,
+        signal_performance, 
         score_bucket_performance
 
     )

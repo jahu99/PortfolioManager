@@ -22,7 +22,8 @@ def create_report(
     score_bucket_performance=None,
     component_score_performance=None,
     signal_horizon_performance=None,
-    recommendation_intelligence=None
+    recommendation_intelligence=None,
+    portfolio_ai_review=None    
 ):
 
     print("STARTING REPORT CREATION")
@@ -54,7 +55,9 @@ def create_report(
         "component_score_performance": component_score_performance,
         "signal_horizon_performance": signal_horizon_performance,
 
-        "recommendation_intelligence": recommendation_intelligence
+        "recommendation_intelligence": recommendation_intelligence,
+        "portfolio_ai_review": portfolio_ai_review
+
 
     }
 
@@ -83,9 +86,9 @@ def create_report(
     score_bucket_performance = dataframes["score_bucket_performance"]
     component_score_performance = dataframes["component_score_performance"]
     signal_horizon_performance = dataframes["signal_horizon_performance"]
-
+    
     recommendation_intelligence = dataframes["recommendation_intelligence"]
-
+    portfolio_ai_review = dataframes["portfolio_ai_review"]
 
 
     print(
@@ -335,7 +338,7 @@ def create_report(
             index=False
         )
 
-                # =================================
+        # =================================
         # Main Data Tabs
         # =================================
 
@@ -459,7 +462,59 @@ def create_report(
             index=False
         )
 
+        print(
+            "Creating AI Portfolio Review"
+        )
 
+        print(
+            "AI REVIEW TYPE:",
+        type(portfolio_ai_review)
+        )
+
+        print(
+            "AI REVIEW VALUE:",
+            portfolio_ai_review
+        )
+        
+
+        print(
+            "Creating AI Portfolio Review"
+        )
+
+
+        if isinstance(
+            portfolio_ai_review,
+            list
+        ):
+
+            portfolio_ai_review = pd.DataFrame(
+                portfolio_ai_review
+            )
+
+
+        if not portfolio_ai_review.empty:
+
+            portfolio_ai_review.to_excel(
+                writer,
+                sheet_name="AI Portfolio Review",
+                index=False
+            )
+
+        else:
+
+            pd.DataFrame(
+                {
+                    "Status": [
+                        "No AI portfolio review available"
+                    ]
+                }
+
+            ).to_excel(
+                writer,
+                sheet_name="AI Portfolio Review",
+                index=False
+            )
+        
 
         # =================================
         # Recommendation Performance
@@ -598,7 +653,7 @@ def create_report(
 
             row += len(dataframe) + 4
 
-                    # =================================
+        # =================================
         # Alerts
         # =================================
 
@@ -670,3 +725,4 @@ def create_report(
 
 
     return filename
+

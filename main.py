@@ -2,6 +2,7 @@ import pandas as pd
 import traceback
 
 
+from analysis import recommendations
 from data.universe import get_sp500_universe
 from data.market_data import get_stock_data
 from data.fundamentals import get_fundamentals
@@ -10,7 +11,57 @@ from data.fundamentals import get_fundamentals
 from data.database import (
     initialise_database,
     save_recommendations,
-    save_recommendation_evaluations
+    save_recommendation_evaluations,
+    save_outcomes
+)
+
+
+from analysis.indicators import add_indicators
+from analysis.scorer import score_stock
+from analysis.quality import score_quality
+from analysis.signals import generate_signal
+from analysis.recommendations import generate_recommendation
+
+
+from analysis.rebalance import generate_rebalance_recommendations
+from analysis.portfolio_health import calculate_portfolio_health
+from analysis.decision_engine import generate_decisions
+from analysis.trade_sizing import generate_trade_plan
+
+
+from analysis.portfolio_recommendations import (
+    generate_portfolio_recommendations
+)
+
+
+from analysis.portfolio_analysis import analyse_portfolio
+from analysis.sector_analysis import analyse_sectors
+from analysis.portfolio_optimizer import optimise_portfolio
+from analysis.alerts import generate_alerts
+
+
+from portfolio.portfolio import get_portfolio
+from portfolio.targets import get_targets
+
+
+from reports.excel_report import create_report
+
+
+from analysis.outcome_tracker import calculate_evaluations
+
+
+
+from analysis import recommendations
+from data.universe import get_sp500_universe
+from data.market_data import get_stock_data
+from data.fundamentals import get_fundamentals
+
+
+from data.database import (
+    initialise_database,
+    save_recommendations,
+    save_recommendation_evaluations,
+    save_outcomes
 )
 
 
@@ -50,6 +101,7 @@ from analysis.outcome_tracker import calculate_evaluations
 
 from data.database_queries import (
     get_open_recommendations,
+    get_recommendation_history,
     get_performance_summary,
     get_signal_performance,
     get_horizon_performance,
@@ -66,6 +118,25 @@ from analysis.recommendation_intelligence import (
     generate_recommendation_intelligence
 )
 
+from analysis.factor_performance import (
+    calculate_factor_performance
+)
+
+from analysis.ai_recommendation import (
+    generate_ai_recommendation
+)
+
+from analysis.ai_decision_engine import (
+    generate_ai_decision
+)
+
+from analysis.ai_analyst import generate_ai_analysis
+
+from analysis.portfolio_ai import (
+    generate_portfolio_review
+)
+
+from analysis.portfolio_decision_engine import generate_portfolio_decisions
 
 def main():
 
@@ -79,66 +150,66 @@ def main():
     initialise_database()
 
 
+    # ---------------------------------
+    # Update recommendations
+    # ---------------------------------
+
+    print(
+        "Updating recommendation history"
+    )
+
+
 
     # ---------------------------------
-    # Update recommendation evaluations
+    # Evaluate previous recommendations
     # ---------------------------------
 
-    try:
+    print(
+        "Evaluating previous recommendations"
+    )
 
-        previous_recommendations = (
-            get_open_recommendations()
+    recommendations_to_evaluate = get_open_recommendations()
+
+    if (
+        recommendations_to_evaluate is not None
+        and not recommendations_to_evaluate.empty
+    ):
+
+        evaluations = calculate_evaluations(
+            recommendations_to_evaluate
         )
 
-
         if (
-            previous_recommendations is not None
-            and not previous_recommendations.empty
+            evaluations is not None
+            and not evaluations.empty
         ):
 
             print(
-                f"Checking {len(previous_recommendations)} previous recommendations"
+                f"Evaluation records created: {len(evaluations)}"
             )
 
-
-            evaluations = calculate_evaluations(
-                previous_recommendations
+            save_recommendation_evaluations(
+                evaluations
             )
 
+            save_outcomes(
+                evaluations
+            )
 
-            if (
-                evaluations is not None
-                and not evaluations.empty
-            ):
-
-                save_recommendation_evaluations(
-                    evaluations
-                )
-
-
-                print(
-                    f"Saved {len(evaluations)} recommendation evaluations"
-                )
-
-
-            else:
-
-                print(
-                    "No evaluation milestones reached"
-                )
-
+            print(
+                f"Saved {len(evaluations)} outcomes"
+            )
 
         else:
 
             print(
-                "No previous recommendations to evaluate"
+                "No evaluation milestones reached"
             )
 
-
-    except Exception as e:
+    else:
 
         print(
-            f"Evaluation tracking skipped: {e}"
+            "No previous recommendations requiring evaluation"
         )
 
     # ---------------------------------
@@ -319,6 +390,7 @@ def main():
                 investment_score,
                 technical_score,
                 quality_score,
+                growth_score,
                 technical_reasons,
                 quality_reasons,
                 signal_performance,
@@ -333,35 +405,146 @@ def main():
                 f"ADDING {ticker}: Investment {investment_score}, Quality {quality_score}"
             )
 
+            ai_decision = generate_ai_decision(
+                {
+                    "Investment Score": investment_score,
+                    "Technical Score": technical_score,
+                    "Quality Score": quality_score,
+                    "Growth Score": growth_score,
+                    "Confidence Score": recommendation["Confidence Score"]
+                }
+            )
+
+            print(
+                f"{ticker} AI DECISION: {ai_decision}"
+            )
+
+            ai_analysis = generate_ai_analysis(
+                    ticker,
+                    investment_score,
+                    technical_score,
+                    quality_score,
+                    growth_score,
+                    ai_decision,
+                    recommendation["Reasons"],
+                    recommendation["Risks"]
+                )
+
+            ai_recommendation = generate_ai_recommendation(
+                {
+                    "Ticker": ticker,
+                    "Signal": signal,
+                    "Investment Score": investment_score,
+                    "Technical Score": technical_score,
+                    "Quality Score": quality_score,
+                    "Growth Score": growth_score,
+                    "Confidence Score": recommendation["Confidence Score"],
+                    "RSI": float(latest["RSI"]),
+                    "Revenue Growth": fundamentals.get("Revenue Growth", 0),
+                    "Return on Equity": fundamentals.get("Return on Equity", 0),
+                    "Debt to Equity": fundamentals.get("Debt to Equity", 0),
+                    "Sector": fundamentals.get("Sector", "Unknown")
+                }
+            )
+
             print("About to append")
 
             results.append(
                 {
                     "Ticker": ticker,
                     "Signal": signal,
+
+                    # Core Scores
                     "Score": technical_score,
                     "Technical Score": technical_score,
                     "Quality Score": quality_score,
                     "Investment Score": investment_score,
+                    "Growth Score": growth_score,
+
+                    # Confidence Engine
                     "Confidence": recommendation["Confidence"],
                     "Confidence Score": recommendation.get("Confidence Score", 0),
                     "Confidence Reasons": recommendation.get("Confidence Reasons", []),
+
+                    # Price / Technical Data
                     "Price": round(float(latest["Close"]), 2),
                     "RSI": round(float(latest["RSI"]), 1),
                     "SMA50": round(float(latest["SMA50"]), 2),
                     "SMA200": round(float(latest["SMA200"]), 2),
                     "3M Return %": round(float(latest["Return_3m"]) * 100, 2),
+
+                    # Fundamentals
                     "Revenue Growth": fundamentals.get("Revenue Growth", 0),
                     "Profit Margin": fundamentals.get("Profit Margin", 0),
                     "Return on Equity": fundamentals.get("Return on Equity", 0),
                     "Debt to Equity": fundamentals.get("Debt to Equity", 0),
                     "Sector": fundamentals.get("Sector", "Unknown"),
                     "Industry": fundamentals.get("Industry", "Unknown"),
+
+                    # Recommendation Engine
                     "Recommendation Reasons": recommendation["Reasons"],
                     "Recommendation Risks": recommendation["Risks"],
-                    "Growth Score": growth_score,
+
+                    # Growth Engine
                     "Growth Reasons": growth_reasons,
-                    "Growth Risks": growth_risks
+                    "Growth Risks": growth_risks,
+
+
+                    # ---------------------------------
+                    # AI Analyst Layer
+                    # ---------------------------------
+
+                    "AI Summary":
+                        ai_recommendation["Summary"],
+
+                    "AI Investment Thesis":
+                        ai_recommendation["Investment Thesis"],
+
+                    "AI Strengths":
+                        ai_recommendation["Strengths"],
+
+                    "AI Risks":
+                        ai_recommendation["Risks"],
+
+                    "AI Catalysts":
+                        ai_recommendation["Catalysts"],
+
+                    "AI Holding Period":
+                        ai_recommendation["Holding Period"],
+
+                    "AI Investor Type":
+                        ai_recommendation["Investor Type"],
+
+                    "AI Probability":
+                        ai_recommendation["Probability"],
+
+
+                    # ---------------------------------
+                    # AI Decision Layer
+                    # ---------------------------------
+
+                    "AI Decision":
+                        ai_decision["Decision"],
+
+                    "AI Conviction":
+                        ai_decision["Conviction"],
+
+                    "AI Conviction Score":
+                        ai_decision["Conviction Score"],
+
+                    "AI Decision Thesis":
+                        ai_decision["Investment Thesis"],
+
+                    "AI Decision Risks":
+                        "; ".join(ai_decision["Risks"])
+                        if ai_decision["Risks"]
+                        else "No material risks identified",
+
+                    "AI Action":
+                        ai_decision["Recommended Action"],
+
+                    "AI Review Triggers":
+                        ai_decision["Review Triggers"]
                 }
             )
 
@@ -434,6 +617,9 @@ def main():
     portfolio_health = None
     decisions = None
     trade_plan = None
+    portfolio_ai_review = None
+    holdings = []
+    portfolio_decisions = None
 
 
 
@@ -490,6 +676,18 @@ def main():
             sector_summary
         )
 
+        portfolio_decisions = generate_portfolio_decisions(
+            holdings,
+            pd.DataFrame(results)
+        )
+
+        print(
+            "\nPORTFOLIO DECISIONS"
+        )
+
+        for decision in portfolio_decisions[:10]:
+            print(decision)
+
 
 
         decisions = generate_decisions(
@@ -543,8 +741,23 @@ def main():
             f"Portfolio analysis skipped: {e}"
         )
 
+    # ---------------------------------
+    # AI Portfolio Intelligence
+    # ---------------------------------
+    try:
+        portfolio_ai_review = generate_portfolio_review(
+            holdings,
+            results
+        )
 
+        print("\nAI PORTFOLIO REVIEW")
 
+        for review in portfolio_ai_review:
+            print(review)
+    except Exception as e:
+        print(
+            f"AI Portfolio Intelligence skipped: {e}"
+        )
     # ---------------------------------
     # Alerts
     # ---------------------------------
@@ -577,7 +790,13 @@ def main():
             f"Recommendation Intelligence skipped: {e}"
         )
 
+    recommendation_history = get_recommendation_history()
     
+    factor_performance = (
+        calculate_factor_performance(
+            recommendation_history
+        )
+    )
 
     
 
@@ -603,8 +822,20 @@ def main():
     score_bucket_performance,
     component_score_performance,
     signal_horizon_performance,
-    recommendation_intelligence
+    recommendation_intelligence,
+    portfolio_ai_review
 )
+
+
+
+    print(
+        "\nReport complete"
+    )
+
+
+
+
+
 
 
 
