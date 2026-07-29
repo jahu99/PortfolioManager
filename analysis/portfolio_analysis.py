@@ -309,4 +309,61 @@ def analyse_portfolio(
 
 
 
+    
+
+    # ---------------------------------
+    # Sector allocation analysis
+    # ---------------------------------
+
+    sector_totals = {}
+
+    for item in results:
+
+        sector = item.get(
+            "Sector",
+            "Unknown"
+        )
+
+        sector_totals[sector] = (
+            sector_totals.get(
+                sector,
+                0
+            )
+            +
+            item["Current Value"]
+        )
+
+
+    for item in results:
+
+        sector = item.get(
+            "Sector",
+            "Unknown"
+        )
+
+        sector_allocation = (
+            sector_totals[sector]
+            /
+            total_value
+        ) * 100
+
+
+        item["Sector Allocation %"] = round(
+            sector_allocation,
+            2
+        )
+
+
+        if sector_allocation > 40:
+
+            item["Sector Risk"] = "High"
+
+        elif sector_allocation > 25:
+
+            item["Sector Risk"] = "Medium"
+
+        else:
+
+            item["Sector Risk"] = "Low"
+
     return pd.DataFrame(results)

@@ -138,9 +138,16 @@ from analysis.portfolio_ai import (
 
 from analysis.portfolio_decision_engine import generate_portfolio_decisions
 
+from analysis.portfolio_manager import generate_portfolio_manager_review
+
+from agents.orchestrator import run_ai_agents
+
 def main():
 
     print("MAIN STARTED")
+
+    AI_ANALYSIS_LIMIT = 15
+    ai_analysis_count = 0
 
 
     # ---------------------------------
@@ -272,12 +279,31 @@ def main():
             f"Learning data unavailable: {e}"
         )
 
+
+
     # ---------------------------------
     # Load universe
     # ---------------------------------
 
     universe = get_sp500_universe()
 
+
+    # ---------------------------------
+    # Load portfolio holdings for AI filter
+    # ---------------------------------
+
+    holdings = get_portfolio()
+
+    portfolio_tickers = holdings["Ticker"].tolist()
+
+    print(
+        f"Portfolio holdings loaded: {portfolio_tickers}"
+    )
+
+
+    print(
+        f"Scanning {len(universe)} stocks"
+    )
 
     print(
         f"Scanning {len(universe)} stocks"
@@ -419,16 +445,27 @@ def main():
                 f"{ticker} AI DECISION: {ai_decision}"
             )
 
-            ai_analysis = generate_ai_analysis(
-                    ticker,
-                    investment_score,
-                    technical_score,
-                    quality_score,
-                    growth_score,
-                    ai_decision,
-                    recommendation["Reasons"],
-                    recommendation["Risks"]
-                )
+            if (
+                ticker in portfolio_tickers
+                and signal in ["SELL", "STRONG SELL"]
+                or investment_score >= 85
+                or signal == "STRONG BUY"
+            ) and ai_analysis_count < AI_ANALYSIS_LIMIT:
+
+                ai_analysis = generate_ai_analysis(
+                        ticker,
+                        investment_score,
+                        technical_score,
+                        quality_score,
+                        growth_score,
+                        ai_decision,
+                        recommendation["Reasons"],
+                        recommendation["Risks"]
+                    )
+                ai_analysis_count += 1
+            else:
+
+                    ai_analysis = None
 
             ai_recommendation = generate_ai_recommendation(
                 {
@@ -618,24 +655,18 @@ def main():
     decisions = None
     trade_plan = None
     portfolio_ai_review = None
-    holdings = []
     portfolio_decisions = None
+    portfolio_manager_review = None
 
 
 
     try:
 
-
-        holdings = get_portfolio()
-
-
-
+        
         portfolio_summary = analyse_portfolio(
             holdings,
             results
         )
-
-
 
         portfolio_actions = generate_portfolio_recommendations(
             holdings,
@@ -676,6 +707,21 @@ def main():
             sector_summary
         )
 
+        try:
+            ai_reviews = run_ai_agents(
+                results,
+                portfolio_summary,
+                sector_summary,
+                portfolio_health
+            )
+        except Exception as e:
+
+            print(
+                f"AI agents skipped: {e}"
+            )
+
+        ai_reviews = []
+
         portfolio_decisions = generate_portfolio_decisions(
             holdings,
             pd.DataFrame(results)
@@ -702,6 +748,14 @@ def main():
             portfolio_summary,
             portfolio_optimisation,
             results
+        )
+
+        portfolio_manager_review = generate_portfolio_manager_review(
+            portfolio_summary,
+            sector_summary,
+            decisions,
+            trade_plan,
+            portfolio_health
         )
 
 
@@ -732,6 +786,13 @@ def main():
             trade_plan
         )
 
+        print(
+            "\nAI PORTFOLIO MANAGER REVIEW"
+        )
+
+        print(
+            portfolio_manager_review
+        )
 
 
     except Exception as e:
@@ -741,12 +802,15 @@ def main():
             f"Portfolio analysis skipped: {e}"
         )
 
+    
+
     # ---------------------------------
     # AI Portfolio Intelligence
     # ---------------------------------
     try:
+        
         portfolio_ai_review = generate_portfolio_review(
-            holdings,
+            portfolio_summary,
             results
         )
 
@@ -798,7 +862,44 @@ def main():
         )
     )
 
-    
+    print("\n===== REPORT INPUT CHECK =====")
+
+    print("Results:", len(results))
+
+    print("Portfolio Summary:",
+        type(portfolio_summary),
+        getattr(portfolio_summary, "shape", None))
+
+    print("Sector Summary:",
+        type(sector_summary),
+        getattr(sector_summary, "shape", None))
+
+    print("Portfolio Actions:",
+        type(portfolio_actions),
+        getattr(portfolio_actions, "shape", None))
+
+    print("Portfolio Optimisation:",
+        type(portfolio_optimisation),
+        getattr(portfolio_optimisation, "shape", None))
+
+    print("Rebalance:",
+        type(rebalance_recommendations),
+        getattr(rebalance_recommendations, "shape", None))
+
+    print("Portfolio Health:",
+        portfolio_health)
+
+    print("Decisions:",
+        type(decisions))
+
+    print("Trade Plan:",
+        type(trade_plan))
+
+    print("AI Review:",
+        type(portfolio_ai_review))
+
+    print("Manager Review:",
+        type(portfolio_manager_review))
 
     # ---------------------------------
     # Excel report
@@ -823,7 +924,8 @@ def main():
     component_score_performance,
     signal_horizon_performance,
     recommendation_intelligence,
-    portfolio_ai_review
+    portfolio_ai_review,
+    portfolio_manager_review
 )
 
 

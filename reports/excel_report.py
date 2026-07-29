@@ -23,7 +23,8 @@ def create_report(
     component_score_performance=None,
     signal_horizon_performance=None,
     recommendation_intelligence=None,
-    portfolio_ai_review=None    
+    portfolio_ai_review=None,
+    portfolio_manager_review=None   
 ):
 
     print("STARTING REPORT CREATION")
@@ -56,7 +57,8 @@ def create_report(
         "signal_horizon_performance": signal_horizon_performance,
 
         "recommendation_intelligence": recommendation_intelligence,
-        "portfolio_ai_review": portfolio_ai_review
+        "portfolio_ai_review": portfolio_ai_review,
+        "portfolio_manager_review": portfolio_manager_review
 
 
     }
@@ -514,7 +516,43 @@ def create_report(
                 sheet_name="AI Portfolio Review",
                 index=False
             )
-        
+
+        print(
+            "Creating AI Portfolio Manager"
+        )
+
+
+        if isinstance(
+            portfolio_manager_review,
+            dict
+        ):
+
+            pd.DataFrame(
+                [
+                    portfolio_manager_review
+                ]
+
+            ).to_excel(
+                writer,
+                sheet_name="AI Portfolio Manager",
+                index=False
+            )
+
+        else:
+
+            pd.DataFrame(
+                {
+                    "Status": [
+                        "No portfolio manager review available"
+                    ]
+                }
+
+            ).to_excel(
+                writer,
+                sheet_name="AI Portfolio Manager",
+                index=False
+            )
+            
 
         # =================================
         # Recommendation Performance

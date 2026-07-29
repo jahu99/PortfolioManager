@@ -1,94 +1,117 @@
 import pandas as pd
 
 
-
 def calculate_portfolio_health(
     portfolio_summary,
     sector_summary
 ):
 
-    if (
-        portfolio_summary is None
-        or portfolio_summary.empty
-    ):
-        return {
-
-            "Health Score": 0,
-
-            "Rating": "Unknown",
-
-            "Strengths": [],
-
-            "Risks": []
-
-        }
-
-
-
-    score = 100
+    health_score = 100
 
     strengths = []
-
     risks = []
 
 
+    # ---------------------------------
+    # Validate inputs
+    # ---------------------------------
+
+    if portfolio_summary is None or portfolio_summary.empty:
+
+        return {
+            "Health Score": 0,
+            "Rating": "Unknown",
+            "Strengths": [],
+            "Risks": [
+                "Portfolio data unavailable"
+            ]
+        }
+
+
+    if sector_summary is None or sector_summary.empty:
+
+        return {
+            "Health Score": 50,
+            "Rating": "Needs Attention",
+            "Strengths": [],
+            "Risks": [
+                "Sector analysis unavailable"
+            ]
+        }
+
 
     # ---------------------------------
-    # Quality
+    # Portfolio size / diversification
     # ---------------------------------
 
-    if "Quality Score" in portfolio_summary.columns:
+    holding_count = len(
+        portfolio_summary
+    )
 
-        avg_quality = (
-            portfolio_summary["Quality Score"]
-            .mean()
+
+    if holding_count >= 10:
+
+        health_score += 5
+
+        strengths.append(
+            "Good number of portfolio holdings"
         )
 
 
-        if avg_quality >= 85:
+    elif holding_count <= 5:
 
-            strengths.append(
-                "High quality holdings"
-            )
+        health_score -= 5
 
-
-        elif avg_quality < 70:
-
-            score -= 10
-
-            risks.append(
-                "Portfolio quality below target"
-            )
-
-
-
-    # ---------------------------------
-    # Momentum
-    # ---------------------------------
-
-    if "Momentum Score" in portfolio_summary.columns:
-
-        avg_momentum = (
-            portfolio_summary["Momentum Score"]
-            .mean()
+        risks.append(
+            "Portfolio has limited number of holdings"
         )
 
 
-        if avg_momentum >= 80:
+    # ---------------------------------
+    # Single stock concentration
+    # ---------------------------------
 
-            strengths.append(
-                "Strong market momentum"
+    if "Allocation %" in portfolio_summary.columns:
+
+
+        for _, holding in portfolio_summary.iterrows():
+
+            ticker = holding.get(
+                "Ticker",
+                "Unknown"
+            )
+
+            allocation = float(
+                holding.get(
+                    "Allocation %",
+                    0
+                )
             )
 
 
-        elif avg_momentum < 60:
+            if allocation >= 40:
 
-            score -= 10
+                health_score -= 15
 
-            risks.append(
-                "Weak momentum across holdings"
-            )
+                risks.append(
+                    f"{ticker} represents excessive portfolio concentration"
+                )
 
+
+            elif allocation >= 20:
+
+                health_score -= 5
+
+                risks.append(
+                    f"{ticker} has high portfolio weighting"
+                )
+
+
+            elif allocation <= 5:
+
+                risks.append(
+                    f"{ticker} position may have limited impact"
+                )
 
 
     # ---------------------------------
@@ -96,65 +119,142 @@ def calculate_portfolio_health(
     # ---------------------------------
 
     if (
-        sector_summary is not None
-        and not sector_summary.empty
+        "Sector" in sector_summary.columns
+        and
+        "Allocation %" in sector_summary.columns
     ):
 
 
-        for _, row in sector_summary.iterrows():
+        for _, sector in sector_summary.iterrows():
 
-            allocation = row.get(
-                "Current %",
-                0
-            )
-
-
-            sector = row.get(
+            sector_name = sector.get(
                 "Sector",
                 "Unknown"
             )
 
+            sector_allocation = float(
+                sector.get(
+                    "Allocation %",
+                    0
+                )
+            )
 
-            if allocation > 40:
 
-                score -= 15
+            if sector_allocation >= 80:
+
+                health_score -= 15
 
                 risks.append(
-                    f"{sector} concentration risk"
+                    f"Severe {sector_name} sector concentration risk"
                 )
 
 
-            elif allocation > 25:
+            elif sector_allocation >= 60:
 
-                score -= 5
+                health_score -= 10
 
                 risks.append(
-                    f"{sector} overweight"
+                    f"{sector_name} sector concentration risk"
                 )
 
 
+            elif sector_allocation <= 20:
+
+                strengths.append(
+                    f"{sector_name} sector exposure controlled"
+                )
+
 
     # ---------------------------------
-    # Score limits
+    # Portfolio quality
     # ---------------------------------
 
-    if score < 0:
-        score = 0
+    if "Investment Score" in portfolio_summary.columns:
 
 
-    if score >= 85:
+        average_score = portfolio_summary[
+            "Investment Score"
+        ].mean()
+
+
+        if average_score >= 75:
+
+            health_score += 10
+
+            strengths.append(
+                "Strong average investment quality"
+            )
+
+
+        elif average_score < 60:
+
+            health_score -= 10
+
+            risks.append(
+                "Portfolio quality below target"
+            )
+
+
+    # ---------------------------------
+    # Quality score
+    # ---------------------------------
+
+    if "Quality Score" in portfolio_summary.columns:
+
+
+        average_quality = portfolio_summary[
+            "Quality Score"
+        ].mean()
+
+
+        if average_quality >= 70:
+
+            health_score += 5
+
+            strengths.append(
+                "Strong business quality"
+            )
+
+
+        elif average_quality < 50:
+
+            health_score -= 5
+
+            risks.append(
+                "Average business quality below preferred level"
+            )
+
+
+    # ---------------------------------
+    # Clamp score
+    # ---------------------------------
+
+    health_score = max(
+        0,
+        min(
+            100,
+            round(health_score)
+        )
+    )
+
+
+    # ---------------------------------
+    # Rating
+    # ---------------------------------
+
+    if health_score >= 80:
 
         rating = "Excellent"
 
 
-    elif score >= 70:
+    elif health_score >= 65:
 
-        rating = "Good"
+        rating = "Healthy"
 
 
-    elif score >= 50:
+    elif health_score >= 45:
 
-        rating = "Needs Improvement"
+        rating = "Needs Attention"
 
 
     else:
@@ -162,15 +262,17 @@ def calculate_portfolio_health(
         rating = "Poor"
 
 
-
     return {
 
-        "Health Score": score,
+        "Health Score": health_score,
 
         "Rating": rating,
 
-        "Strengths": strengths,
+        "Strengths": list(
+            dict.fromkeys(strengths)
+        ),
 
-        "Risks": risks
-
+        "Risks": list(
+            dict.fromkeys(risks)
+        )
     }

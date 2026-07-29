@@ -30,17 +30,33 @@ def generate_holding_review(
     )
 
 
-    # -----------------------------
-    # Decision logic
-    # -----------------------------
+    allocation = holding.get(
+        "Allocation %",
+        0
+    )
+
+    sector_allocation = holding.get(
+        "Sector Allocation %",
+        0
+    )
+
+    sector_risk = holding.get(
+        "Sector Risk",
+        "Low"
+    )
+
+
+    # ---------------------------------
+    # Investment quality assessment
+    # ---------------------------------
 
     if investment_score >= 80:
-
-        decision = "HOLD"
 
         reasons.append(
             "High investment score"
         )
+
+        conviction = "High"
 
 
     elif investment_score >= 60:
@@ -64,10 +80,13 @@ def generate_holding_review(
             "Consider reducing position"
         )
 
+        conviction = "Low"
 
-    # -----------------------------
-    # Quality assessment
-    # -----------------------------
+
+
+    # ---------------------------------
+    # Business quality
+    # ---------------------------------
 
     if quality_score >= 70:
 
@@ -75,16 +94,21 @@ def generate_holding_review(
             "Strong business quality"
         )
 
+
     elif quality_score < 50:
 
         risks.append(
             "Quality below preferred level"
         )
 
+        if decision == "HOLD":
+            decision = "REVIEW"
 
-    # -----------------------------
-    # Technical assessment
-    # -----------------------------
+
+
+    # ---------------------------------
+    # Technical signal
+    # ---------------------------------
 
     if signal in [
         "BUY",
@@ -95,6 +119,7 @@ def generate_holding_review(
             "Positive technical signal"
         )
 
+
     elif signal in [
         "SELL",
         "STRONG SELL"
@@ -104,10 +129,118 @@ def generate_holding_review(
             "Negative technical signal"
         )
 
+        decision = "REDUCE"
 
-    # -----------------------------
+
+
+
+    # ---------------------------------
+    # Portfolio concentration
+    # ---------------------------------
+
+    concentration_risk = 0
+
+
+    # Single holding concentration
+
+    if allocation >= 50:
+
+        risks.append(
+            "Extreme single stock concentration"
+        )
+
+        actions.append(
+            "Consider reducing position size"
+        )
+
+        concentration_risk += 30
+
+
+    elif allocation >= 35:
+
+        risks.append(
+            "High single stock concentration"
+        )
+
+        actions.append(
+            "Monitor position sizing"
+        )
+
+        concentration_risk += 15
+
+
+    elif allocation >= 20:
+
+        risks.append(
+            "Large portfolio position"
+        )
+
+        actions.append(
+            "Avoid increasing position"
+        )
+
+        concentration_risk += 5
+
+
+
+    # Sector concentration
+
+    if sector_allocation >= 70:
+
+        risks.append(
+            "Extreme sector concentration risk"
+        )
+
+        actions.append(
+            "Increase diversification outside sector"
+        )
+
+        concentration_risk += 20
+
+
+    elif sector_allocation >= 40:
+
+        risks.append(
+            "Sector concentration risk"
+        )
+
+        concentration_risk += 10
+
+
+
+
+    # ---------------------------------
+    # Final decision adjustment
+    # ---------------------------------
+
+    # Strong companies get REVIEW not REDUCE
+
+    if concentration_risk >= 30:
+
+        if investment_score < 70 or quality_score < 50:
+
+            decision = "REDUCE"
+
+            conviction = "High"
+
+        else:
+
+            decision = "REVIEW"
+
+            conviction = "Medium"
+
+
+
+    # Clean up duplicates
+
+    risks = list(dict.fromkeys(risks))
+    reasons = list(dict.fromkeys(reasons))
+    actions = list(dict.fromkeys(actions))
+
+
+    # ---------------------------------
     # Review triggers
-    # -----------------------------
+    # ---------------------------------
 
     review_triggers.extend(
         [
@@ -137,8 +270,19 @@ def generate_holding_review(
             actions,
 
         "AI Holding Review Triggers":
-            review_triggers
+            review_triggers,
+
+        "Allocation %":
+            allocation,
+
+        "Sector Allocation %":
+            sector_allocation,
+
+        "Sector Risk":
+            sector_risk
     }
+
+
 
 
 
@@ -155,8 +299,6 @@ def generate_portfolio_review(
         for r in results
     }
 
-
-    # Convert DataFrame to records if required
 
     if hasattr(holdings, "to_dict"):
 

@@ -1,3 +1,6 @@
+from analysis.ai_engine import generate_ai_response
+
+
 def generate_ai_analysis(
     ticker,
     investment_score,
@@ -6,7 +9,8 @@ def generate_ai_analysis(
     growth_score,
     ai_decision,
     reasons=None,
-    risks=None
+    risks=None,
+    intelligence=None
 ):
 
     reasons = reasons or []
@@ -23,19 +27,25 @@ def generate_ai_analysis(
     # -----------------------------
 
     if technical_score >= 75:
+
         thesis.append(
             "Strong technical trend with positive momentum"
         )
 
+
     if quality_score >= 70:
+
         thesis.append(
             "Strong business quality characteristics"
         )
 
+
     if growth_score >= 70:
+
         thesis.append(
             "Strong growth profile"
         )
+
 
 
     # -----------------------------
@@ -43,29 +53,36 @@ def generate_ai_analysis(
     # -----------------------------
 
     if technical_score < 60:
+
         bear_case.append(
             "Technical momentum weakening"
         )
 
+
     if quality_score < 50:
+
         bear_case.append(
             "Business quality below preferred threshold"
         )
 
+
     if growth_score < 50:
+
         bear_case.append(
             "Growth profile requires monitoring"
         )
 
 
     for risk in risks:
+
         if risk not in bear_case:
+
             bear_case.append(risk)
 
 
 
     # -----------------------------
-    # Investor action
+    # Decision
     # -----------------------------
 
     decision = ai_decision.get(
@@ -80,17 +97,20 @@ def generate_ai_analysis(
             "Consider initiating or maintaining position"
         )
 
+
     elif decision == "WATCH":
 
         actions.append(
             "Monitor for improved entry conditions"
         )
 
+
     else:
 
         actions.append(
             "Avoid new position until fundamentals improve"
         )
+
 
 
     # -----------------------------
@@ -106,29 +126,112 @@ def generate_ai_analysis(
     )
 
 
+
     # -----------------------------
-    # Create analyst summary
+    # Historical intelligence
     # -----------------------------
 
-    summary = f"""
-{ticker} is currently rated {decision}.
+    historical_context = ""
 
-Investment View:
+    if intelligence:
 
-The decision is supported by:
-{', '.join(thesis) if thesis else 'Limited positive factors identified.'}
+        historical_context = f"""
 
-Key Risks:
+Historical recommendation intelligence:
 
-{', '.join(bear_case) if bear_case else 'No significant risks identified.'}
+Signal performance:
+{intelligence.get("Historical Signal Evidence","Unavailable")}
 
-Recommended Action:
+Score bucket performance:
+{intelligence.get("Score Bucket Evidence","Unavailable")}
 
-{', '.join(actions)}
+Component performance:
+{intelligence.get("Component Evidence","Unavailable")}
 
-Review If:
+Use this historical evidence when assessing confidence.
+"""
 
-{', '.join(triggers)}
+
+
+    # -----------------------------
+    # LLM prompt
+    # -----------------------------
+
+    llm_prompt = f"""
+
+You are an equity research analyst.
+
+Analyse this investment opportunity.
+
+Ticker:
+{ticker}
+
+Current scores:
+
+Investment Score:
+{investment_score}
+
+Technical Score:
+{technical_score}
+
+Quality Score:
+{quality_score}
+
+Growth Score:
+{growth_score}
+
+Current AI Decision:
+{decision}
+
+
+Bull factors:
+
+{thesis}
+
+
+Risks:
+
+{bear_case}
+
+
+{historical_context}
+
+
+Provide:
+
+1. Investment thesis
+2. Key risks
+3. Investor action
+4. Review triggers
+5. Confidence assessment
+
+Keep the response concise and investor focused.
+
+"""
+
+
+    llm_response = generate_ai_response(
+        llm_prompt
+    )
+
+
+    # fallback if Llama unavailable
+
+    if not llm_response:
+
+        llm_response = f"""
+
+{ticker} is rated {decision}.
+
+Investment thesis:
+{", ".join(thesis)}
+
+Risks:
+{", ".join(bear_case)}
+
+Action:
+{", ".join(actions)}
+
 """
 
 
@@ -136,7 +239,7 @@ Review If:
 
         "Ticker": ticker,
 
-        "Investment View": summary,
+        "Investment View": llm_response,
 
         "Bull Case": thesis,
 
@@ -144,6 +247,8 @@ Review If:
 
         "Investor Action": actions,
 
-        "Review Triggers": triggers
+        "Review Triggers": triggers,
+
+        "LLM Analysis": llm_response
 
     }
