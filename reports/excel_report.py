@@ -24,7 +24,10 @@ def create_report(
     signal_horizon_performance=None,
     recommendation_intelligence=None,
     portfolio_ai_review=None,
-    portfolio_manager_review=None   
+    portfolio_manager_review=None, 
+    growth_plan=None,
+    final_portfolio_decisions=None,
+    recommendation_learning=None
 ):
 
     print("STARTING REPORT CREATION")
@@ -58,7 +61,9 @@ def create_report(
 
         "recommendation_intelligence": recommendation_intelligence,
         "portfolio_ai_review": portfolio_ai_review,
-        "portfolio_manager_review": portfolio_manager_review
+        "portfolio_manager_review": portfolio_manager_review,
+        "final_portfolio_decisions": final_portfolio_decisions,
+        "recommendation_learning": recommendation_learning
 
 
     }
@@ -81,6 +86,7 @@ def create_report(
     trade_plan = dataframes["trade_plan"]
 
     performance_summary = dataframes["performance_summary"]
+    final_portfolio_decisions = dataframes["final_portfolio_decisions"]
 
     signal_performance = dataframes["signal_performance"]
     horizon_performance = dataframes["horizon_performance"]
@@ -210,22 +216,22 @@ def create_report(
         ]
 
 
-        if isinstance(
-            portfolio_health,
-            dict
-        ):
+        # -------------------------------
+        # Portfolio Health
+        # -------------------------------
 
-            summary_rows.append(
+        if isinstance(portfolio_health, dict):
+
+            summary_rows.extend([
+
                 [
                     "Health Score",
                     portfolio_health.get(
                         "Health Score",
                         ""
                     )
-                ]
-            )
+                ],
 
-            summary_rows.append(
                 [
                     "Rating",
                     portfolio_health.get(
@@ -233,36 +239,139 @@ def create_report(
                         ""
                     )
                 ]
-            )
+
+            ])
+
+
+        # -------------------------------
+        # Portfolio Manager Intelligence
+        # -------------------------------
+
+        if isinstance(
+            portfolio_manager_review,
+            dict
+        ):
+
+            summary_rows.extend([
+
+                [],
+
+                [
+                    "AI PORTFOLIO MANAGER VIEW"
+                ],
+
+                [
+                    "Market View",
+                    portfolio_manager_review.get(
+                        "Market View",
+                        ""
+                    )
+                ],
+
+                [
+                    "Portfolio Status",
+                    portfolio_manager_review.get(
+                        "Portfolio Status",
+                        ""
+                    )
+                ],
+
+                [
+                    "AI Summary",
+                    portfolio_manager_review.get(
+                        "AI Summary",
+                        ""
+                    )
+                ]
+
+            ])
+
+
+            summary_rows.append([])
+
 
             summary_rows.append(
                 [
-                    "Risks",
-                    portfolio_health.get(
-                        "Risks",
-                        ""
-                    )
+                    "KEY STRENGTHS"
                 ]
             )
 
 
-        summary_rows.append([])
+            for item in portfolio_manager_review.get(
+                "Key Strengths",
+                []
+            ):
+
+                summary_rows.append(
+                    [
+                        item
+                    ]
+                )
 
 
-        summary_rows.append(
+            summary_rows.append([])
+
+
+            summary_rows.append(
+                [
+                    "KEY RISKS"
+                ]
+            )
+
+
+            for item in portfolio_manager_review.get(
+                "Key Risks",
+                []
+            ):
+
+                summary_rows.append(
+                    [
+                        item
+                    ]
+                )
+
+
+            summary_rows.append([])
+
+
+            summary_rows.append(
+                [
+                    "PRIORITY ACTIONS"
+                ]
+            )
+
+
+            for item in portfolio_manager_review.get(
+                "Priority Actions",
+                []
+            ):
+
+                summary_rows.append(
+                    [
+                        item
+                    ]
+                )
+
+
+        # -------------------------------
+        # Top Opportunities
+        # -------------------------------
+
+        summary_rows.extend([
+
+            [],
+
             [
                 "TOP OPPORTUNITIES"
-            ]
-        )
+            ],
 
-
-        summary_rows.append(
             [
                 "Ticker",
                 "Signal",
                 "Investment Score"
             ]
-        )
+
+        ])
 
 
         if len(results) > 0:
@@ -281,6 +390,7 @@ def create_report(
 
                 summary_rows.append(
                     [
+
                         stock.get(
                             "Ticker",
                             ""
@@ -295,8 +405,10 @@ def create_report(
                             "Investment Score",
                             ""
                         )
+
                     ]
                 )
+
 
 
         pd.DataFrame(
@@ -307,7 +419,6 @@ def create_report(
             index=False,
             header=False
         )
-
 
 
         # =================================
@@ -439,10 +550,22 @@ def create_report(
         )
 
 
+        print(
+            "Creating Final Portfolio Decisions"
+        )
+
+
+        final_portfolio_decisions.to_excel(
+            writer,
+            sheet_name="Final Portfolio Decisions",
+            index=False
+        )
+
 
         print(
             "Creating Investment Decisions"
         )
+
 
 
         decisions.to_excel(
@@ -464,6 +587,16 @@ def create_report(
             index=False
         )
 
+        print("Creating Portfolio Growth Plan")
+
+        growth_plan_df = pd.DataFrame(growth_plan)
+
+        growth_plan_df.to_excel(
+            writer,
+            sheet_name="Portfolio Growth Plan",
+            index=False
+        )
+
         print(
             "Creating AI Portfolio Review"
         )
@@ -482,6 +615,7 @@ def create_report(
         print(
             "Creating AI Portfolio Review"
         )
+
 
 
         if isinstance(
@@ -561,6 +695,44 @@ def create_report(
 
         print(
             "Creating Recommendation Performance"
+        )
+
+        # =================================
+        # Recommendation Learning
+        # =================================
+
+        print(
+            "Creating Recommendation Learning"
+        )
+
+
+        if isinstance(
+            recommendation_learning,
+            dict
+        ):
+
+            learning_df = pd.DataFrame(
+                [
+                    recommendation_learning
+                ]
+            )
+
+        else:
+
+            learning_df = pd.DataFrame(
+                {
+                    "Status":
+                    [
+                        "No recommendation learning available"
+                    ]
+                }
+            )
+
+
+        learning_df.to_excel(
+            writer,
+            sheet_name="Recommendation Learning",
+            index=False
         )
 
 

@@ -12,10 +12,9 @@ def generate_portfolio_manager_review(
     """
     Generates portfolio manager intelligence.
 
-    Portfolio health is the source of truth.
-    This layer explains the result.
+    Portfolio Health is the source of truth.
+    This layer explains the implications.
     """
-
 
     review = {
 
@@ -34,6 +33,8 @@ def generate_portfolio_manager_review(
         "AI Summary": ""
 
     }
+
+    print("DEBUG: PORTFOLIO MANAGER FUNCTION CALLED")
 
 
     # ---------------------------------
@@ -58,8 +59,11 @@ def generate_portfolio_manager_review(
 
 
     # ---------------------------------
-    # Use portfolio health as authority
+    # Portfolio Health authority
     # ---------------------------------
+
+    score = 50
+
 
     if portfolio_health:
 
@@ -68,10 +72,11 @@ def generate_portfolio_manager_review(
             50
         )
 
+
         review["Portfolio Rating"] = score
 
 
-        review["Key Strengths"] = (
+        review["Key Strengths"].extend(
             portfolio_health.get(
                 "Strengths",
                 []
@@ -79,7 +84,7 @@ def generate_portfolio_manager_review(
         )
 
 
-        review["Key Risks"] = (
+        review["Key Risks"].extend(
             portfolio_health.get(
                 "Risks",
                 []
@@ -87,81 +92,9 @@ def generate_portfolio_manager_review(
         )
 
 
-    else:
-
-        score = 50
-    
-    # ---------------------------------
-    # Holding strengths
-    # ---------------------------------
-
-    if not portfolio_summary.empty:
-
-        strong_holdings = portfolio_summary[
-            portfolio_summary["Investment Score"] >= 80
-        ]
-
-
-        for _, row in strong_holdings.iterrows():
-
-            review["Key Strengths"].append(
-                f"{row['Ticker']} is a high conviction holding"
-            )
 
     # ---------------------------------
-    # Portfolio investment quality analysis
-    # ---------------------------------
-
-    if not portfolio_summary.empty:
-
-        avg_score = (
-            portfolio_summary[
-                "Investment Score"
-            ]
-            .mean()
-        )
-
-
-        if avg_score >= 75:
-
-            review["Key Strengths"].append(
-                "Portfolio has strong average investment scores"
-            )
-
-
-        elif avg_score < 60:
-
-            review["Key Risks"].append(
-                "Portfolio has weak average investment scores"
-            )
-
-
-        strongest = portfolio_summary.loc[
-            portfolio_summary[
-                "Investment Score"
-            ].idxmax()
-        ]
-
-
-        weakest = portfolio_summary.loc[
-            portfolio_summary[
-                "Investment Score"
-            ].idxmin()
-        ]
-
-
-        review["Key Strengths"].append(
-            f"{strongest['Ticker']} is the strongest holding by investment score"
-        )
-
-
-        review["Key Risks"].append(
-            f"{weakest['Ticker']} is the weakest holding by investment score"
-        )
-
-
-    # ---------------------------------
-    # Holding concentration analysis
+    # Holding insights
     # ---------------------------------
 
     if not portfolio_summary.empty:
@@ -173,41 +106,12 @@ def generate_portfolio_manager_review(
                 "Unknown"
             )
 
-            allocation = row.get(
-                "Allocation %",
+
+            investment_score = row.get(
+                "Investment Score",
                 0
             )
 
-
-            if allocation >= 40:
-
-                review["Key Risks"].append(
-                    f"{ticker} represents excessive portfolio concentration"
-                )
-
-                review["Priority Actions"].append(
-                    f"Consider reducing {ticker} position size"
-                )
-
-
-            elif allocation >= 25:
-
-                review["Key Risks"].append(
-                    f"{ticker} has high portfolio weighting"
-                )
-
-    # ---------------------------------
-    # Sector concentration analysis
-    # ---------------------------------
-
-    if not sector_summary.empty:
-
-        for _, row in sector_summary.iterrows():
-
-            sector = row.get(
-                "Sector",
-                "Unknown"
-            )
 
             allocation = row.get(
                 "Allocation %",
@@ -215,43 +119,27 @@ def generate_portfolio_manager_review(
             )
 
 
+            if investment_score >= 80:
+
+                review["Key Strengths"].append(
+                    f"{ticker} is a high conviction holding"
+                )
+
+
             if allocation >= 40:
 
                 review["Key Risks"].append(
-                    f"{sector} sector concentration risk"
+                    f"{ticker} has excessive portfolio concentration"
                 )
 
                 review["Priority Actions"].append(
-                    "Increase diversification outside concentrated sectors"
+                    f"Review {ticker} position sizing"
                 )
 
-    # ---------------------------------
-    # Health-based portfolio actions
-    # ---------------------------------
 
-    if portfolio_health:
-
-        health_score = portfolio_health.get(
-            "Health Score",
-            50
-        )
-
-
-        if health_score < 70:
-
-            review["Priority Actions"].append(
-                "Review portfolio concentration and rebalance toward target allocation"
-            )
-
-
-        if health_score < 50:
-
-            review["Priority Actions"].append(
-                "Consider structural portfolio changes"
-            )
 
     # ---------------------------------
-    # Add decision intelligence
+    # Decision interpretation
     # ---------------------------------
 
     if not decisions.empty:
@@ -278,14 +166,14 @@ def generate_portfolio_manager_review(
         )
 
 
-        if reduce_count > 0:
+        if reduce_count:
 
             review["Priority Actions"].append(
                 f"{reduce_count} holdings require review or reduction"
             )
 
 
-        if add_count > 0:
+        if add_count:
 
             review["Priority Actions"].append(
                 f"{add_count} diversification opportunities identified"
@@ -305,7 +193,9 @@ def generate_portfolio_manager_review(
 
 
 
+    # ---------------------------------
     # Remove duplicates
+    # ---------------------------------
 
     review["Key Strengths"] = list(
         dict.fromkeys(
@@ -362,7 +252,7 @@ def generate_portfolio_manager_review(
 
 
     # ---------------------------------
-    # AI Summary
+    # AI summary
     # ---------------------------------
 
     review["AI Summary"] = (
@@ -372,9 +262,9 @@ def generate_portfolio_manager_review(
         f"Overall market view is "
         f"{review['Market View']}. "
 
-        f"{review['Portfolio Status']} "
+        f"{review['Portfolio Status']}. "
 
-        f"The portfolio contains "
+        f"The portfolio has "
         f"{len(review['Key Risks'])} identified risks "
         f"and "
         f"{len(review['Priority Actions'])} priority actions."

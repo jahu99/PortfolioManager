@@ -267,22 +267,59 @@ def generate_decisions(
         return result
 
 
-
     # ---------------------------------
-    # Remove duplicate tickers
+    # Remove invalid and duplicate tickers
     # ---------------------------------
 
     if "Ticker" in result.columns:
 
+        # Remove blanks
         result = result[
             result["Ticker"].notna()
         ]
-
 
         result = result[
             result["Ticker"] != ""
         ]
 
+
+        # Consolidate duplicate decisions
+        # Most important action wins
+
+        action_priority = {
+
+            "REDUCE": 1,
+            "SELL": 1,
+            "REVIEW": 2,
+            "ADD": 3,
+            "BUY": 3,
+            "HOLD": 4,
+            "HOLD / ADD": 5
+
+        }
+
+
+        result["Decision Priority"] = (
+            result["Action"]
+            .map(action_priority)
+            .fillna(99)
+        )
+
+
+        result = (
+            result
+            .sort_values(
+                [
+                    "Ticker",
+                    "Decision Priority"
+                ]
+            )
+            .drop_duplicates(
+                subset=["Ticker"],
+                keep="first"
+            )
+        )
+    
 
 
     # ---------------------------------
@@ -314,10 +351,11 @@ def generate_decisions(
 
 
     result = result.sort_values(
-        by="Priority"
+        by=[
+            "Priority",
+            "Ticker"
+        ]
     )
-
-
 
     result = result.drop(
         columns=[

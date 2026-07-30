@@ -1,12 +1,8 @@
 import sqlite3
 import os
+import pandas as pd
 from datetime import datetime
 
-
-
-# ---------------------------------
-# Database location
-# ---------------------------------
 
 DATABASE_PATH = os.path.join(
     os.path.dirname(__file__),
@@ -14,10 +10,9 @@ DATABASE_PATH = os.path.join(
 )
 
 
-
-# ---------------------------------
+# -------------------------------------------------
 # Connection
-# ---------------------------------
+# -------------------------------------------------
 
 def get_connection():
 
@@ -27,28 +22,25 @@ def get_connection():
 
 
 
-# ---------------------------------
+# -------------------------------------------------
 # Initialise database
-# ---------------------------------
+# -------------------------------------------------
 
 def initialise_database():
 
     conn = get_connection()
-
     cursor = conn.cursor()
-
 
 
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS recommendations
         (
-
             id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-            date TEXT,
+            date TEXT NOT NULL,
 
-            ticker TEXT,
+            ticker TEXT NOT NULL,
 
             signal TEXT,
 
@@ -60,39 +52,17 @@ def initialise_database():
 
             price REAL,
 
+            confidence TEXT,
+
+            confidence_score REAL,
+
+            confidence_reasons TEXT,
+
             evaluated INTEGER DEFAULT 0
-
         )
         """
     )
 
-
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS outcomes
-        (
-
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            recommendation_id INTEGER,
-
-            check_date TEXT,
-
-            price REAL,
-
-            return_percent REAL,
-
-            days_after INTEGER,
-
-            FOREIGN KEY(
-                recommendation_id
-            )
-            REFERENCES recommendations(id)
-
-        )
-        """
-    )
 
     cursor.execute(
         """
@@ -113,6 +83,8 @@ def initialise_database():
 
             outcome TEXT,
 
+            success INTEGER,
+
             FOREIGN KEY(
                 recommendation_id
             )
@@ -122,42 +94,9 @@ def initialise_database():
         """
     )
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS recommendation_learning (
-
-       id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-        ticker TEXT,
-
-        recommendation_date TEXT,
-
-        signal TEXT,
-
-        investment_score INTEGER,
-
-        confidence_score REAL,
-
-        entry_price REAL,
-
-        exit_price REAL,
-
-        return_percent REAL,
-
-        outcome TEXT,
-
-        evaluation_period INTEGER,
-
-        created_at TEXT
-
-        )
-        """
-    )
 
     conn.commit()
-
     conn.close()
-
 
 
     print(
@@ -166,68 +105,49 @@ def initialise_database():
 
 
 
-# ---------------------------------
+# -------------------------------------------------
 # Save recommendations
-# ---------------------------------
+# -------------------------------------------------
 
 def save_recommendations(
     stock_results
 ):
 
-
     if not stock_results:
-
         return
 
 
-
     conn = get_connection()
-
     cursor = conn.cursor()
 
 
-
-    today = datetime.now().strftime(
+    today = datetime.today().strftime(
         "%Y-%m-%d"
     )
 
 
-
-    # Prevent duplicate daily saves
-
     cursor.execute(
         """
         SELECT COUNT(*)
-
         FROM recommendations
-
         WHERE date = ?
-
         """,
-        (
-            today,
-        )
+        (today,)
     )
 
 
-    existing = cursor.fetchone()[0]
-
-
-
-    if existing > 0:
+    if cursor.fetchone()[0] > 0:
 
         print(
-            f"Recommendations already saved for {today}. Skipping database update"
+            "Recommendations already saved for today"
         )
 
         conn.close()
-
         return
 
 
 
     saved = 0
-
 
 
     for stock in stock_results:
@@ -236,57 +156,75 @@ def save_recommendations(
         cursor.execute(
             """
             INSERT INTO recommendations
-
             (
 
                 date,
-
                 ticker,
-
                 signal,
-
                 investment_score,
-
                 technical_score,
-
                 quality_score,
-
-                price, 
-
-                confidence, 
-
-                confidence_score, 
-                
+                price,
+                confidence,
+                confidence_score,
                 confidence_reasons
 
             )
 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
 
             """,
+
             (
 
                 today,
 
                 stock["Ticker"],
 
-                stock["Signal"],
+                stock.get(
+                    "Signal",
+                    ""
+                ),
 
-                stock["Investment Score"],
+                stock.get(
+                    "Investment Score",
+                    0
+                ),
 
-                stock["Technical Score"],
+                stock.get(
+                    "Technical Score",
+                    0
+                ),
 
-                stock["Quality Score"],
+                stock.get(
+                    "Quality Score",
+                    0
+                ),
 
-                stock["Price"],
+                stock.get(
+                    "Price",
+                    0
+                ),
 
-                stock["Confidence"],
+                stock.get(
+                    "Confidence",
+                    ""
+                ),
 
-                stock["Confidence Score"],
+                stock.get(
+                    "Confidence Score",
+                    0
+                ),
 
-                str(stock["Confidence Reasons"])
+                str(
+                    stock.get(
+                        "Confidence Reasons",
+                        []
+                    )
+                )
 
             )
+
         )
 
 
@@ -295,9 +233,7 @@ def save_recommendations(
 
 
     conn.commit()
-
     conn.close()
-
 
 
     print(
@@ -306,113 +242,15 @@ def save_recommendations(
 
 
 
-# ---------------------------------
-# Save recommendation outcomes
-# ---------------------------------
+# -------------------------------------------------
+# Get open recommendations
+# -------------------------------------------------
 
-def save_outcomes(outcomes):
-
-    if outcomes is None:
-        return
-
-    if outcomes.empty:
-        return
+def get_open_recommendations():
 
 
     conn = get_connection()
 
-    cursor = conn.cursor()
-
-
-    for _, row in outcomes.iterrows():
-
-        
-        # Prevent duplicate outcome records
-
-        cursor.execute(
-            """
-            SELECT COUNT(*)
-            FROM outcomes
-            WHERE recommendation_id = ?
-            AND days_after = ?
-            """,
-            (
-                row["recommendation_id"],
-                row["days_after"]
-            )
-        )
-        existing = cursor.fetchone()[0]
-
-        if existing == 0:
-             continue
-
-        cursor.execute(
-            """
-            INSERT INTO outcomes
-            (
-                recommendation_id,
-                check_date,
-                price,
-                return_percent,
-                days_after
-            )
-
-            VALUES (?, ?, ?, ?, ?)
-
-            """,
-            (
-                row["recommendation_id"],
-                row["evaluation_date"],
-                row["price"],
-                row["return_percent"],
-                row["days_after"]
-            )
-        )
-
-
-    conn.commit()
-
-    conn.close()
-
-# ---------------------------------
-# Mark recommendation evaluated
-# ---------------------------------
-
-def mark_recommendation_evaluated(
-    recommendation_id
-):
-
-    conn = get_connection()
-
-    cursor = conn.cursor()
-
-
-    cursor.execute(
-        """
-        UPDATE recommendations
-
-        SET evaluated = 1
-
-        WHERE id = ?
-
-        """,
-        (
-            recommendation_id,
-        )
-    )
-
-
-    conn.commit()
-
-    conn.close()
-
-# ---------------------------------
-# Load recommendation history
-# ---------------------------------
-
-def get_recommendation_history():
-
-    conn = get_connection()
 
     query = """
         SELECT
@@ -424,40 +262,52 @@ def get_recommendation_history():
             technical_score,
             quality_score,
             price,
-            evaluated
-        FROM recommendations
-        ORDER BY date DESC
-    """
+            confidence,
+            confidence_score,
+            confidence_reasons
 
-    import pandas as pd
+        FROM recommendations
+
+        WHERE evaluated = 0
+
+        AND date <= DATE('now','-5 days')
+
+        ORDER BY date ASC
+        """
+
 
     df = pd.read_sql_query(
         query,
         conn
     )
 
+
     conn.close()
+
 
     return df
 
 
-# ---------------------------------
-# Save recommendation evaluations
-# ---------------------------------
+
+# -------------------------------------------------
+# Save evaluations
+# -------------------------------------------------
 
 def save_recommendation_evaluations(
     evaluations
 ):
 
+
     if evaluations is None:
         return
+
 
     if evaluations.empty:
         return
 
 
-    conn = get_connection()
 
+    conn = get_connection()
     cursor = conn.cursor()
 
 
@@ -466,8 +316,21 @@ def save_recommendation_evaluations(
 
     for _, row in evaluations.iterrows():
 
+
+        recommendation_id = row[
+            "recommendation_id"
+        ]
+
+
+        days_after = row[
+            "days_after"
+        ]
+
+
+
         cursor.execute(
             """
+
             SELECT COUNT(*)
 
             FROM recommendation_evaluations
@@ -477,18 +340,25 @@ def save_recommendation_evaluations(
             AND days_after = ?
 
             """,
+
             (
-                row["recommendation_id"],
-                row["days_after"]
+
+                recommendation_id,
+
+                days_after
+
             )
+
         )
 
 
         exists = cursor.fetchone()[0]
 
 
-        if exists > 0:
+        if exists:
+
             continue
+
 
 
         cursor.execute(
@@ -517,15 +387,70 @@ def save_recommendation_evaluations(
         )
 
 
+
+        cursor.execute(
+            """
+
+            UPDATE recommendations
+
+            SET evaluated = 1
+
+            WHERE id = ?
+
+            """,
+
+            (
+                recommendation_id,
+            )
+
+        )
+
+
         saved += 1
 
 
-    conn.commit()
 
+    conn.commit()
     conn.close()
 
 
     print(
         f"Saved {saved} recommendation evaluations"
     )
-    
+
+
+
+
+# -------------------------------------------------
+# Evaluation history
+# -------------------------------------------------
+
+def get_evaluation_history():
+
+
+    conn = get_connection()
+
+
+    df = pd.read_sql_query(
+
+        """
+
+        SELECT
+
+            *
+
+        FROM recommendation_evaluations
+
+        ORDER BY evaluation_date DESC
+
+        """,
+
+        conn
+
+    )
+
+
+    conn.close()
+
+
+    return df

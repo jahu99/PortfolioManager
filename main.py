@@ -3,104 +3,20 @@ import traceback
 
 
 from analysis import recommendations
+from analysis import recommendation_learning
 from data.universe import get_sp500_universe
 from data.market_data import get_stock_data
 from data.fundamentals import get_fundamentals
 
-
 from data.database import (
     initialise_database,
+    get_open_recommendations,
     save_recommendations,
     save_recommendation_evaluations,
-    save_outcomes
 )
-
-
-from analysis.indicators import add_indicators
-from analysis.scorer import score_stock
-from analysis.quality import score_quality
-from analysis.signals import generate_signal
-from analysis.recommendations import generate_recommendation
-
-
-from analysis.rebalance import generate_rebalance_recommendations
-from analysis.portfolio_health import calculate_portfolio_health
-from analysis.decision_engine import generate_decisions
-from analysis.trade_sizing import generate_trade_plan
-
-
-from analysis.portfolio_recommendations import (
-    generate_portfolio_recommendations
-)
-
-
-from analysis.portfolio_analysis import analyse_portfolio
-from analysis.sector_analysis import analyse_sectors
-from analysis.portfolio_optimizer import optimise_portfolio
-from analysis.alerts import generate_alerts
-
-
-from portfolio.portfolio import get_portfolio
-from portfolio.targets import get_targets
-
-
-from reports.excel_report import create_report
-
-
-from analysis.outcome_tracker import calculate_evaluations
-
-
-
-from analysis import recommendations
-from data.universe import get_sp500_universe
-from data.market_data import get_stock_data
-from data.fundamentals import get_fundamentals
-
-
-from data.database import (
-    initialise_database,
-    save_recommendations,
-    save_recommendation_evaluations,
-    save_outcomes
-)
-
-
-from analysis.indicators import add_indicators
-from analysis.scorer import score_stock
-from analysis.quality import score_quality
-from analysis.signals import generate_signal
-from analysis.recommendations import generate_recommendation
-
-
-from analysis.rebalance import generate_rebalance_recommendations
-from analysis.portfolio_health import calculate_portfolio_health
-from analysis.decision_engine import generate_decisions
-from analysis.trade_sizing import generate_trade_plan
-
-
-from analysis.portfolio_recommendations import (
-    generate_portfolio_recommendations
-)
-
-
-from analysis.portfolio_analysis import analyse_portfolio
-from analysis.sector_analysis import analyse_sectors
-from analysis.portfolio_optimizer import optimise_portfolio
-from analysis.alerts import generate_alerts
-
-
-from portfolio.portfolio import get_portfolio
-from portfolio.targets import get_targets
-
-
-from reports.excel_report import create_report
-
-
-from analysis.outcome_tracker import calculate_evaluations
 
 
 from data.database_queries import (
-    get_open_recommendations,
     get_recommendation_history,
     get_performance_summary,
     get_signal_performance,
@@ -109,8 +25,44 @@ from data.database_queries import (
     get_signal_horizon_performance,
     get_score_horizon_performance,
     get_score_bucket_performance,
-    get_component_score_performance
+    get_component_score_performance,
+    get_learning_history
 )
+
+
+from analysis.indicators import add_indicators
+from analysis.scorer import score_stock
+from analysis.quality import score_quality
+from analysis.signals import generate_signal
+from analysis.recommendations import generate_recommendation
+
+
+from analysis.rebalance import generate_rebalance_recommendations
+from analysis.portfolio_health import calculate_portfolio_health
+from analysis.decision_engine import generate_decisions
+from analysis.trade_sizing import generate_trade_plan
+
+
+from analysis.portfolio_recommendations import (
+    generate_portfolio_recommendations
+)
+
+
+from analysis.portfolio_analysis import analyse_portfolio
+from analysis.sector_analysis import analyse_sectors
+from analysis.portfolio_optimizer import optimise_portfolio
+from analysis.alerts import generate_alerts
+
+
+from portfolio.portfolio import get_portfolio
+from portfolio.targets import get_targets
+
+
+from reports.excel_report import create_report
+
+
+from analysis.outcome_tracker import calculate_evaluations
+
 
 from analysis.growth import score_growth
 
@@ -141,6 +93,33 @@ from analysis.portfolio_decision_engine import generate_portfolio_decisions
 from analysis.portfolio_manager import generate_portfolio_manager_review
 
 from agents.orchestrator import run_ai_agents
+
+from analysis.portfolio_growth_engine import (
+    generate_growth_plan,
+    evaluate_position_scaling
+)
+
+from analysis.portfolio_context import evaluate_portfolio_context
+
+
+
+from analysis.final_portfolio_decision import (
+    generate_final_portfolio_decisions
+
+)
+
+from analysis.portfolio_manager_rules import (
+    apply_portfolio_manager_rules
+)
+
+from analysis.recommendation_learning import (
+    calculate_recommendation_learning
+)
+
+from data.database_queries import (
+    get_learning_history
+)
+
 
 def main():
 
@@ -177,6 +156,15 @@ def main():
 
     recommendations_to_evaluate = get_open_recommendations()
 
+    print(
+        "OPEN RECOMMENDATIONS COUNT:",
+        len(recommendations_to_evaluate)
+    )
+
+    print(
+        recommendations_to_evaluate.head()
+    )
+
     if (
         recommendations_to_evaluate is not None
         and not recommendations_to_evaluate.empty
@@ -199,13 +187,24 @@ def main():
                 evaluations
             )
 
-            save_outcomes(
-                evaluations
+            
+
+            from data.database import get_connection
+
+            conn = get_connection()
+
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT COUNT(*) FROM outcomes"
             )
 
             print(
-                f"Saved {len(evaluations)} outcomes"
+                "OUTCOME COUNT:",
+                cursor.fetchone()[0]
             )
+
+            conn.close()
 
         else:
 
@@ -657,6 +656,7 @@ def main():
     portfolio_ai_review = None
     portfolio_decisions = None
     portfolio_manager_review = None
+    final_portfolio_decisions = None
 
 
 
@@ -707,6 +707,16 @@ def main():
             sector_summary
         )
 
+        test_context = evaluate_portfolio_context(
+            results[0],
+            portfolio_summary,
+            sector_summary,
+            portfolio_health
+        )
+
+        print("\nPORTFOLIO CONTEXT TEST")
+        print(test_context)
+
         try:
             ai_reviews = run_ai_agents(
                 results,
@@ -720,7 +730,7 @@ def main():
                 f"AI agents skipped: {e}"
             )
 
-        ai_reviews = []
+            ai_reviews = []
 
         portfolio_decisions = generate_portfolio_decisions(
             holdings,
@@ -750,6 +760,19 @@ def main():
             results
         )
 
+        growth_plan = generate_growth_plan(
+            results,
+            portfolio_value=portfolio_summary["Current Value"].sum(),
+            current_holdings=portfolio_summary.to_dict("records")
+        )
+
+
+        print("\nPORTFOLIO GROWTH PLAN")
+
+        print(growth_plan.head(10))
+
+        print("ABOUT TO CREATE MANAGER REVIEW")
+
         portfolio_manager_review = generate_portfolio_manager_review(
             portfolio_summary,
             sector_summary,
@@ -760,6 +783,14 @@ def main():
 
 
 
+        print("MANAGER REVIEW CREATED")
+
+        print(
+            "DEBUG MANAGER REVIEW:",
+            portfolio_manager_review
+        )
+
+        
         print(
             "\nPORTFOLIO HEALTH"
         )
@@ -799,8 +830,12 @@ def main():
 
 
         print(
-            f"Portfolio analysis skipped: {e}"
+            "PORTFOLIO ANALYSIS ERROR:"
         )
+
+        traceback.print_exc()
+
+        portfolio_manager_review = None
 
     
 
@@ -822,6 +857,48 @@ def main():
         print(
             f"AI Portfolio Intelligence skipped: {e}"
         )
+
+        portfolio_ai_review = []
+
+    # ---------------------------------
+    # Final Portfolio Decisions
+    # ---------------------------------
+
+    print("\nDEBUG DECISIONS INPUT")
+    print(decisions)
+
+    print("\nDUPLICATE TICKERS")
+    print(
+        decisions[
+            decisions.duplicated(
+                subset=["Ticker"],
+                keep=False
+            )
+        ]
+    )
+
+    final_portfolio_decisions = generate_final_portfolio_decisions(
+        portfolio_summary,
+        decisions,
+        portfolio_ai_review,
+        portfolio_manager_review,
+        portfolio_health
+    )
+
+    final_portfolio_decisions = apply_portfolio_manager_rules(
+        final_portfolio_decisions,
+        portfolio_health
+    )
+
+
+    print(
+        "\nFINAL PORTFOLIO DECISIONS"
+    )
+
+    print(
+        final_portfolio_decisions
+    )
+    
     # ---------------------------------
     # Alerts
     # ---------------------------------
@@ -854,7 +931,32 @@ def main():
             f"Recommendation Intelligence skipped: {e}"
         )
 
-    recommendation_history = get_recommendation_history()
+    recommendation_history = get_learning_history()
+
+    recommendation_learning = (
+        calculate_recommendation_learning(
+            recommendation_history
+        )
+    )
+
+    print(
+        "\nRECOMMENDATION LEARNING"
+    )
+
+    if isinstance(recommendation_learning, dict):
+
+        for key, value in recommendation_learning.items():
+
+            print(
+                f"{key}: {value}"
+            )
+
+    else:
+
+        print(
+            recommendation_learning
+        )
+    
     
     factor_performance = (
         calculate_factor_performance(
@@ -900,6 +1002,16 @@ def main():
 
     print("Manager Review:",
         type(portfolio_manager_review))
+    
+
+    # ---------------------------------
+    # Portfolio Growth Plan Safety
+    # ---------------------------------
+
+    if "growth_plan" not in locals():
+
+        growth_plan = pd.DataFrame()
+
 
     # ---------------------------------
     # Excel report
@@ -925,7 +1037,10 @@ def main():
     signal_horizon_performance,
     recommendation_intelligence,
     portfolio_ai_review,
-    portfolio_manager_review
+    portfolio_manager_review,
+    growth_plan,
+    final_portfolio_decisions,
+    recommendation_learning
 )
 
 

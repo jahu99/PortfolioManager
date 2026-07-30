@@ -15,36 +15,40 @@ def score_stock(df):
     risk_score = 15
 
 
+    close = latest["Close"]
+    sma50 = latest["SMA50"]
+    sma200 = latest["SMA200"]
+    rsi = latest["RSI"]
+    rtn = latest["Return_3m"] * 100
+
+
     # ---------------------------------
     # Trend Score (40)
     # ---------------------------------
 
     distance200 = (
-        (latest["Close"] - latest["SMA200"])
+        (close - sma200)
         /
-        latest["SMA200"]
+        sma200
     ) * 100
 
 
-    if distance200 > 15:
+    distance50 = (
+        (close - sma50)
+        /
+        sma50
+    ) * 100
 
-        trend_score += 25
-        reasons.append(
-            "Strongly above 200 DMA"
-        )
 
-    elif distance200 > 5:
 
-        trend_score += 20
+    # Long term trend
+
+    if distance200 > 0:
+
+        trend_score += 15
+
         reasons.append(
             "Above 200 DMA"
-        )
-
-    elif distance200 > 0:
-
-        trend_score += 10
-        reasons.append(
-            "Slightly above 200 DMA"
         )
 
     else:
@@ -53,94 +57,113 @@ def score_stock(df):
             "Below 200 DMA"
         )
 
+        risk_score -= 8
 
 
-    distance50 = (
-        (latest["Close"] - latest["SMA50"])
-        /
-        latest["SMA50"]
-    ) * 100
 
+    # Avoid chasing extended stocks
 
-    if distance50 > 10:
+    if 0 <= distance50 <= 5:
 
         trend_score += 15
+
         reasons.append(
-            "Strongly above 50 DMA"
+            "Healthy position near 50 DMA"
         )
 
-    elif distance50 > 3:
 
-        trend_score += 10
+    elif distance50 > 15:
+
+        trend_score += 2
+
+        risk_score -= 10
+
         reasons.append(
-            "Above 50 DMA"
+            "Overextended above 50 DMA"
         )
 
-    elif distance50 > 0:
 
-        trend_score += 5
+    elif distance50 > 5:
+
+        trend_score += 8
+
         reasons.append(
-            "Slightly above 50 DMA"
+            "Moderately above 50 DMA"
         )
+
 
     else:
 
+        trend_score += 5
+
         reasons.append(
-            "Below 50 DMA"
+            "Pullback opportunity"
         )
 
 
 
     # Trend structure
 
-    if latest["SMA50"] < latest["SMA200"]:
+    if sma50 > sma200:
 
-        risk_score -= 10
+        trend_score += 10
 
         reasons.append(
-            "50 DMA below 200 DMA"
+            "Positive long term trend"
+        )
+
+    else:
+
+        risk_score -= 5
+
+        reasons.append(
+            "Weak trend structure"
         )
 
 
 
     # ---------------------------------
-    # Momentum Score (45)
+    # Momentum Score (35)
     # ---------------------------------
 
-    rsi = latest["RSI"]
 
+    # RSI entry quality
 
-    if 55 <= rsi <= 65:
+    if 50 <= rsi <= 65:
 
         momentum_score += 15
 
         reasons.append(
-            "Ideal RSI"
+            "Optimal RSI entry zone"
         )
 
-    elif 50 <= rsi < 55:
-
-        momentum_score += 12
-
-        reasons.append(
-            "Healthy RSI"
-        )
 
     elif 65 < rsi <= 70:
 
-        momentum_score += 10
+        momentum_score += 8
 
         reasons.append(
-            "Strong RSI"
+            "Strong but approaching overbought"
         )
 
-    elif 45 <= rsi < 50:
+
+    elif rsi > 70:
+
+        momentum_score -= 5
+
+        reasons.append(
+            "Overbought RSI"
+        )
+
+
+    elif 40 <= rsi < 50:
 
         momentum_score += 5
 
         reasons.append(
-            "Neutral RSI"
+            "Recovering RSI"
         )
+
 
     else:
 
@@ -150,11 +173,11 @@ def score_stock(df):
 
 
 
-    # MACD
+    # MACD confirmation
 
     if latest["MACD"] > latest["MACD_signal"]:
 
-        momentum_score += 15
+        momentum_score += 10
 
         reasons.append(
             "MACD bullish"
@@ -168,47 +191,32 @@ def score_stock(df):
 
 
 
-    # 3 month momentum
+    # Moderate momentum preferred
 
-    rtn = latest["Return_3m"] * 100
+    if 5 <= rtn <= 25:
 
-
-    if rtn > 30:
-
-        momentum_score += 15
+        momentum_score += 10
 
         reasons.append(
-            "Excellent 3 month momentum"
+            "Healthy momentum"
         )
 
-    elif rtn > 15:
 
-        momentum_score += 12
+    elif rtn > 40:
+
+        risk_score -= 5
 
         reasons.append(
-            "Strong 3 month momentum"
+            "Momentum may be exhausted"
         )
 
-    elif rtn > 5:
-
-        momentum_score += 8
-
-        reasons.append(
-            "Positive 3 month momentum"
-        )
 
     elif rtn > 0:
 
-        momentum_score += 4
+        momentum_score += 5
 
         reasons.append(
-            "Slightly positive momentum"
-        )
-
-    else:
-
-        reasons.append(
-            "Negative 3 month momentum"
+            "Positive momentum"
         )
 
 
@@ -224,37 +232,32 @@ def score_stock(df):
     )
 
 
-    if volume_ratio > 2:
+    if volume_ratio > 1.5:
 
         volume_score += 15
 
         reasons.append(
-            "Exceptional volume"
+            "Strong volume confirmation"
         )
 
-    elif volume_ratio > 1.5:
-
-        volume_score += 12
-
-        reasons.append(
-            "Strong volume"
-        )
 
     elif volume_ratio > 1.2:
 
-        volume_score += 8
+        volume_score += 10
 
         reasons.append(
-            "Above average volume"
+            "Improving volume"
         )
+
 
     elif volume_ratio > 1:
 
         volume_score += 5
 
         reasons.append(
-            "Volume improving"
+            "Average volume"
         )
+
 
     else:
 
@@ -265,20 +268,20 @@ def score_stock(df):
 
 
     # ---------------------------------
-    # Risk penalties
+    # Risk controls
     # ---------------------------------
 
-    if latest["Close"] < latest["SMA200"]:
+
+    if rsi > 75:
 
         risk_score -= 8
 
         reasons.append(
-            "Below 200 DMA"
+            "Extreme overbought"
         )
 
 
-
-    if latest["Close"] < latest["SMA50"]:
+    if close < sma50:
 
         risk_score -= 3
 
@@ -287,25 +290,13 @@ def score_stock(df):
         )
 
 
-
-    if rsi > 75:
-
-        risk_score -= 5
-
-        reasons.append(
-            "Overbought"
-        )
-
-
-
-    if rsi < 35:
+    if close < sma200:
 
         risk_score -= 5
 
         reasons.append(
-            "Oversold"
+            "Below 200 DMA"
         )
-
 
 
     if risk_score < 0:
@@ -315,7 +306,7 @@ def score_stock(df):
 
 
     # ---------------------------------
-    # Base score
+    # Final score
     # ---------------------------------
 
     score = (
@@ -330,55 +321,14 @@ def score_stock(df):
 
 
 
-    # ---------------------------------
-    # Leadership bonuses
-    # ---------------------------------
-
-    if (
-        distance200 > 15
-        and rtn > 15
-    ):
-
-        score += 5
-
-        reasons.append(
-            "Strong price leadership"
-        )
-
-
-
-    if (
-        latest["MACD"]
-        >
-        latest["MACD_signal"]
-        and rsi >= 50
-    ):
-
-        score += 3
-
-        reasons.append(
-            "Positive momentum confirmation"
-        )
-
-
-
-    if volume_ratio > 1.2:
-
-        score += 2
-
-        reasons.append(
-            "Institutional interest"
-        )
-
-
-
-    # ---------------------------------
-    # Final score
-    # ---------------------------------
-
     if score > 100:
 
         score = 100
+
+
+    if score < 0:
+
+        score = 0
 
 
 
