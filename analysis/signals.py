@@ -8,61 +8,31 @@ def generate_signal(
     latest = df.iloc[-1]
 
     price = float(latest["Close"])
-    sma50 = float(latest["SMA50"])
     sma200 = float(latest["SMA200"])
     rsi = float(latest["RSI"])
 
 
-    # ---------------------------------
-    # Strong Buy
-    # ---------------------------------
-
     if (
-        investment_score >= 85
+        investment_score >= 80
         and technical_score >= 75
-        and quality_score >= 70
+        and quality_score >= 60
         and price > sma200
-        and 45 <= rsi <= 75
+        and 40 <= rsi <= 75
     ):
-
         return "STRONG BUY"
 
 
-
-    # ---------------------------------
-    # Buy
-    # ---------------------------------
-
-    elif investment_score >= 75:
-
+    elif investment_score >= 70:
         return "BUY"
 
 
-
-    # ---------------------------------
-    # Watch
-    # ---------------------------------
-
-    elif investment_score >= 65:
-
+    elif investment_score >= 60:
         return "WATCH"
 
 
-
-    # ---------------------------------
-    # Hold
-    # ---------------------------------
-
-    elif investment_score >= 50:
-
+    elif investment_score >= 45:
         return "HOLD"
 
 
-
-    # ---------------------------------
-    # Sell
-    # ---------------------------------
-
     else:
-
         return "SELL"

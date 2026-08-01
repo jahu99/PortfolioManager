@@ -10,7 +10,7 @@ def score_stock(df):
 
 
     # ---------------------------------
-    # Individual category scores
+    # Base category scores
     # ---------------------------------
 
     trend_score = 0
@@ -46,9 +46,11 @@ def score_stock(df):
 
 
 
+    # Long term trend filter
+
     if distance200 > 0:
 
-        trend_score += 15
+        trend_score += 8
 
         reasons.append(
             "Above 200 DMA"
@@ -64,20 +66,22 @@ def score_stock(df):
 
 
 
-    if 0 <= distance50 <= 5:
+    # Entry position relative to 50 DMA
+
+    if 0 <= distance50 <= 3:
 
         trend_score += 15
 
         reasons.append(
-            "Healthy position near 50 DMA"
+            "Near 50 DMA entry zone"
         )
 
 
     elif distance50 > 15:
 
-        trend_score += 2
+        trend_score -= 5
 
-        risk_score -= 10
+        risk_score -= 5
 
         risks.append(
             "Overextended above 50 DMA"
@@ -86,22 +90,24 @@ def score_stock(df):
 
     elif distance50 > 5:
 
-        trend_score += 8
+        trend_score += 2
 
-        reasons.append(
-            "Moderately above 50 DMA"
+        risks.append(
+            "Extended above 50 DMA"
         )
 
 
     else:
 
-        trend_score += 5
+        trend_score += 8
 
         reasons.append(
             "Pullback opportunity"
         )
 
 
+
+    # Trend structure
 
     if sma50 > sma200:
 
@@ -125,16 +131,18 @@ def score_stock(df):
     # Momentum Score (35)
     # ---------------------------------
 
-    if 50 <= rsi <= 65:
+    # Prefer earlier momentum
+
+    if 45 <= rsi <= 60:
 
         momentum_score += 15
 
         reasons.append(
-            "Optimal RSI entry zone"
+            "Healthy RSI entry zone"
         )
 
 
-    elif 65 < rsi <= 70:
+    elif 60 < rsi <= 70:
 
         momentum_score += 8
 
@@ -149,13 +157,15 @@ def score_stock(df):
             "Overbought RSI"
         )
 
+        risk_score -= 5
 
-    elif 40 <= rsi < 50:
+
+    elif 35 <= rsi < 45:
 
         momentum_score += 5
 
         reasons.append(
-            "Recovering RSI"
+            "Recovering momentum"
         )
 
 
@@ -166,6 +176,8 @@ def score_stock(df):
         )
 
 
+
+    # MACD
 
     if latest["MACD"] > latest["MACD_signal"]:
 
@@ -183,21 +195,23 @@ def score_stock(df):
 
 
 
-    if 5 <= rtn <= 25:
+    # Recent performance
+
+    if 0 <= rtn <= 15:
 
         momentum_score += 10
 
         reasons.append(
-            "Healthy 3 month momentum"
+            "Healthy recent momentum"
         )
 
 
-    elif rtn > 40:
+    elif rtn > 25:
 
-        risk_score -= 5
+        risk_score -= 8
 
         risks.append(
-            "Momentum may be exhausted"
+            "Extended recent performance"
         )
 
 
@@ -216,9 +230,9 @@ def score_stock(df):
     # ---------------------------------
 
     volume_ratio = (
-        latest["Volume"]
+        float(latest["Volume"])
         /
-        latest["Volume_avg"]
+        float(latest["Volume_avg"])
     )
 
 
@@ -258,7 +272,7 @@ def score_stock(df):
 
 
     # ---------------------------------
-    # Risk Score
+    # Risk adjustments
     # ---------------------------------
 
     if rsi > 75:
@@ -288,6 +302,7 @@ def score_stock(df):
         )
 
 
+
     risk_score = max(
         risk_score,
         0
@@ -296,7 +311,7 @@ def score_stock(df):
 
 
     # ---------------------------------
-    # Base Technical Score
+    # Technical Score
     # ---------------------------------
 
     base_score = (
@@ -321,7 +336,7 @@ def score_stock(df):
 
 
     # ---------------------------------
-    # Adaptive Learning Adjustment
+    # Adaptive adjustment
     # ---------------------------------
 
     adaptive_adjustment = 0
@@ -330,7 +345,6 @@ def score_stock(df):
     try:
 
         adjustments = get_adaptive_adjustments()
-
 
         signal = latest.get(
             "Signal",
@@ -392,19 +406,16 @@ def score_stock(df):
 
 
 
-    # ---------------------------------
-    # Return Contract
-    # Compatible with main.py
-    # ---------------------------------
-
     return {
 
-        "Technical Score": round(
-            technical_score
-        ),
 
         "Score": round(
             base_score
+        ),
+
+
+        "Technical Score": round(
+            technical_score
         ),
 
 
@@ -412,13 +423,16 @@ def score_stock(df):
             trend_score
         ),
 
+
         "Momentum Score": round(
             momentum_score
         ),
 
+
         "Volume Score": round(
             volume_score
         ),
+
 
         "Risk Score": round(
             risk_score
@@ -431,6 +445,7 @@ def score_stock(df):
         ),
 
 
+        # Maintains compatibility
         "Investment Score": round(
             technical_score
         ),
@@ -444,7 +459,6 @@ def score_stock(df):
         "Technical Risks": risks,
 
 
-        # Backwards compatibility
         "Recommendation Reasons": reasons,
 
         "Recommendation Risks": risks

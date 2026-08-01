@@ -164,6 +164,7 @@ def save_recommendations(
                 investment_score,
                 technical_score,
                 quality_score,
+                growth_score,
                 price,
                 confidence,
                 confidence_score,
@@ -171,7 +172,7 @@ def save_recommendations(
 
             )
 
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
 
             """,
 
@@ -200,6 +201,8 @@ def save_recommendations(
                     "Quality Score",
                     0
                 ),
+
+                stock.get("Growth Score", 0),
 
                 stock.get(
                     "Price",

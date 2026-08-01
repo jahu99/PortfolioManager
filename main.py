@@ -118,12 +118,14 @@ from analysis.recommendation_learning import (
     calculate_recommendation_learning
 )
 
+from analysis.score_calibration import get_calibrated_weights
+
 
 def main():
 
     print("MAIN STARTED")
 
-    AI_ANALYSIS_LIMIT = 15
+    AI_ANALYSIS_LIMIT = 3
     ai_analysis_count = 0
 
 
@@ -133,6 +135,21 @@ def main():
 
     initialise_database()
 
+    # ---------------------------------
+    # Load calibrated scoring weights
+    # ---------------------------------
+
+    calibrated_weights = get_calibrated_weights()
+
+    TECHNICAL_WEIGHT = calibrated_weights["Technical Weight"]
+    QUALITY_WEIGHT = calibrated_weights["Quality Weight"]
+    GROWTH_WEIGHT = calibrated_weights["Growth Weight"]
+
+
+    print(
+        "CALIBRATED WEIGHTS:",
+        calibrated_weights
+    )
 
     # ---------------------------------
     # Update recommendations
@@ -458,20 +475,31 @@ def main():
 
 
 
-            investment_score = round(
+            raw_investment_score = (
 
-                (technical_score * 0.45)
-
-                +
-
-                (quality_score * 0.30)
+                (technical_score * TECHNICAL_WEIGHT)
 
                 +
 
-                (growth_score * 0.25)
+                (quality_score * QUALITY_WEIGHT)
+
+                +
+
+                (growth_score * GROWTH_WEIGHT)
 
             )
 
+
+            investment_score = round(
+                raw_investment_score * 1.15
+            )
+
+
+            # cap score
+            investment_score = min(
+                investment_score,
+                100
+            )
 
 
             signal = generate_signal(
@@ -506,13 +534,19 @@ def main():
             ai_decision = generate_ai_decision(
                 {
                     "Investment Score": investment_score,
+
+                    "Confidence Score":
+                        recommendation.get(
+                            "Confidence Score",
+                            0
+                        ),
+
                     "Technical Score": technical_score,
                     "Trend Score": trend_score,
                     "Momentum Score": momentum_score,
                     "Volume Score": volume_score,
                     "Risk Score": risk_score,
                     "Quality Score": quality_score,
-                    "Investment Score": investment_score,
                     "Growth Score": growth_score,
                 }
             )
@@ -521,27 +555,7 @@ def main():
                 f"{ticker} AI DECISION: {ai_decision}"
             )
 
-            if (
-                ticker in portfolio_tickers
-                and signal in ["SELL", "STRONG SELL"]
-                or investment_score >= 85
-                or signal == "STRONG BUY"
-            ) and ai_analysis_count < AI_ANALYSIS_LIMIT:
-
-                ai_analysis = generate_ai_analysis(
-                        ticker,
-                        investment_score,
-                        technical_score,
-                        quality_score,
-                        growth_score,
-                        ai_decision,
-                        recommendation["Reasons"],
-                        recommendation["Risks"]
-                    )
-                ai_analysis_count += 1
-            else:
-
-                    ai_analysis = None
+            ai_analysis = None
 
             ai_recommendation = generate_ai_recommendation(
                 {
@@ -639,6 +653,9 @@ def main():
                     "AI Decision":
                         ai_decision["Decision"],
 
+                    "AI Decision Object":
+                        ai_decision,
+
                     "AI Conviction":
                         ai_decision["Conviction"],
 
@@ -691,6 +708,41 @@ def main():
     print(
     f"RESULTS AFTER SORT: {len(results)}"
     )
+
+    # ---------------------------------
+    # AI Analyst Review - Top Candidates
+    # ---------------------------------
+
+    for stock in results[:AI_ANALYSIS_LIMIT]:
+
+        try:
+
+            print(
+                "OLLAMA ANALYST RUN:",
+                stock["Ticker"]
+            )
+
+            ai_analysis = generate_ai_analysis(
+                stock["Ticker"],
+                stock["Investment Score"],
+                stock["Technical Score"],
+                stock["Quality Score"],
+                stock["Growth Score"],
+                stock["AI Decision Object"],
+                stock["Recommendation Reasons"],
+                stock["Recommendation Risks"]
+            )
+
+            stock["AI Analysis"] = ai_analysis
+
+
+        except Exception as e:
+
+            print(
+                f"AI Analyst failed for {stock['Ticker']}: {e}"
+            )
+
+            stock["AI Analysis"] = None
 
     # ---------------------------------
     # Save recommendation history
