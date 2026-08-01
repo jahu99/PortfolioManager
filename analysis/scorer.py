@@ -1,8 +1,12 @@
+from analysis.adaptive_learning import get_adaptive_adjustments
+
+
 def score_stock(df):
 
     latest = df.iloc[-1]
 
     reasons = []
+    risks = []
 
 
     # ---------------------------------
@@ -15,11 +19,12 @@ def score_stock(df):
     risk_score = 15
 
 
-    close = latest["Close"]
-    sma50 = latest["SMA50"]
-    sma200 = latest["SMA200"]
-    rsi = latest["RSI"]
-    rtn = latest["Return_3m"] * 100
+    close = float(latest["Close"])
+    sma50 = float(latest["SMA50"])
+    sma200 = float(latest["SMA200"])
+    rsi = float(latest["RSI"])
+
+    rtn = float(latest["Return_3m"]) * 100
 
 
     # ---------------------------------
@@ -41,8 +46,6 @@ def score_stock(df):
 
 
 
-    # Long term trend
-
     if distance200 > 0:
 
         trend_score += 15
@@ -53,15 +56,13 @@ def score_stock(df):
 
     else:
 
-        reasons.append(
+        risks.append(
             "Below 200 DMA"
         )
 
         risk_score -= 8
 
 
-
-    # Avoid chasing extended stocks
 
     if 0 <= distance50 <= 5:
 
@@ -78,7 +79,7 @@ def score_stock(df):
 
         risk_score -= 10
 
-        reasons.append(
+        risks.append(
             "Overextended above 50 DMA"
         )
 
@@ -102,8 +103,6 @@ def score_stock(df):
 
 
 
-    # Trend structure
-
     if sma50 > sma200:
 
         trend_score += 10
@@ -116,7 +115,7 @@ def score_stock(df):
 
         risk_score -= 5
 
-        reasons.append(
+        risks.append(
             "Weak trend structure"
         )
 
@@ -125,9 +124,6 @@ def score_stock(df):
     # ---------------------------------
     # Momentum Score (35)
     # ---------------------------------
-
-
-    # RSI entry quality
 
     if 50 <= rsi <= 65:
 
@@ -143,15 +139,13 @@ def score_stock(df):
         momentum_score += 8
 
         reasons.append(
-            "Strong but approaching overbought"
+            "Strong momentum"
         )
 
 
     elif rsi > 70:
 
-        momentum_score -= 5
-
-        reasons.append(
+        risks.append(
             "Overbought RSI"
         )
 
@@ -167,13 +161,11 @@ def score_stock(df):
 
     else:
 
-        reasons.append(
+        risks.append(
             "Weak RSI"
         )
 
 
-
-    # MACD confirmation
 
     if latest["MACD"] > latest["MACD_signal"]:
 
@@ -185,20 +177,18 @@ def score_stock(df):
 
     else:
 
-        reasons.append(
+        risks.append(
             "MACD bearish"
         )
 
 
-
-    # Moderate momentum preferred
 
     if 5 <= rtn <= 25:
 
         momentum_score += 10
 
         reasons.append(
-            "Healthy momentum"
+            "Healthy 3 month momentum"
         )
 
 
@@ -206,7 +196,7 @@ def score_stock(df):
 
         risk_score -= 5
 
-        reasons.append(
+        risks.append(
             "Momentum may be exhausted"
         )
 
@@ -261,22 +251,21 @@ def score_stock(df):
 
     else:
 
-        reasons.append(
+        risks.append(
             "Weak volume"
         )
 
 
 
     # ---------------------------------
-    # Risk controls
+    # Risk Score
     # ---------------------------------
-
 
     if rsi > 75:
 
         risk_score -= 8
 
-        reasons.append(
+        risks.append(
             "Extreme overbought"
         )
 
@@ -285,7 +274,7 @@ def score_stock(df):
 
         risk_score -= 3
 
-        reasons.append(
+        risks.append(
             "Below 50 DMA"
         )
 
@@ -294,22 +283,23 @@ def score_stock(df):
 
         risk_score -= 5
 
-        reasons.append(
+        risks.append(
             "Below 200 DMA"
         )
 
 
-    if risk_score < 0:
-
-        risk_score = 0
+    risk_score = max(
+        risk_score,
+        0
+    )
 
 
 
     # ---------------------------------
-    # Final score
+    # Base Technical Score
     # ---------------------------------
 
-    score = (
+    base_score = (
         trend_score
         +
         momentum_score
@@ -320,16 +310,143 @@ def score_stock(df):
     )
 
 
-
-    if score > 100:
-
-        score = 100
-
-
-    if score < 0:
-
-        score = 0
+    base_score = max(
+        min(
+            base_score,
+            100
+        ),
+        0
+    )
 
 
 
-    return round(score), reasons
+    # ---------------------------------
+    # Adaptive Learning Adjustment
+    # ---------------------------------
+
+    adaptive_adjustment = 0
+
+
+    try:
+
+        adjustments = get_adaptive_adjustments()
+
+
+        signal = latest.get(
+            "Signal",
+            "BUY"
+        )
+
+
+        adaptive_adjustment = adjustments.get(
+            signal,
+            0
+        )
+
+
+    except Exception:
+
+        adaptive_adjustment = 0
+
+
+
+    technical_score = (
+        base_score
+        +
+        adaptive_adjustment
+    )
+
+
+    technical_score = max(
+        min(
+            technical_score,
+            100
+        ),
+        0
+    )
+
+
+
+    # ---------------------------------
+    # Confidence
+    # ---------------------------------
+
+    confidence = round(
+        (
+            (
+                trend_score / 40
+                +
+                momentum_score / 35
+                +
+                volume_score / 15
+                +
+                risk_score / 15
+            )
+            /
+            4
+        )
+        *
+        100,
+        1
+    )
+
+
+
+    # ---------------------------------
+    # Return Contract
+    # Compatible with main.py
+    # ---------------------------------
+
+    return {
+
+        "Technical Score": round(
+            technical_score
+        ),
+
+        "Score": round(
+            base_score
+        ),
+
+
+        "Trend Score": round(
+            trend_score
+        ),
+
+        "Momentum Score": round(
+            momentum_score
+        ),
+
+        "Volume Score": round(
+            volume_score
+        ),
+
+        "Risk Score": round(
+            risk_score
+        ),
+
+
+        "Adaptive Adjustment": round(
+            adaptive_adjustment,
+            2
+        ),
+
+
+        "Investment Score": round(
+            technical_score
+        ),
+
+
+        "Confidence": confidence,
+
+
+        "Technical Reasons": reasons,
+
+        "Technical Risks": risks,
+
+
+        # Backwards compatibility
+        "Recommendation Reasons": reasons,
+
+        "Recommendation Risks": risks
+
+    }

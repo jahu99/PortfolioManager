@@ -711,39 +711,187 @@ def create_report(
             dict
         ):
 
-            learning_df = pd.DataFrame(
-                [
-                    recommendation_learning
-                ]
+
+            # -----------------------------
+            # Summary sheet
+            # -----------------------------
+
+            overall = recommendation_learning.get(
+                "Overall",
+                {}
             )
+
+
+            if overall:
+
+                pd.DataFrame(
+                    [
+                        overall
+                    ]
+
+                ).to_excel(
+                    writer,
+                    sheet_name="Recommendation Learning Summary",
+                    index=False
+                )
+
+
+            # -----------------------------
+            # Horizon sheets
+            # -----------------------------
+
+            horizons = recommendation_learning.get(
+                "Horizon Learning",
+                {}
+            )
+
+
+            for horizon, data in horizons.items():
+
+
+                horizon = int(horizon)
+
+
+                print(
+                    f"Creating Learning {horizon}D"
+                )
+
+                horizon_summary = pd.DataFrame(
+                    [
+                        {
+                            "Horizon Days": horizon,
+
+                            "Recommendations":
+                                data.get(
+                                    "Recommendations",
+                                    0
+                                ),
+
+                            "Average Return %":
+                                data.get(
+                                    "Average Return %",
+                                    0
+                                ),
+
+                            "Successful":
+                                data.get(
+                                    "Successful Recommendations",
+                                    0
+                                ),
+
+                            "Failed":
+                                data.get(
+                                    "Failed Recommendations",
+                                    0
+                                ),
+
+                            "Win Rate %":
+                                round(
+                                    (
+                                        data.get(
+                                            "Successful",
+                                            0
+                                        )
+                                        /
+                                        max(
+                                            data.get(
+                                                "Recommendations",
+                                                1
+                                            ),
+                                            1
+                                        )
+                                    )
+                                    *
+                                    100,
+                                    2
+                                )
+                        }
+                    ]
+                )
+
+
+                horizon_summary.to_excel(
+                    writer,
+                    sheet_name=f"Learning {horizon}D Summary",
+                    index=False
+                )
+
+
+                signal_df = data.get(
+                    "Signal Learning",
+                    pd.DataFrame()
+                )
+
+
+                if isinstance(
+                    signal_df,
+                    pd.DataFrame
+                ) and not signal_df.empty:
+
+
+                    signal_df.to_excel(
+                        writer,
+                        sheet_name=f"Learning {horizon}D Signal",
+                        index=False
+                    )
+
+
+
+                score_df = data.get(
+                    "Score Learning",
+                    pd.DataFrame()
+                )
+
+
+                if isinstance(
+                    score_df,
+                    pd.DataFrame
+                ) and not score_df.empty:
+
+
+                    score_df.to_excel(
+                        writer,
+                        sheet_name=f"Learning {horizon}D Score",
+                        index=False
+                    )
+
+
+
+                component_df = data.get(
+                    "Component Learning",
+                    pd.DataFrame()
+                )
+
+
+                if isinstance(
+                    component_df,
+                    pd.DataFrame
+                ) and not component_df.empty:
+
+
+                    component_df.to_excel(
+                        writer,
+                        sheet_name=f"Learning {horizon}D Components",
+                        index=False
+                    )
+
 
         else:
 
-            learning_df = pd.DataFrame(
+
+            pd.DataFrame(
                 {
                     "Status":
                     [
                         "No recommendation learning available"
                     ]
                 }
+
+            ).to_excel(
+                writer,
+                sheet_name="Recommendation Learning Summary",
+                index=False
             )
-
-
-        learning_df.to_excel(
-            writer,
-            sheet_name="Recommendation Learning",
-            index=False
-        )
-
-
-        performance_summary.to_excel(
-            writer,
-            sheet_name="Recommendation Performance",
-            index=False
-        )
-
-
-
         # =================================
         # Recommendation Intelligence
         # =================================

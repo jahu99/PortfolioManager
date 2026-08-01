@@ -95,8 +95,7 @@ from analysis.portfolio_manager import generate_portfolio_manager_review
 from agents.orchestrator import run_ai_agents
 
 from analysis.portfolio_growth_engine import (
-    generate_growth_plan,
-    evaluate_position_scaling
+    generate_growth_plan
 )
 
 from analysis.portfolio_context import evaluate_portfolio_context
@@ -112,12 +111,11 @@ from analysis.portfolio_manager_rules import (
     apply_portfolio_manager_rules
 )
 
+
+
+
 from analysis.recommendation_learning import (
     calculate_recommendation_learning
-)
-
-from data.database_queries import (
-    get_learning_history
 )
 
 
@@ -351,10 +349,85 @@ def main():
 
 
 
-            technical_score, technical_reasons = score_stock(
-                df
+            # ---------------------------------
+            # Technical Scoring Engine
+            # ---------------------------------
+
+            required_columns = [
+                "Close",
+                "SMA50",
+                "SMA200",
+                "RSI",
+                "MACD",
+                "MACD_signal",
+                "Return_3m",
+                "Volume",
+                "Volume_avg"
+            ]
+
+
+            missing_columns = [
+                col for col in required_columns
+                if col not in df.columns
+            ]
+
+
+            if missing_columns:
+
+                print(
+                    f"{ticker} skipped - missing indicators:",
+                    missing_columns
+                )
+
+                continue
+
+
+
+            score_result = score_stock(df)
+
+
+            technical_score = score_result.get(
+                "Technical Score",
+                0
             )
 
+            technical_reasons = score_result.get(
+                "Technical Reasons",
+                []
+            )
+
+            technical_risks = score_result.get(
+                "Technical Risks",
+                []
+            )
+
+
+            trend_score = score_result.get(
+                "Trend Score",
+                0
+            )
+
+            momentum_score = score_result.get(
+                "Momentum Score",
+                0
+            )
+
+            volume_score = score_result.get(
+                "Volume Score",
+                0
+            )
+
+            risk_score = score_result.get(
+                "Risk Score",
+                0
+            )
+
+
+            print(
+                f"{ticker} SCORE RESULT:",
+                technical_score,
+                technical_reasons[:3]
+)
 
 
             fundamentals = get_fundamentals(
@@ -434,9 +507,13 @@ def main():
                 {
                     "Investment Score": investment_score,
                     "Technical Score": technical_score,
+                    "Trend Score": trend_score,
+                    "Momentum Score": momentum_score,
+                    "Volume Score": volume_score,
+                    "Risk Score": risk_score,
                     "Quality Score": quality_score,
+                    "Investment Score": investment_score,
                     "Growth Score": growth_score,
-                    "Confidence Score": recommendation["Confidence Score"]
                 }
             )
 
