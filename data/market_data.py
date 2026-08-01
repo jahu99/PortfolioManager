@@ -145,3 +145,90 @@ def get_current_price(ticker):
 
 
         return None
+    
+# =================================
+# HISTORICAL PRICE LOOKUP
+# =================================
+
+def get_price_on_date(
+    ticker,
+    target_date
+):
+
+    try:
+
+        df = get_stock_data(
+            ticker
+        )
+
+        if df.empty:
+
+            return None
+
+        if isinstance(
+            target_date,
+            str
+        ):
+
+            target_date = pd.to_datetime(
+                target_date
+            )
+
+        # Ensure index is datetime
+        df.index = pd.to_datetime(
+            df.index
+        )
+
+        # Find first trading day
+        future_prices = df[
+            df.index >= target_date
+        ]
+
+        if future_prices.empty:
+
+            return None
+
+        return float(
+            future_prices["Close"]
+            .iloc[0]
+        )
+
+    except Exception as e:
+
+        print(
+            f"Historical price error {ticker}: {e}"
+        )
+
+        return None
+
+
+
+# =================================
+# PRICE AFTER N DAYS
+# =================================
+
+def get_price_after_days(
+    ticker,
+    recommendation_date,
+    days_after
+):
+
+    if isinstance(
+        recommendation_date,
+        str
+    ):
+
+        recommendation_date = pd.to_datetime(
+            recommendation_date
+        )
+
+    evaluation_date = (
+        recommendation_date
+        +
+        timedelta(days=days_after)
+    )
+
+    return get_price_on_date(
+        ticker,
+        evaluation_date
+    )
