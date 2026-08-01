@@ -217,18 +217,75 @@ def get_price_after_days(
         recommendation_date,
         str
     ):
-
         recommendation_date = pd.to_datetime(
             recommendation_date
         )
 
-    evaluation_date = (
+
+    target_date = (
         recommendation_date
         +
         timedelta(days=days_after)
     )
 
-    return get_price_on_date(
-        ticker,
-        evaluation_date
-    )
+
+    try:
+
+        data = yf.download(
+            ticker,
+            start=target_date - timedelta(days=7),
+            end=target_date + timedelta(days=7),
+            progress=False,
+            auto_adjust=True
+        )
+
+
+        if data.empty:
+            return None
+
+
+        # Handle yfinance multi-index columns
+        if isinstance(
+            data.columns,
+            pd.MultiIndex
+        ):
+
+            close = data["Close"][ticker]
+
+        else:
+
+            close = data["Close"]
+
+
+        close = close.dropna()
+
+
+        if close.empty:
+            return None
+
+
+        # nearest available trading day
+        closest_date = (
+            close.index
+            .to_series()
+            .sub(target_date)
+            .abs()
+            .idxmin()
+        )
+
+
+        price = close.loc[
+            closest_date
+        ]
+
+
+        return float(price)
+
+
+    except Exception as e:
+
+        print(
+            f"PRICE LOOKUP ERROR {ticker}: {e}"
+        )
+
+        return None

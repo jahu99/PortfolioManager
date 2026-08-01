@@ -297,14 +297,11 @@ def save_recommendation_evaluations(
     evaluations
 ):
 
-
     if evaluations is None:
         return
 
-
     if evaluations.empty:
         return
-
 
 
     conn = get_connection()
@@ -321,34 +318,22 @@ def save_recommendation_evaluations(
             "recommendation_id"
         ]
 
-
         days_after = row[
             "days_after"
         ]
 
 
-
         cursor.execute(
             """
-
             SELECT COUNT(*)
-
             FROM recommendation_evaluations
-
             WHERE recommendation_id = ?
-
             AND days_after = ?
-
             """,
-
             (
-
                 recommendation_id,
-
                 days_after
-
             )
-
         )
 
 
@@ -356,7 +341,6 @@ def save_recommendation_evaluations(
 
 
         if exists:
-
             continue
 
 
@@ -366,43 +350,46 @@ def save_recommendation_evaluations(
             INSERT INTO recommendation_evaluations
             (
                 recommendation_id,
+                ticker,
                 evaluation_date,
                 days_after,
                 price,
                 return_percent,
-                outcome
+                outcome,
+                signal,
+                investment_score,
+                technical_score,
+                quality_score
             )
 
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 
             """,
             (
                 row["recommendation_id"],
+                row["ticker"],
                 row["evaluation_date"],
                 row["days_after"],
                 row["price"],
                 row["return_percent"],
-                row["outcome"]
+                row["outcome"],
+                row.get("Signal"),
+                row.get("Investment Score"),
+                row.get("Technical Score"),
+                row.get("Quality Score")
             )
         )
 
 
-
         cursor.execute(
             """
-
             UPDATE recommendations
-
             SET evaluated = 1
-
             WHERE id = ?
-
             """,
-
             (
                 recommendation_id,
             )
-
         )
 
 
@@ -417,8 +404,6 @@ def save_recommendation_evaluations(
     print(
         f"Saved {saved} recommendation evaluations"
     )
-
-
 
 
 # -------------------------------------------------

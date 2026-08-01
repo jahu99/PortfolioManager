@@ -4,15 +4,6 @@ import pandas as pd
 def calculate_recommendation_learning(
     recommendation_history
 ):
-    """
-    Analyse recommendation performance.
-
-    Input dataframe must contain:
-    - Signal
-    - Investment Score
-    - Outcome
-    - Return %
-    """
 
     print(
         "RECOMMENDATION LEARNING ENGINE START"
@@ -26,96 +17,196 @@ def calculate_recommendation_learning(
 
         return {
 
-            "Total Recommendations": 0,
-            "Evaluated Recommendations": 0,
-            "Successful Recommendations": 0,
-            "Failed Recommendations": 0,
-            "Win Rate %": 0,
-            "Signal Learning": pd.DataFrame()
+            "Overall": {},
+
+            "Horizon Learning": {}
 
         }
-
 
 
     df = recommendation_history.copy()
 
 
-    total = len(df)
+    # ---------------------------------
+    # Normalise column names
+    # ---------------------------------
 
+    df.rename(
+        columns={
 
-    evaluated = df[
-        df["Outcome"].notna()
-    ]
+            "Days After":
+                "days_after",
 
+            "Return %":
+                "return_percent",
 
-    evaluated_count = len(
-        evaluated
+        },
+
+        inplace=True
+
     )
 
 
+    print(
+        "LEARNING DATASET:",
+        df.shape
+    )
+
+
+    print(
+        df.head()
+    )
+
+
+    # ---------------------------------
+    # Ensure required columns exist
+    # ---------------------------------
+
+    required_columns = [
+
+        "Signal",
+
+        "Investment Score",
+
+        "return_percent",
+
+        "Outcome",
+
+        "days_after"
+
+    ]
+
+
+    for col in required_columns:
+
+        if col not in df.columns:
+
+            print(
+                f"MISSING COLUMN: {col}"
+            )
+
+            return {
+
+                "Overall": {},
+
+                "Horizon Learning": {}
+
+            }
+
+
+
+    # ---------------------------------
+    # Overall statistics
+    # ---------------------------------
+
+    total = len(df)
+
+
     successful = len(
-        evaluated[
-            evaluated["Outcome"] == "WIN"
+        df[
+            df["Outcome"] == "SUCCESS"
         ]
     )
 
 
     failed = len(
-        evaluated[
-            evaluated["Outcome"] == "LOSS"
+        df[
+            df["Outcome"] == "FAILED"
         ]
     )
 
 
-    win_rate = 0
+    win_rate = (
 
-
-    if evaluated_count > 0:
-
-        win_rate = round(
-            successful /
-            evaluated_count
-            *
-            100,
+        round(
+            successful / total * 100,
             2
         )
 
+        if total > 0
+
+        else 0
+
+    )
 
 
-    # ------------------------------
-    # Signal learning
-    # ------------------------------
+    overall = {
 
-    signal_learning = pd.DataFrame()
+        "Total Recommendations":
+            total,
+
+        "Successful Recommendations":
+            successful,
+
+        "Failed Recommendations":
+            failed,
+
+        "Win Rate %":
+            win_rate
+
+    }
 
 
-    if evaluated_count > 0:
 
+    # ---------------------------------
+    # Horizon learning
+    # ---------------------------------
+
+    horizon_learning = {}
+
+
+    for horizon in sorted(
+        int(x) for x in df["days_after"].unique()
+    ):
+
+
+        print()
+
+        print(
+            "ANALYSING HORIZON:",
+            horizon
+        )
+
+
+        hdf = df[
+            df["days_after"] == horizon
+        ].copy()
+
+
+
+        # -----------------------------
+        # Signal performance
+        # -----------------------------
 
         signal_learning = (
 
-            evaluated
+            hdf
 
             .groupby("Signal")
 
             .agg(
 
-                Recommendations=(
+                Recommendations=
+                (
                     "Signal",
                     "count"
                 ),
 
-                Average_Return=(
-                    "Return %",
+                Average_Return=
+                (
+                    "return_percent",
                     "mean"
                 ),
 
-                Wins=(
+                Wins=
+                (
                     "Outcome",
+
                     lambda x:
                     (
-                        x=="WIN"
+                        x == "SUCCESS"
                     ).sum()
+
                 )
 
             )
@@ -125,7 +216,11 @@ def calculate_recommendation_learning(
         )
 
 
-        signal_learning["Win Rate %"] = (
+        signal_learning[
+
+            "Win Rate %"
+
+        ] = (
 
             signal_learning["Wins"]
 
@@ -141,62 +236,228 @@ def calculate_recommendation_learning(
 
 
 
+        # -----------------------------
+        # Investment score buckets
+        # -----------------------------
+
+        hdf["Score Bucket"] = pd.cut(
+
+            hdf[
+                "Investment Score"
+            ],
+
+            bins=[
+
+                0,
+
+                50,
+
+                70,
+
+                85,
+
+                100
+
+            ],
+
+            labels=[
+
+                "Low",
+
+                "Medium",
+
+                "Good",
+
+                "High"
+
+            ]
+
+        )
+
+
+        score_learning = (
+
+            hdf
+
+            .groupby(
+                "Score Bucket",
+                observed=False
+            )
+
+            .agg(
+
+                Recommendations=
+                (
+                    "Investment Score",
+                    "count"
+                ),
+
+                Average_Return=
+                (
+                    "return_percent",
+                    "mean"
+                ),
+
+                Wins=
+                (
+                    "Outcome",
+
+                    lambda x:
+                    (
+                        x == "SUCCESS"
+                    ).sum()
+
+                )
+
+            )
+
+            .reset_index()
+
+        )
+
+
+        score_learning[
+
+            "Win Rate %"
+
+        ] = (
+
+            score_learning["Wins"]
+
+            /
+
+            score_learning["Recommendations"]
+
+            *
+
+            100
+
+        ).round(2)
+
+
+
+        # -----------------------------
+        # Component correlation
+        # -----------------------------
+
+        component_learning = pd.DataFrame()
+
+
+        component_rows = []
+
+
+        for component in [
+
+            "Investment Score",
+
+            "Technical Score",
+
+            "Quality Score"
+
+        ]:
+
+
+            if component in hdf.columns:
+
+
+                component_rows.append(
+
+                    {
+
+                        "Component":
+                            component,
+
+                        "Correlation":
+                            round(
+
+                                hdf[
+                                    component
+                                ]
+
+                                .corr(
+
+                                    hdf[
+                                        "return_percent"
+                                    ]
+
+                                ),
+
+                                3
+
+                            )
+
+                    }
+
+                )
+
+
+        if component_rows:
+
+            component_learning = pd.DataFrame(
+                component_rows
+            )
+
+
+
+        horizon_learning[horizon] = {
+
+
+            "Recommendations":
+                len(hdf),
+
+
+            "Average Return %":
+                round(
+
+                    hdf[
+                        "return_percent"
+                    ]
+
+                    .mean(),
+
+                    2
+
+                ),
+
+
+            "Signal Learning":
+                signal_learning,
+
+
+            "Score Learning":
+                score_learning,
+
+
+            "Component Learning":
+                component_learning
+
+        }
+
+
+
     print()
 
     print(
-        "RECOMMENDATION LEARNING"
+        "RECOMMENDATION LEARNING COMPLETE"
     )
 
-    print(
-        "Total Recommendations:",
-        total
-    )
 
     print(
-        "Evaluated Recommendations:",
-        evaluated_count
-    )
-
-    print(
-        "Successful Recommendations:",
-        successful
-    )
-
-    print(
-        "Failed Recommendations:",
-        failed
-    )
-
-    print(
-        "Win Rate %",
-        win_rate
+        "HORIZONS:",
+        list(
+            horizon_learning.keys()
+        )
     )
 
 
     return {
 
 
-        "Total Recommendations":
-            total,
+        "Overall":
+            overall,
 
 
-        "Evaluated Recommendations":
-            evaluated_count,
-
-
-        "Successful Recommendations":
-            successful,
-
-
-        "Failed Recommendations":
-            failed,
-
-
-        "Win Rate %":
-            win_rate,
-
-
-        "Signal Learning":
-            signal_learning
+        "Horizon Learning":
+            horizon_learning
 
     }
