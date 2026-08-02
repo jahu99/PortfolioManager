@@ -209,83 +209,88 @@ def get_price_on_date(
 
 def get_price_after_days(
     ticker,
-    recommendation_date,
-    days_after
+    start_date,
+    days
 ):
 
-    if isinstance(
-        recommendation_date,
-        str
-    ):
-        recommendation_date = pd.to_datetime(
-            recommendation_date
-        )
-
-
-    target_date = (
-        recommendation_date
-        +
-        timedelta(days=days_after)
-    )
+    from datetime import datetime, timedelta
+    import pandas as pd
 
 
     try:
 
-        data = yf.download(
-            ticker,
-            start=target_date - timedelta(days=7),
-            end=target_date + timedelta(days=7),
-            progress=False,
-            auto_adjust=True
+        start = pd.to_datetime(
+            start_date
         )
 
 
-        if data.empty:
-            return None
+        # Get latest available market date
+        latest_market_date = pd.Timestamp.today()
 
 
-        # Handle yfinance multi-index columns
-        if isinstance(
-            data.columns,
-            pd.MultiIndex
-        ):
-
-            close = data["Close"][ticker]
-
-        else:
-
-            close = data["Close"]
-
-
-        close = close.dropna()
-
-
-        if close.empty:
-            return None
-
-
-        # nearest available trading day
-        closest_date = (
-            close.index
-            .to_series()
-            .sub(target_date)
-            .abs()
-            .idxmin()
+        target_date = (
+            start
+            +
+            pd.offsets.BDay(days)
         )
 
 
-        price = close.loc[
-            closest_date
+        # Future date protection
+        if target_date > latest_market_date:
+
+            print(
+                f"{ticker}: "
+                f"{days} trading days unavailable yet"
+            )
+
+            return None
+
+
+
+        df = get_stock_data(
+            ticker
+        )
+
+
+        if df.empty:
+
+            return None
+
+
+
+        df.index = pd.to_datetime(
+            df.index
+        )
+
+
+        future_prices = df[
+            df.index >= target_date
         ]
+
+
+        if future_prices.empty:
+
+            return None
+
+
+
+        price = future_prices.iloc[0]["Close"]
+
+
+        if isinstance(price, pd.Series):
+
+            price = price.iloc[0]
 
 
         return float(price)
 
 
+
     except Exception as e:
 
+
         print(
-            f"PRICE LOOKUP ERROR {ticker}: {e}"
+            f"Price lookup error {ticker}: {e}"
         )
 
         return None

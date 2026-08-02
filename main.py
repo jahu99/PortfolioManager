@@ -4,7 +4,9 @@ import traceback
 
 from analysis import recommendations
 from analysis import recommendation_learning
-from data.universe import get_sp500_universe
+
+from data.universe_manager import get_universe
+
 from data.market_data import get_stock_data
 from data.fundamentals import get_fundamentals
 
@@ -119,6 +121,10 @@ from analysis.recommendation_learning import (
 )
 
 from analysis.score_calibration import get_calibrated_weights
+
+from analysis.portfolio_enrichment import (
+            enrich_portfolio_holdings
+)
 
 
 def main():
@@ -299,7 +305,15 @@ def main():
     # Load universe
     # ---------------------------------
 
-    universe = get_sp500_universe()
+    universe = get_universe(
+        [
+            "sp500",
+            "nasdaq100",
+            # "dow30",
+            # "ftse100",
+            # "etfs"
+        ]
+    )
 
 
     # ---------------------------------
@@ -797,6 +811,14 @@ def main():
             results
         )
 
+        
+
+
+        portfolio_summary = enrich_portfolio_holdings(
+            portfolio_summary,
+            results
+        )
+
         portfolio_actions = generate_portfolio_recommendations(
             holdings,
             results
@@ -996,15 +1018,25 @@ def main():
     print("\nDEBUG DECISIONS INPUT")
     print(decisions)
 
+
     print("\nDUPLICATE TICKERS")
-    print(
-        decisions[
-            decisions.duplicated(
-                subset=["Ticker"],
-                keep=False
-            )
-        ]
-    )
+
+    if decisions is not None and not decisions.empty:
+
+        print(
+            decisions[
+                decisions.duplicated(
+                    subset=["Ticker"],
+                    keep=False
+                )
+            ]
+        )
+
+    else:
+
+        print(
+            "No portfolio decisions generated"
+        )
 
     final_portfolio_decisions = generate_final_portfolio_decisions(
         portfolio_summary,
@@ -1038,28 +1070,6 @@ def main():
     )
 
 
-    # ---------------------------------
-    # Recommendation Intelligence
-    # ---------------------------------
-
-    try:
-
-        recommendation_intelligence = (
-            generate_recommendation_intelligence(
-                results,
-                signal_performance,
-                score_bucket_performance,
-                component_score_performance
-            )
-        )
-
-
-    except Exception as e:
-
-        print(
-            f"Recommendation Intelligence skipped: {e}"
-        )
-
     recommendation_history = get_learning_history()
 
     recommendation_learning = (
@@ -1085,6 +1095,51 @@ def main():
         print(
             recommendation_learning
         )
+
+    signal_performance = (
+    recommendation_learning.get(
+        "Signal Performance",
+        pd.DataFrame()
+        )
+    )
+
+    score_bucket_performance = (
+        recommendation_learning.get(
+            "Score Bucket Performance",
+            pd.DataFrame()
+        )
+    )
+
+    component_score_performance = (
+        recommendation_learning.get(
+            "Component Score Performance",
+            pd.DataFrame()
+        )
+    )
+
+    # ---------------------------------
+    # Recommendation Intelligence
+    # ---------------------------------
+
+    try:
+
+        recommendation_intelligence = (
+            generate_recommendation_intelligence(
+                results,
+                signal_performance,
+                score_bucket_performance,
+                component_score_performance
+            )
+        )
+
+
+    except Exception as e:
+
+        print(
+            f"Recommendation Intelligence skipped: {e}"
+        )
+
+    
     
     
     factor_performance = (

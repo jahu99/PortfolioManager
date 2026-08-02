@@ -12,13 +12,6 @@ def generate_final_portfolio_decisions(
     Consolidates all portfolio intelligence layers into a final
     portfolio manager recommendation.
 
-    Inputs:
-        portfolio_summary      - current holdings and allocations
-        decisions              - decision engine output
-        portfolio_ai_review    - AI holding analysis
-        portfolio_manager_review - portfolio level assessment
-        portfolio_health       - portfolio risk assessment
-
     Returns:
         DataFrame containing final portfolio actions
     """
@@ -26,23 +19,48 @@ def generate_final_portfolio_decisions(
     print("FINAL PORTFOLIO DECISION ENGINE START")
 
 
+    # ---------------------------------
+    # Safety defaults
+    # ---------------------------------
+
     if portfolio_summary is None:
         portfolio_summary = pd.DataFrame()
 
+
     if decisions is None:
         decisions = pd.DataFrame()
+
 
     if portfolio_ai_review is None:
         portfolio_ai_review = []
 
 
+    output_columns = [
+
+        "Ticker",
+        "Position Type",
+        "Final Action",
+        "Conviction",
+        "Capital Decision",
+        "Investment Score",
+        "Reason",
+        "AI Actions",
+        "Portfolio Health Score",
+        "Portfolio Health Rating",
+        "Manager Summary"
+
+    ]
+
 
     final_decisions = []
 
 
-    # Convert AI review into lookup
+    # ---------------------------------
+    # AI review lookup
+    # ---------------------------------
 
     ai_lookup = {}
+
 
     for review in portfolio_ai_review:
 
@@ -53,11 +71,14 @@ def generate_final_portfolio_decisions(
             )
 
             if ticker:
+
                 ai_lookup[ticker] = review
 
 
 
+    # ---------------------------------
     # Portfolio health context
+    # ---------------------------------
 
     health_score = None
     health_rating = None
@@ -83,10 +104,23 @@ def generate_final_portfolio_decisions(
         )
 
 
+    if isinstance(
+        health_risks,
+        str
+    ):
 
+        health_risks = [
+            health_risks
+        ]
+
+
+
+    # ---------------------------------
     # Manager context
+    # ---------------------------------
 
     manager_summary = ""
+
 
     if isinstance(
         portfolio_manager_review,
@@ -100,183 +134,260 @@ def generate_final_portfolio_decisions(
 
 
 
+    # ---------------------------------
     # Process decisions
+    # ---------------------------------
 
-    for _, decision in decisions.iterrows():
-
-
-        ticker = decision.get(
-            "Ticker",
-            ""
-        )
+    if not decisions.empty:
 
 
-        if not ticker:
-            continue
+        for _, decision in decisions.iterrows():
+
+
+            ticker = decision.get(
+                "Ticker",
+                ""
+            )
+
+
+            if not ticker:
+
+                continue
 
 
 
-        ai_review = ai_lookup.get(
-            ticker,
-            {}
-        )
+            ai_review = ai_lookup.get(
+                ticker,
+                {}
+            )
 
 
-        action = decision.get(
-            "Action",
-            "REVIEW"
-        )
+            action = decision.get(
+                "Action",
+                "REVIEW"
+            )
 
 
-        conviction = (
-            ai_review.get(
+            conviction = ai_review.get(
                 "AI Holding Conviction",
                 "Medium"
             )
-        )
 
 
-        risks = ai_review.get(
-            "AI Holding Risks",
-            []
-        )
-
-
-        reasons = ai_review.get(
-            "AI Holding Reasons",
-            []
-        )
-
-
-        ai_action = ai_review.get(
-            "AI Holding Actions",
-            []
-        )
-
-
-
-        # ---------------------------------
-        # Capital decision logic
-        # ---------------------------------
-
-        if action in [
-            "REDUCE",
-            "SELL"
-        ]:
-
-            capital_action = (
-                "Free capital for stronger opportunities"
+            risks = ai_review.get(
+                "AI Holding Risks",
+                []
             )
 
 
-        elif action in [
-            "ADD",
-            "BUY"
-        ]:
-
-            capital_action = (
-                "Consider increasing allocation"
+            reasons = ai_review.get(
+                "AI Holding Reasons",
+                []
             )
 
 
-        elif action in [
-            "HOLD / ADD",
-            "HOLD"
-        ]:
-
-            capital_action = (
-                "Maintain position size"
-            )
-
-
-        else:
-
-            capital_action = (
-                "Review allocation"
+            ai_action = ai_review.get(
+                "AI Holding Actions",
+                []
             )
 
 
 
-        # ---------------------------------
-        # Final recommendation text
-        # ---------------------------------
+            # Normalise lists
 
-        final_reason = []
+            if isinstance(
+                risks,
+                str
+            ):
+
+                risks = [
+                    risks
+                ]
 
 
-        if reasons:
+            if isinstance(
+                reasons,
+                str
+            ):
+
+                reasons = [
+                    reasons
+                ]
+
+
+            if isinstance(
+                ai_action,
+                str
+            ):
+
+                ai_action = [
+                    ai_action
+                ]
+
+
+
+            # ---------------------------------
+            # Capital decision
+            # ---------------------------------
+
+            if action in [
+                "REDUCE",
+                "SELL"
+            ]:
+
+                capital_action = (
+                    "Free capital for stronger opportunities"
+                )
+
+
+            elif action in [
+                "ADD",
+                "BUY"
+            ]:
+
+                capital_action = (
+                    "Consider increasing allocation"
+                )
+
+
+            elif action in [
+                "HOLD / ADD",
+                "HOLD"
+            ]:
+
+                capital_action = (
+                    "Maintain position size"
+                )
+
+
+            else:
+
+                capital_action = (
+                    "Review allocation"
+                )
+
+
+
+            # ---------------------------------
+            # Reason aggregation
+            # ---------------------------------
+
+            final_reason = []
+
 
             final_reason.extend(
                 reasons
             )
 
 
-        if risks:
-
             final_reason.extend(
                 risks
             )
 
 
-        if health_risks:
+            if health_risks:
 
-            final_reason.append(
-                "Portfolio health requires monitoring"
+                final_reason.append(
+                    "Portfolio health requires monitoring"
+                )
+
+
+
+            # ---------------------------------
+            # Append decision
+            # ---------------------------------
+
+            final_decisions.append(
+
+                {
+
+                    "Ticker":
+                        ticker,
+
+
+                    "Position Type":
+                        (
+                            "CURRENT HOLDING"
+                            if (
+                                not portfolio_summary.empty
+                                and "Ticker" in portfolio_summary.columns
+                                and ticker in portfolio_summary["Ticker"].values
+                            )
+                            else
+                            "REBALANCE CANDIDATE"
+                        ),
+
+
+                    "Final Action":
+                        action,
+
+
+                    "Conviction":
+                        conviction,
+
+
+                    "Capital Decision":
+                        capital_action,
+
+
+                    "Investment Score":
+                        decision.get(
+                            "Investment Score",
+                            None
+                        ),
+
+
+                    "Reason":
+                        "; ".join(
+                            final_reason
+                        ),
+
+
+                    "AI Actions":
+                        "; ".join(
+                            ai_action
+                        ),
+
+
+                    "Portfolio Health Score":
+                        health_score,
+
+
+                    "Portfolio Health Rating":
+                        health_rating,
+
+
+                    "Manager Summary":
+                        manager_summary
+
+                }
+
             )
 
 
 
-        final_decisions.append(
+    # ---------------------------------
+    # Create dataframe safely
+    # ---------------------------------
 
-            {
-                "Ticker": ticker,
+    if not final_decisions:
 
-                "Position Type":
-                    "CURRENT HOLDING"
-                    if (
-                        not portfolio_summary.empty
-                        and "Ticker" in portfolio_summary.columns
-                        and ticker in portfolio_summary["Ticker"].values
-                    )
-                    else "REBALANCE CANDIDATE",
-                "Final Action": action,
 
-                "Conviction": conviction,
+        print(
+            "NO FINAL PORTFOLIO DECISIONS GENERATED"
+        )
 
-                "Capital Decision": capital_action,
 
-                "Investment Score":
-                    decision.get(
-                        "Investment Score",
-                        None
-                    ),
-
-                "Reason":
-                    "; ".join(
-                        final_reason
-                    ),
-
-                "AI Actions":
-                    "; ".join(
-                        ai_action
-                    ),
-
-                "Portfolio Health Score":
-                    health_score,
-
-                "Portfolio Health Rating":
-                    health_rating,
-
-                "Manager Summary":
-                    manager_summary
-
-            }
-
+        return pd.DataFrame(
+            columns=output_columns
         )
 
 
 
-    result = pd.DataFrame(final_decisions)
+    result = pd.DataFrame(
+        final_decisions
+    )
+
 
     result["Sort Order"] = (
         result["Position Type"]
@@ -288,18 +399,28 @@ def generate_final_portfolio_decisions(
         )
     )
 
+
     result = (
+
         result
+
         .sort_values(
             [
                 "Sort Order",
                 "Final Action"
             ]
         )
+
         .drop(
-            columns=["Sort Order"]
+            columns=[
+                "Sort Order"
+            ]
         )
-        .reset_index(drop=True)
+
+        .reset_index(
+            drop=True
+        )
+
     )
 
 

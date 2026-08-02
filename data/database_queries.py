@@ -691,7 +691,6 @@ def get_learning_history():
 
     conn = get_connection()
 
-
     query = """
 
     SELECT
@@ -700,15 +699,31 @@ def get_learning_history():
 
         r.ticker,
 
+        r.date AS "Recommendation Date",
+
         r.signal AS Signal,
 
         r.investment_score AS "Investment Score",
 
+        r.technical_score AS "Technical Score",
+
+        r.quality_score AS "Quality Score",
+
+        r.growth_score AS "Growth Score",
+
+        r.confidence AS Confidence,
+
+        r.confidence_score AS "Confidence Score",
+
+        e.evaluation_date AS "Evaluation Date",
+
+        e.days_after AS "Days After",
+
+        e.price AS "Evaluation Price",
+
         e.return_percent AS "Return %",
 
-        e.outcome AS Outcome,
-
-        e.days_after AS "Days After"
+        e.outcome AS Outcome
 
 
     FROM recommendation_evaluations e
@@ -719,7 +734,11 @@ def get_learning_history():
     ON e.recommendation_id = r.id
 
 
-    ORDER BY e.evaluation_date DESC
+    ORDER BY
+
+        e.evaluation_date DESC,
+
+        e.days_after ASC
 
     """
 

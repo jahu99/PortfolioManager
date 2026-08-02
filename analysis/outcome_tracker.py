@@ -1,9 +1,10 @@
+# analysis/outcome_tracker.py
+
 import pandas as pd
 
 from datetime import datetime
 
-from data.market_data import get_price_after_days
-
+from analysis.recommendation_evaluator import get_price_after_days
 
 EVALUATION_HORIZONS = [
     5,
@@ -12,10 +13,6 @@ EVALUATION_HORIZONS = [
     60
 ]
 
-
-# -------------------------------------------------
-# Calculate recommendation evaluations
-# -------------------------------------------------
 
 def calculate_evaluations(recommendations):
 
@@ -29,6 +26,10 @@ def calculate_evaluations(recommendations):
         or recommendations.empty
     ):
 
+        print(
+            "NO RECOMMENDATIONS"
+        )
+
         return pd.DataFrame()
 
 
@@ -36,46 +37,43 @@ def calculate_evaluations(recommendations):
     evaluations = []
 
 
+    today = datetime.today()
+
 
     for _, row in recommendations.iterrows():
 
-        try:
+        ticker = row["ticker"]
 
+        print(
+            "Evaluating",
+            ticker
+        )
+
+
+        try:
 
             recommendation_id = row["id"]
 
-            ticker = row["ticker"]
-
-            start_price = float(
-                row["price"]
-            )
-
-            recommendation_date = row["date"]
-
-
-
-            rec_date = datetime.strptime(
-                recommendation_date,
-                "%Y-%m-%d"
+            recommendation_date = pd.to_datetime(
+                row["date"]
             )
 
 
-            age = (
-                datetime.today()
-                -
-                rec_date
+            age_days = (
+                today -
+                recommendation_date
             ).days
 
 
 
-            # -----------------------------------------
-            # Evaluate each investment horizon
-            # -----------------------------------------
-
             for horizon in EVALUATION_HORIZONS:
 
 
-                if age < horizon:
+                if age_days < horizon:
+
+                    print(
+                        f"{ticker}: {horizon} trading days unavailable yet"
+                    )
 
                     continue
 
@@ -90,8 +88,17 @@ def calculate_evaluations(recommendations):
 
                 if evaluation_price is None:
 
+                    print(
+                        f"No price found {ticker} horizon {horizon}"
+                    )
+
                     continue
 
+
+
+                start_price = float(
+                    row["price"]
+                )
 
 
                 evaluation_price = float(
@@ -99,12 +106,11 @@ def calculate_evaluations(recommendations):
                 )
 
 
+                return_percent = round(
 
-                return_pct = round(
                     (
                         (
-                            evaluation_price
-                            -
+                            evaluation_price -
                             start_price
                         )
                         /
@@ -112,17 +118,19 @@ def calculate_evaluations(recommendations):
                     )
                     *
                     100,
+
                     2
+
                 )
 
 
 
-                if return_pct >= 5:
+                if return_percent >= 5:
 
                     outcome = "SUCCESS"
 
 
-                elif return_pct <= -5:
+                elif return_percent <= -5:
 
                     outcome = "FAILED"
 
@@ -133,62 +141,32 @@ def calculate_evaluations(recommendations):
 
 
 
-                print(
-                    "DEBUG EVALUATION:",
-                    ticker,
-                    "Horizon:",
-                    horizon,
-                    "Start:",
-                    start_price,
-                    "End:",
-                    evaluation_price,
-                    "Return:",
-                    return_pct
-                )
-
-
-
                 evaluations.append(
 
                     {
 
-                        # -------------------------
-                        # Database fields
-                        # -------------------------
-
                         "recommendation_id":
                             recommendation_id,
-
 
                         "ticker":
                             ticker,
 
-
                         "evaluation_date":
-                            datetime.today()
-                            .strftime("%Y-%m-%d"),
-
+                            today.strftime(
+                                "%Y-%m-%d"
+                            ),
 
                         "days_after":
                             horizon,
 
-
                         "price":
                             evaluation_price,
 
-
                         "return_percent":
-                            return_pct,
-
+                            return_percent,
 
                         "outcome":
                             outcome,
-
-
-
-                        # -------------------------
-                        # Learning fields
-                        # -------------------------
 
                         "Signal":
                             row.get(
@@ -196,20 +174,17 @@ def calculate_evaluations(recommendations):
                                 ""
                             ),
 
-
                         "Investment Score":
                             row.get(
                                 "investment_score",
                                 0
                             ),
 
-
                         "Technical Score":
                             row.get(
                                 "technical_score",
                                 0
                             ),
-
 
                         "Quality Score":
                             row.get(
@@ -222,20 +197,32 @@ def calculate_evaluations(recommendations):
                 )
 
 
+                print(
+
+                    "DEBUG EVALUATION:",
+                    ticker,
+                    "Days:",
+                    horizon,
+                    "Return:",
+                    return_percent
+
+                )
+
 
         except Exception as e:
 
 
             print(
-                f"EVALUATION ERROR {row.get('ticker')}: {e}"
+                f"EVALUATION ERROR {ticker}: {e}"
             )
-
-            import traceback
-            traceback.print_exc()
 
 
 
     if not evaluations:
+
+        print(
+            "NO EVALUATIONS CREATED"
+        )
 
         return pd.DataFrame()
 
@@ -246,12 +233,10 @@ def calculate_evaluations(recommendations):
     )
 
 
-
     print(
         "EVALUATIONS CREATED:",
-        len(df)
+        df.shape
     )
-
 
 
     return df

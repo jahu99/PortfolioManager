@@ -3,6 +3,9 @@ import os
 import pandas as pd
 from datetime import datetime
 
+from data.market_calendar import get_last_trading_day
+
+
 
 DATABASE_PATH = os.path.join(
     os.path.dirname(__file__),
@@ -121,8 +124,9 @@ def save_recommendations(
     cursor = conn.cursor()
 
 
-    today = datetime.today().strftime(
-        "%Y-%m-%d"
+    today = get_last_trading_day(
+        "SPY",
+        datetime.today().strftime("%Y-%m-%d")
     )
 
 
@@ -248,12 +252,9 @@ def save_recommendations(
 # -------------------------------------------------
 # Get open recommendations
 # -------------------------------------------------
-
 def get_open_recommendations():
 
-
     conn = get_connection()
-
 
     query = """
         SELECT
@@ -273,24 +274,17 @@ def get_open_recommendations():
 
         WHERE evaluated = 0
 
-        AND date <= DATE('now','-5 days')
-
         ORDER BY date ASC
-        """
-
+    """
 
     df = pd.read_sql_query(
         query,
         conn
     )
 
-
     conn.close()
 
-
     return df
-
-
 
 # -------------------------------------------------
 # Save evaluations
@@ -303,15 +297,18 @@ def save_recommendation_evaluations(
     if evaluations is None:
         return
 
+
     if evaluations.empty:
         return
 
 
     conn = get_connection()
+
     cursor = conn.cursor()
 
 
     saved = 0
+
 
 
     for _, row in evaluations.iterrows():
@@ -325,6 +322,11 @@ def save_recommendation_evaluations(
             "days_after"
         ]
 
+
+
+        # ---------------------------------
+        # Prevent duplicate evaluations
+        # ---------------------------------
 
         cursor.execute(
             """
@@ -348,18 +350,31 @@ def save_recommendation_evaluations(
 
 
 
+        print(
+            "SAVING EVALUATION:",
+            row["ticker"],
+            "Days:",
+            days_after
+        )
+
+
+
+        # ---------------------------------
+        # Insert evaluation
+        # ---------------------------------
+
         cursor.execute(
             """
             INSERT INTO recommendation_evaluations
             (
                 recommendation_id,
                 ticker,
+                signal,
                 evaluation_date,
                 days_after,
                 price,
                 return_percent,
                 outcome,
-                signal,
                 investment_score,
                 technical_score,
                 quality_score
@@ -369,45 +384,98 @@ def save_recommendation_evaluations(
 
             """,
             (
-                row["recommendation_id"],
-                row["ticker"],
-                row["evaluation_date"],
-                row["days_after"],
-                row["price"],
-                row["return_percent"],
-                row["outcome"],
-                row.get("Signal"),
-                row.get("Investment Score"),
-                row.get("Technical Score"),
-                row.get("Quality Score")
+
+                row[
+                    "recommendation_id"
+                ],
+
+                row[
+                    "ticker"
+                ],
+
+                row.get(
+                    "Signal",
+                    row.get(
+                        "signal",
+                        ""
+                    )
+                ),
+
+                row[
+                    "evaluation_date"
+                ],
+
+                row[
+                    "days_after"
+                ],
+
+                row[
+                    "price"
+                ],
+
+                row[
+                    "return_percent"
+                ],
+
+                row[
+                    "outcome"
+                ],
+
+                row.get(
+                    "Investment Score",
+                    row.get(
+                        "investment_score",
+                        0
+                    )
+                ),
+
+                row.get(
+                    "Technical Score",
+                    row.get(
+                        "technical_score",
+                        0
+                    )
+                ),
+
+                row.get(
+                    "Quality Score",
+                    row.get(
+                        "quality_score",
+                        0
+                    )
+                )
+
             )
+
         )
 
 
-        cursor.execute(
-            """
-            UPDATE recommendations
-            SET evaluated = 1
-            WHERE id = ?
-            """,
-            (
-                recommendation_id,
-            )
-        )
+
+        # ---------------------------------
+        # Mark recommendation evaluated
+        # ---------------------------------
+
+
+
 
 
         saved += 1
 
 
 
+    # ---------------------------------
+    # Commit transaction
+    # ---------------------------------
+
     conn.commit()
+
     conn.close()
 
 
-    print(
-        f"Saved {saved} recommendation evaluations"
-    )
 
+    print(
+        f"Saved {saved} evaluations"
+    )
 
 # -------------------------------------------------
 # Evaluation history

@@ -1,4 +1,9 @@
 from analysis.adaptive_learning import get_adaptive_adjustments
+from analysis.investment_score import calculate_investment_score
+
+# =====================================================
+# Stock Scoring Engine
+# =====================================================
 
 
 def score_stock(df):
@@ -9,9 +14,9 @@ def score_stock(df):
     risks = []
 
 
-    # ---------------------------------
-    # Base category scores
-    # ---------------------------------
+    # =================================================
+    # Base Scores
+    # =================================================
 
     trend_score = 0
     momentum_score = 0
@@ -19,34 +24,66 @@ def score_stock(df):
     risk_score = 15
 
 
-    close = float(latest["Close"])
-    sma50 = float(latest["SMA50"])
-    sma200 = float(latest["SMA200"])
-    rsi = float(latest["RSI"])
+    close = float(
+        latest["Close"]
+    )
 
-    rtn = float(latest["Return_3m"]) * 100
+    sma50 = float(
+        latest["SMA50"]
+    )
+
+    sma200 = float(
+        latest["SMA200"]
+    )
+
+    rsi = float(
+        latest["RSI"]
+    )
 
 
-    # ---------------------------------
+    rtn = float(
+        latest["Return_3m"]
+    ) * 100
+
+
+
+    # =================================================
     # Trend Score (40)
-    # ---------------------------------
+    # =================================================
 
     distance200 = (
-        (close - sma200)
+
+        (
+            close
+            -
+            sma200
+        )
+
         /
+
         sma200
+
     ) * 100
+
 
 
     distance50 = (
-        (close - sma50)
+
+        (
+            close
+            -
+            sma50
+        )
+
         /
+
         sma50
+
     ) * 100
 
 
 
-    # Long term trend filter
+    # Long term trend
 
     if distance200 > 0:
 
@@ -66,7 +103,7 @@ def score_stock(df):
 
 
 
-    # Entry position relative to 50 DMA
+    # Entry zone
 
     if 0 <= distance50 <= 3:
 
@@ -107,7 +144,7 @@ def score_stock(df):
 
 
 
-    # Trend structure
+    # Moving average structure
 
     if sma50 > sma200:
 
@@ -127,11 +164,10 @@ def score_stock(df):
 
 
 
-    # ---------------------------------
+    # =================================================
     # Momentum Score (35)
-    # ---------------------------------
+    # =================================================
 
-    # Prefer earlier momentum
 
     if 45 <= rsi <= 60:
 
@@ -153,11 +189,11 @@ def score_stock(df):
 
     elif rsi > 70:
 
+        risk_score -= 5
+
         risks.append(
             "Overbought RSI"
         )
-
-        risk_score -= 5
 
 
     elif 35 <= rsi < 45:
@@ -223,16 +259,22 @@ def score_stock(df):
             "Positive momentum"
         )
 
-
-
-    # ---------------------------------
+            # =================================================
     # Volume Score (15)
-    # ---------------------------------
+    # =================================================
 
     volume_ratio = (
-        float(latest["Volume"])
+
+        float(
+            latest["Volume"]
+        )
+
         /
-        float(latest["Volume_avg"])
+
+        float(
+            latest["Volume_avg"]
+        )
+
     )
 
 
@@ -271,9 +313,10 @@ def score_stock(df):
 
 
 
-    # ---------------------------------
-    # Risk adjustments
-    # ---------------------------------
+    # =================================================
+    # Risk Score Adjustments (15)
+    # =================================================
+
 
     if rsi > 75:
 
@@ -310,18 +353,27 @@ def score_stock(df):
 
 
 
-    # ---------------------------------
+    # =================================================
     # Technical Score
-    # ---------------------------------
+    # =================================================
+
 
     base_score = (
+
         trend_score
+
         +
+
         momentum_score
+
         +
+
         volume_score
+
         +
+
         risk_score
+
     )
 
 
@@ -335,16 +387,20 @@ def score_stock(df):
 
 
 
-    # ---------------------------------
-    # Adaptive adjustment
-    # ---------------------------------
+    # =================================================
+    # Adaptive Learning Adjustment
+    # =================================================
+
 
     adaptive_adjustment = 0
 
 
     try:
 
-        adjustments = get_adaptive_adjustments()
+        adjustments = (
+            get_adaptive_adjustments()
+        )
+
 
         signal = latest.get(
             "Signal",
@@ -365,10 +421,15 @@ def score_stock(df):
 
 
     technical_score = (
+
         base_score
+
         +
+
         adaptive_adjustment
+
     )
+
 
 
     technical_score = max(
@@ -381,11 +442,44 @@ def score_stock(df):
 
 
 
-    # ---------------------------------
-    # Confidence
-    # ---------------------------------
+    # =================================================
+    # Internal Component Scores
+    # =================================================
 
-    confidence = round(
+    #
+    # These are placeholders until the
+    # quality and growth engines are connected.
+    #
+    # They keep compatibility with:
+    #
+    # - weight_optimizer.py
+    # - learning_calibration.py
+    # - reports
+    #
+
+
+    quality_score = round(
+        (
+            technical_score
+            *
+            0.7
+        ),
+        1
+    )
+
+
+    growth_score = round(
+        (
+            technical_score
+            *
+            0.5
+        ),
+        1
+    )
+
+
+
+    confidence_score = round(
         (
             (
                 trend_score / 40
@@ -396,18 +490,87 @@ def score_stock(df):
                 +
                 risk_score / 15
             )
+
             /
+
             4
+
         )
+
         *
+
         100,
+
         1
+    )
+
+        # =================================================
+    # Final Investment Score
+    # =================================================
+
+    #
+    # Temporary blended investment score.
+    #
+    # The weight optimiser will eventually
+    # replace these defaults dynamically.
+    #
+
+    investment_score = calculate_investment_score(
+
+        technical_score,
+
+        quality_score,
+
+        growth_score,
+
+        confidence_score
+
     )
 
 
 
+    # =================================================
+    # Final Signal
+    # =================================================
+
+
+    if investment_score >= 85:
+
+        signal = "STRONG BUY"
+
+
+    elif investment_score >= 70:
+
+        signal = "BUY"
+
+
+    elif investment_score >= 55:
+
+        signal = "WATCH"
+
+
+    elif investment_score >= 40:
+
+        signal = "HOLD"
+
+
+    else:
+
+        signal = "SELL"
+
+
+
+    # =================================================
+    # Return Result
+    # =================================================
+
+
     return {
 
+
+        # ---------------------------------
+        # Core Scores
+        # ---------------------------------
 
         "Score": round(
             base_score
@@ -418,6 +581,31 @@ def score_stock(df):
             technical_score
         ),
 
+
+        "Investment Score": round(
+            investment_score
+        ),
+
+
+        "Quality Score": round(
+            quality_score
+        ),
+
+
+        "Growth Score": round(
+            growth_score
+        ),
+
+
+        "Confidence Score": round(
+            confidence_score
+        ),
+
+
+
+        # ---------------------------------
+        # Technical Components
+        # ---------------------------------
 
         "Trend Score": round(
             trend_score
@@ -439,28 +627,39 @@ def score_stock(df):
         ),
 
 
+
         "Adaptive Adjustment": round(
             adaptive_adjustment,
             2
         ),
 
 
-        # Maintains compatibility
-        "Investment Score": round(
-            technical_score
-        ),
+
+        # ---------------------------------
+        # Recommendation
+        # ---------------------------------
+
+        "Signal": signal,
 
 
-        "Confidence": confidence,
+        "Confidence": confidence_score,
 
+
+
+        # ---------------------------------
+        # Explanation
+        # ---------------------------------
 
         "Technical Reasons": reasons,
+
 
         "Technical Risks": risks,
 
 
         "Recommendation Reasons": reasons,
 
+
         "Recommendation Risks": risks
+
 
     }
