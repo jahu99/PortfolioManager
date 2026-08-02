@@ -4,11 +4,60 @@ import os
 from datetime import datetime, timedelta
 
 
+# =================================
+# Historical price cache
+# =================================
+
 CACHE_DIR = "data/cache/prices"
 
+CACHE_MAX_AGE_DAYS = 30
 
+
+
+# =================================
+# Helpers
+# =================================
+
+def clean_yfinance_dataframe(df):
+
+    if isinstance(
+        df.columns,
+        pd.MultiIndex
+    ):
+
+        df.columns = (
+            df.columns
+            .get_level_values(0)
+        )
+
+    return df
+
+
+
+def extract_close_price(df):
+
+    close = df["Close"]
+
+    if isinstance(
+        close,
+        pd.DataFrame
+    ):
+
+        close = close.iloc[:,0]
+
+
+    return float(
+        close.iloc[-1]
+    )
+
+
+
+# =================================
+# Historical stock data
+# =================================
 
 def get_stock_data(ticker):
+
 
     os.makedirs(
         CACHE_DIR,
@@ -22,11 +71,15 @@ def get_stock_data(ticker):
     )
 
 
+
     # -----------------------------
-    # Load cache
+    # Load historical cache
     # -----------------------------
 
-    if os.path.exists(cache_file):
+    if cache_is_fresh(
+        cache_file
+    ):
+
 
         try:
 
@@ -34,66 +87,70 @@ def get_stock_data(ticker):
                 cache_file
             )
 
+
         except Exception:
 
             pass
 
 
 
-    # -----------------------------
-    # Download historical data
-    # -----------------------------
-
     print(
         f"Downloading historical data {ticker}"
     )
 
 
-    df = yf.download(
-        ticker,
-        period="2y",
-        progress=False,
-        auto_adjust=False
-    )
+
+    try:
+
+        df = yf.download(
+            ticker,
+            period="2y",
+            progress=False,
+            auto_adjust=False
+        )
 
 
-    if df.empty:
+        if df.empty:
+
+            return pd.DataFrame()
+
+
+
+        df = clean_yfinance_dataframe(
+            df
+        )
+
+
+        df.to_pickle(
+            cache_file
+        )
+
+
+        return df
+
+
+
+    except Exception as e:
+
+
+        print(
+            f"Historical download error {ticker}: {e}"
+        )
+
 
         return pd.DataFrame()
 
 
 
-    if isinstance(
-        df.columns,
-        pd.MultiIndex
-    ):
-
-        df.columns = (
-            df.columns
-            .get_level_values(0)
-        )
-
-
-
-    df.to_pickle(
-        cache_file
-    )
-
-
-    return df
-
-
-
-
-
 # =================================
-# LIVE PRICE FOR EVALUATION ENGINE
+# LIVE PRICE
 # =================================
 
 def get_current_price(ticker):
 
 
     try:
+
 
         print(
             f"Fetching live price {ticker}"
@@ -114,21 +171,13 @@ def get_current_price(ticker):
 
 
 
-        if isinstance(
-            df.columns,
-            pd.MultiIndex
-        ):
-
-            df.columns = (
-                df.columns
-                .get_level_values(0)
-            )
+        df = clean_yfinance_dataframe(
+            df
+        )
 
 
-
-        price = float(
-            df["Close"]
-            .iloc[-1]
+        price = extract_close_price(
+            df
         )
 
 
@@ -145,7 +194,10 @@ def get_current_price(ticker):
 
 
         return None
-    
+
+
+
+
 # =================================
 # HISTORICAL PRICE LOOKUP
 # =================================
@@ -155,56 +207,72 @@ def get_price_on_date(
     target_date
 ):
 
+
     try:
+
 
         df = get_stock_data(
             ticker
         )
 
+
         if df.empty:
 
             return None
 
-        if isinstance(
-            target_date,
-            str
-        ):
 
-            target_date = pd.to_datetime(
-                target_date
-            )
 
-        # Ensure index is datetime
+        target_date = pd.to_datetime(
+            target_date
+        )
+
+
         df.index = pd.to_datetime(
             df.index
         )
 
-        # Find first trading day
-        future_prices = df[
+
+        prices = df[
             df.index >= target_date
         ]
 
-        if future_prices.empty:
+
+
+        if prices.empty:
 
             return None
 
-        return float(
-            future_prices["Close"]
-            .iloc[0]
-        )
+
+
+        price = prices["Close"].iloc[0]
+
+
+        if isinstance(
+            price,
+            pd.Series
+        ):
+
+            price = price.iloc[0]
+
+
+        return float(price)
+
+
 
     except Exception as e:
+
 
         print(
             f"Historical price error {ticker}: {e}"
         )
+
 
         return None
 
 
 
 # =================================
-# PRICE AFTER N DAYS
+# PRICE AFTER N BUSINESS DAYS
 # =================================
 
 def get_price_after_days(
@@ -213,19 +281,13 @@ def get_price_after_days(
     days
 ):
 
-    from datetime import datetime, timedelta
-    import pandas as pd
-
 
     try:
+
 
         start = pd.to_datetime(
             start_date
         )
-
-
-        # Get latest available market date
-        latest_market_date = pd.Timestamp.today()
 
 
         target_date = (
@@ -235,12 +297,11 @@ def get_price_after_days(
         )
 
 
-        # Future date protection
-        if target_date > latest_market_date:
+
+        if target_date > pd.Timestamp.today():
 
             print(
-                f"{ticker}: "
-                f"{days} trading days unavailable yet"
+                f"{ticker}: {days} trading days unavailable yet"
             )
 
             return None
@@ -263,21 +324,26 @@ def get_price_after_days(
         )
 
 
-        future_prices = df[
+
+        prices = df[
             df.index >= target_date
         ]
 
 
-        if future_prices.empty:
+
+        if prices.empty:
 
             return None
 
 
 
-        price = future_prices.iloc[0]["Close"]
+        price = prices["Close"].iloc[0]
 
 
-        if isinstance(price, pd.Series):
+        if isinstance(
+            price,
+            pd.Series
+        ):
 
             price = price.iloc[0]
 
@@ -293,4 +359,42 @@ def get_price_after_days(
             f"Price lookup error {ticker}: {e}"
         )
 
+
         return None
+
+
+
+# =================================
+# Historical cache validation
+# =================================
+
+def cache_is_fresh(
+    cache_file
+):
+
+
+    if not os.path.exists(
+        cache_file
+    ):
+
+        return False
+
+
+
+    modified_time = datetime.fromtimestamp(
+        os.path.getmtime(
+            cache_file
+        )
+    )
+
+
+    age = (
+        datetime.now()
+        -
+        modified_time
+    )
+
+
+    return age < timedelta(
+        days=CACHE_MAX_AGE_DAYS
+    )
