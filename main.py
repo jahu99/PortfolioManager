@@ -126,6 +126,8 @@ from analysis.portfolio_enrichment import (
             enrich_portfolio_holdings
 )
 
+from data.universe import get_market_universe
+
 
 def main():
 
@@ -305,15 +307,8 @@ def main():
     # Load universe
     # ---------------------------------
 
-    universe = get_universe(
-        [
-            "sp500",
-            "nasdaq100",
-            # "dow30",
-            # "ftse100",
-            # "etfs"
-        ]
-    )
+    
+    universe = get_market_universe()
 
 
     # ---------------------------------
