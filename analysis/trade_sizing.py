@@ -3,12 +3,12 @@ import pandas as pd
 
 
 STARTER_POSITION_VALUE = 500
-
 MAX_NEW_POSITIONS = 5
 
-MAX_SECTOR_POSITIONS = 2
 
-
+# -------------------------------------------------------
+# Confidence scoring
+# -------------------------------------------------------
 
 def calculate_confidence(
     investment_score,
@@ -20,21 +20,16 @@ def calculate_confidence(
 
     if investment_score >= 80:
         score += 40
-
     elif investment_score >= 70:
         score += 25
 
-
     if quality_score >= 70:
         score += 30
-
     elif quality_score >= 50:
         score += 15
 
-
     if signal == "STRONG BUY":
         score += 30
-
     elif signal == "BUY":
         score += 20
 
@@ -45,14 +40,86 @@ def calculate_confidence(
     elif score >= 50:
         return "Medium"
 
-    else:
-        return "Low"
+    return "Low"
 
 
+
+# -------------------------------------------------------
+# Extract sector targets
+# -------------------------------------------------------
+
+def build_sector_targets(
+    portfolio_optimisation
+):
+
+    targets = {}
+
+
+    if (
+        portfolio_optimisation is None
+        or not isinstance(
+            portfolio_optimisation,
+            pd.DataFrame
+        )
+        or portfolio_optimisation.empty
+    ):
+        return targets
+
+
+    for _, row in portfolio_optimisation.iterrows():
+
+        sector = row.get(
+            "Sector"
+        )
+
+        if not sector:
+            continue
+
+
+        current = row.get(
+            "Current %",
+            row.get(
+                "Current Allocation %",
+                0
+            )
+        )
+
+
+        target = row.get(
+            "Target %",
+            row.get(
+                "Target Allocation %",
+                0
+            )
+        )
+
+
+        action = row.get(
+            "Action",
+            ""
+        )
+
+
+        targets[sector] = {
+
+            "Current": current,
+            "Target": target,
+            "Action": action
+
+        }
+
+
+    return targets
+
+
+
+# -------------------------------------------------------
+# Generate trade plan
+# -------------------------------------------------------
 
 def generate_trade_plan(
     portfolio_summary,
-    sector_optimisation,
+    portfolio_optimisation,
     stock_results
 ):
 
@@ -77,53 +144,33 @@ def generate_trade_plan(
 
 
 
-    # ---------------------------------
-    # Sector targets
-    # ---------------------------------
+    sector_targets = build_sector_targets(
+        portfolio_optimisation
+    )
 
-    sector_targets = {}
-
-
-    if (
-        sector_optimisation is not None
-        and not sector_optimisation.empty
-    ):
-
-        for _, row in sector_optimisation.iterrows():
-
-            sector_targets[row["Sector"]] = {
-
-                "Current":
-                    row.get(
-                        "Current %",
-                        0
-                    ),
-
-                "Target":
-                    row.get(
-                        "Target %",
-                        0
-                    )
-
-            }
-
-
-
-    # ---------------------------------
-    # SELL analysis
-    # ---------------------------------
 
     sold_tickers = set()
 
 
+
+    # ---------------------------------------------------
+    # SELL overweight positions
+    # ---------------------------------------------------
+
     for _, holding in portfolio_summary.iterrows():
 
-        ticker = holding["Ticker"]
+
+        ticker = holding.get(
+            "Ticker",
+            ""
+        )
+
 
         sector = holding.get(
             "Sector",
             "Unknown"
         )
+
 
         current_value = holding.get(
             "Current Value",
@@ -137,7 +184,8 @@ def generate_trade_plan(
         ) * 100
 
 
-        target_allocation = sector_targets.get(
+
+        target = sector_targets.get(
             sector,
             {}
         ).get(
@@ -146,29 +194,29 @@ def generate_trade_plan(
         )
 
 
-        if allocation > target_allocation + 5:
 
-
-            excess = (
-                allocation -
-                target_allocation
-            )
+        if allocation > target + 5:
 
 
             sell_value = (
-                excess /
-                100
-            ) * total_value
+                allocation -
+                target
+            ) / 100 * total_value
+
 
 
             price = holding.get(
                 "Current Price",
-                0
+                holding.get(
+                    "Price",
+                    0
+                )
             )
 
 
             if price <= 0:
                 continue
+
 
 
             shares = math.floor(
@@ -181,62 +229,44 @@ def generate_trade_plan(
                 continue
 
 
+
             trades.append(
                 {
 
                     "Priority": 1,
-
-                    "Action":
-                        "SELL",
-
-                    "Ticker":
-                        ticker,
-
-                    "Sector":
-                        sector,
-
-                    "Trade Value":
-                        round(
-                            -sell_value,
-                            2
-                        ),
-
-                    "Shares":
-                        -shares,
-
-                    "Current Allocation %":
-                        round(
-                            allocation,
-                            2
-                        ),
-
-                    "Target Allocation %":
-                        round(
-                            target_allocation,
-                            2
-                        ),
-
+                    "Action": "SELL",
+                    "Ticker": ticker,
+                    "Sector": sector,
+                    "Trade Value": round(
+                        -sell_value,
+                        2
+                    ),
+                    "Shares": -shares,
+                    "Current Allocation %": round(
+                        allocation,
+                        2
+                    ),
+                    "Target Allocation %": round(
+                        target,
+                        2
+                    ),
                     "Investment Score":
                         holding.get(
                             "Investment Score",
                             0
                         ),
-
                     "Quality Score":
                         holding.get(
                             "Quality Score",
                             0
                         ),
-
                     "Signal":
                         holding.get(
                             "Signal",
                             ""
                         ),
-
                     "Confidence":
                         "High",
-
                     "Reason":
                         f"{sector} above target allocation"
 
@@ -250,263 +280,256 @@ def generate_trade_plan(
 
 
 
-    # ---------------------------------
-    # BUY candidate selection
-    # ---------------------------------
+    # ---------------------------------------------------
+    # Normalise stock results
+    # ---------------------------------------------------
 
-    candidates = []
+    if isinstance(
+        stock_results,
+        list
+    ):
 
-
-    for stock in stock_results:
-
-
-        ticker = stock.get(
-            "Ticker"
+        stocks = pd.DataFrame(
+            stock_results
         )
+
+    else:
+
+        stocks = stock_results.copy()
+
+
+
+    if stocks is None or stocks.empty:
+        return pd.DataFrame(trades)
+
+
+
+    if "Ticker" not in stocks.columns:
+
+        if "Symbol" in stocks.columns:
+            stocks["Ticker"] = stocks["Symbol"]
+
+        elif "ticker" in stocks.columns:
+            stocks["Ticker"] = stocks["ticker"]
+
+        else:
+            return pd.DataFrame(trades)
+
+
+
+    # ---------------------------------------------------
+    # BUY candidates
+    # ---------------------------------------------------
+
+    candidates = stocks.copy()
+
+
+    candidates = candidates[
+        candidates["Signal"].isin(
+            [
+                "BUY",
+                "STRONG BUY"
+            ]
+        )
+    ]
+
+
+
+    if "Investment Score" in candidates.columns:
+
+        candidates = candidates[
+            candidates["Investment Score"] >= 75
+        ]
+
+
+
+    candidates = candidates.sort_values(
+        by="Investment Score",
+        ascending=False
+    )
+
+
+
+    # ---------------------------------------------------
+    # Rebalance BUYs first
+    # ---------------------------------------------------
+
+    priority = 2
+
+
+    for sector, details in sector_targets.items():
+
+
+        if details["Action"] not in [
+            "ADD",
+            "BUY"
+        ]:
+            continue
+
+
+
+        sector_candidates = candidates[
+            candidates["Sector"] == sector
+        ]
+
+
+
+        if sector_candidates.empty:
+            continue
+
+
+
+        stock = sector_candidates.iloc[0]
+
+
+        ticker = stock["Ticker"]
 
 
         if ticker in sold_tickers:
             continue
 
 
-        signal = stock.get(
-            "Signal",
-            ""
+
+        trades.append(
+            {
+
+                "Priority": priority,
+                "Action": "BUY",
+                "Ticker": ticker,
+                "Sector": sector,
+                "Trade Value": STARTER_POSITION_VALUE,
+                "Shares": math.floor(
+                    STARTER_POSITION_VALUE /
+                    stock.get(
+                        "Price",
+                        1
+                    )
+                ),
+                "Current Allocation %": 0,
+                "Target Allocation %": 5,
+                "Investment Score":
+                    stock.get(
+                        "Investment Score",
+                        0
+                    ),
+                "Quality Score":
+                    stock.get(
+                        "Quality Score",
+                        0
+                    ),
+                "Signal":
+                    stock.get(
+                        "Signal",
+                        ""
+                    ),
+                "Confidence":
+                    calculate_confidence(
+                        stock.get(
+                            "Investment Score",
+                            0
+                        ),
+                        stock.get(
+                            "Quality Score",
+                            0
+                        ),
+                        stock.get(
+                            "Signal",
+                            ""
+                        )
+                    ),
+                "Reason":
+                    "Portfolio rebalance recommendation"
+
+            }
         )
 
 
-        investment_score = stock.get(
-            "Investment Score",
-            0
-        )
-
-
-        if signal not in [
-            "BUY",
-            "STRONG BUY"
-        ]:
-            continue
-
-
-        if investment_score < 80:
-            continue
-
-
-        candidates.append(
-            stock
-        )
+        priority += 1
 
 
 
-    candidates = sorted(
-        candidates,
-        key=lambda x:
-            x.get(
-                "Investment Score",
-                0
-            ),
-        reverse=True
-    )
+    # ---------------------------------------------------
+    # High conviction additions
+    # ---------------------------------------------------
 
-
-
-    # ---------------------------------
-    # Available capital
-    # ---------------------------------
-
-    available_capital = sum(
-        -x["Trade Value"]
+    existing = {
+        x["Ticker"]
         for x in trades
-        if x["Action"] == "SELL"
-    )
+    }
 
 
 
-    if available_capital <= 0:
+    for _, stock in candidates.iterrows():
 
-        return pd.DataFrame(
+
+        if len(
             trades
-        )
-
-
-
-    # ---------------------------------
-    # BUY allocation
-    # ---------------------------------
-
-    buy_budget = min(
-        available_capital,
-        STARTER_POSITION_VALUE *
-        min(
-            len(candidates),
-            MAX_NEW_POSITIONS
-        )
-    )
-
-
-    selected_candidates = []
-
-
-    sector_counts = {}
-
-
-    for stock in candidates:
-
-
-        if len(selected_candidates) >= MAX_NEW_POSITIONS:
+        ) >= MAX_NEW_POSITIONS + 2:
             break
 
-
-        sector = stock.get(
-            "Sector",
-            "Unknown"
-        )
-
-
-        current_count = sector_counts.get(
-            sector,
-            0
-        )
-
-
-        if current_count >= MAX_SECTOR_POSITIONS:
-            continue
-
-
-        selected_candidates.append(
-            stock
-        )
-
-
-        sector_counts[sector] = (
-            current_count + 1
-        )
-
-
-
-    if not selected_candidates:
-
-        return pd.DataFrame(
-            trades
-        )
-
-
-
-    allocation_per_stock = (
-        buy_budget /
-        len(selected_candidates)
-    )
-
-
-
-    priority = 2
-
-
-
-    for stock in selected_candidates:
 
 
         ticker = stock["Ticker"]
 
 
-        price = stock.get(
-            "Price",
-            0
-        )
-
-
-        if price <= 0:
+        if ticker in existing:
             continue
 
-
-        shares = math.floor(
-            allocation_per_stock /
-            price
-        )
-
-
-        if shares <= 0:
-            continue
-
-
-
-        investment_score = stock.get(
-            "Investment Score",
-            0
-        )
-
-
-        quality_score = stock.get(
-            "Quality Score",
-            0
-        )
-
-
-        signal = stock.get(
-            "Signal",
-            ""
-        )
-
-
-        confidence = calculate_confidence(
-            investment_score,
-            quality_score,
-            signal
-        )
 
 
         trades.append(
             {
 
-                "Priority":
-                    priority,
-
-                "Action":
-                    "BUY",
-
-                "Ticker":
-                    ticker,
-
+                "Priority": priority,
+                "Action": "BUY",
+                "Ticker": ticker,
                 "Sector":
                     stock.get(
                         "Sector",
                         ""
                     ),
-
-                "Trade Value":
-                    round(
-                        allocation_per_stock,
-                        2
-                    ),
-
-                "Shares":
-                    shares,
-
-                "Current Allocation %":
-                    0,
-
-                "Target Allocation %":
-                    5,
-
-                "Investment Score":
-                    investment_score,
-
-                "Quality Score":
-                    quality_score,
-
-                "Signal":
-                    signal,
-
-                "Confidence":
-                    confidence,
-
-                "Reason":
-                    (
-                        "Starter position based on "
-                        "high investment score, "
-                        "acceptable quality, and "
-                        "portfolio diversification"
+                "Trade Value": STARTER_POSITION_VALUE,
+                "Shares": math.floor(
+                    STARTER_POSITION_VALUE /
+                    stock.get(
+                        "Price",
+                        1
                     )
+                ),
+                "Current Allocation %": 0,
+                "Target Allocation %": 5,
+                "Investment Score":
+                    stock.get(
+                        "Investment Score",
+                        0
+                    ),
+                "Quality Score":
+                    stock.get(
+                        "Quality Score",
+                        0
+                    ),
+                "Signal":
+                    stock.get(
+                        "Signal",
+                        ""
+                    ),
+                "Confidence":
+                    calculate_confidence(
+                        stock.get(
+                            "Investment Score",
+                            0
+                        ),
+                        stock.get(
+                            "Quality Score",
+                            0
+                        ),
+                        stock.get(
+                            "Signal",
+                            ""
+                        )
+                    ),
+                "Reason":
+                    "High conviction opportunity"
 
             }
         )
