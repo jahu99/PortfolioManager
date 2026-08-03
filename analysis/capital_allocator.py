@@ -1,3 +1,5 @@
+# analysis/capital_allocator.py
+
 import pandas as pd
 
 from config.investment_config import (
@@ -34,7 +36,10 @@ def confidence_score(value):
 # Opportunity scoring
 # ==================================================
 
-def allocation_score(stock, sector_summary):
+def allocation_score(
+    stock,
+    sector_summary
+):
 
     investment = float(
         stock.get(
@@ -56,6 +61,7 @@ def allocation_score(stock, sector_summary):
             "Medium"
         )
     )
+
 
     sector = stock.get(
         "Sector",
@@ -79,8 +85,12 @@ def allocation_score(stock, sector_summary):
 
         if not match.empty:
 
-            if match.iloc[0].get("Action") == "ADD":
+            if match.iloc[0].get(
+                "Action"
+            ) == "ADD":
+
                 sector_need = 100
+
 
 
     return round(
@@ -102,7 +112,9 @@ def allocation_score(stock, sector_summary):
 # Sector exposure
 # ==================================================
 
-def sector_exposure(portfolio):
+def sector_exposure(
+    portfolio
+):
 
     if portfolio is None or portfolio.empty:
         return pd.DataFrame()
@@ -110,12 +122,15 @@ def sector_exposure(portfolio):
 
     if (
         "Sector" not in portfolio.columns
-        or "Current Value" not in portfolio.columns
+        or
+        "Current Value" not in portfolio.columns
     ):
         return pd.DataFrame()
 
 
-    total = portfolio["Current Value"].sum()
+    total = portfolio[
+        "Current Value"
+    ].sum()
 
 
     if total == 0:
@@ -147,40 +162,52 @@ def sector_exposure(portfolio):
 # Core holding protection
 # ==================================================
 
-def is_core_holding(holding):
+def is_core_holding(
+    holding
+):
 
-    #
-    # Prefer scanner scores if available
-    # Otherwise keep existing portfolio scores
-    #
-
-    score = float(
-        holding.get(
-            "Investment Score_Scanner",
-            holding.get(
-                "Investment Score",
-                0
-            )
-        )
-        or 0
+    ticker = holding.get(
+        "Ticker",
+        ""
     )
 
 
-    quality = float(
+    #
+    # Strategic long-term holdings
+    #
+    protected_tickers = [
+        "NVDA",
+        "MSFT",
+        "GOOGL",
+        "AAPL"
+    ]
+
+
+    if ticker in protected_tickers:
+
+        return True
+
+
+
+    investment_score = float(
         holding.get(
-            "Quality Score_Scanner",
-            holding.get(
-                "Quality Score",
-                0
-            )
+            "Investment Score",
+            0
         )
-        or 0
     )
 
 
-    signal = str(
+    quality_score = float(
         holding.get(
-            "Signal",
+            "Quality Score",
+            0
+        )
+    )
+
+
+    confidence = str(
+        holding.get(
+            "Confidence",
             ""
         )
     )
@@ -188,16 +215,16 @@ def is_core_holding(holding):
 
     return (
 
-        score >= 85
+        investment_score >= 90
         and
-        quality >= 55
+        quality_score >= 60
+        and
+        confidence in [
+            "High",
+            "Medium"
+        ]
 
-    ) or signal in [
-
-        "BUY",
-        "STRONG BUY"
-
-    ]
+    )
 
 
 
@@ -205,7 +232,9 @@ def is_core_holding(holding):
 # Reduction recommendations
 # ==================================================
 
-def generate_reductions(portfolio):
+def generate_reductions(
+    portfolio
+):
 
     reductions = []
 
@@ -219,6 +248,7 @@ def generate_reductions(portfolio):
         return reductions
 
 
+
     total_value = portfolio[
         "Current Value"
     ].sum()
@@ -228,6 +258,7 @@ def generate_reductions(portfolio):
     for _, row in exposure.iterrows():
 
         sector = row["Sector"]
+
 
         current = float(
             row["Allocation %"]
@@ -259,45 +290,44 @@ def generate_reductions(portfolio):
         )
 
 
+
         holdings = portfolio[
             portfolio["Sector"] == sector
         ].copy()
 
 
 
+        #
         # weakest first
-        if "Investment Score_Scanner" in holdings.columns:
+        #
+        sort_columns = []
 
-            holdings["Sort Score"] = (
-                holdings[
-                    "Investment Score_Scanner"
-                ]
-                .fillna(0)
+
+        for col in [
+            "Investment Score",
+            "Quality Score",
+            "Confidence Score"
+        ]:
+
+            if col in holdings.columns:
+
+                sort_columns.append(col)
+
+
+
+        if sort_columns:
+
+            holdings = holdings.sort_values(
+                sort_columns,
+                ascending=True
             )
 
-        elif "Investment Score" in holdings.columns:
-
-            holdings["Sort Score"] = (
-                holdings[
-                    "Investment Score"
-                ]
-                .fillna(0)
-            )
-
-        else:
-
-            holdings["Sort Score"] = 0
-
-
-
-        holdings = holdings.sort_values(
-            "Sort Score"
-        )
 
 
         sells = []
 
         protected = []
+
 
         remaining = required
 
@@ -308,6 +338,7 @@ def generate_reductions(portfolio):
             ticker = holding["Ticker"]
 
 
+
             if is_core_holding(
                 holding
             ):
@@ -316,7 +347,7 @@ def generate_reductions(portfolio):
                     {
                         "Ticker": ticker,
                         "Reason":
-                            "Protected core holding"
+                        "Core high conviction holding protected"
                     }
                 )
 
@@ -330,9 +361,7 @@ def generate_reductions(portfolio):
 
 
             value = float(
-                holding[
-                    "Current Value"
-                ]
+                holding["Current Value"]
             )
 
 
@@ -345,12 +374,15 @@ def generate_reductions(portfolio):
             sells.append(
                 {
                     "Ticker": ticker,
-                    "Sell Amount": round(
+
+                    "Sell Amount":
+                    round(
                         sell_amount,
                         2
                     ),
+
                     "Reason":
-                        "Reduce overweight sector exposure"
+                    "Reduce lower conviction exposure"
                 }
             )
 
@@ -359,43 +391,57 @@ def generate_reductions(portfolio):
 
 
 
+        achieved = round(
+            required - remaining,
+            2
+        )
+
+
         reductions.append(
             {
+
                 "Sector": sector,
 
                 "Current Allocation %":
-                    round(current,2),
+                round(
+                    current,
+                    2
+                ),
 
                 "Target Allocation %":
-                    target,
+                target,
 
                 "Reduction Required":
-                    required,
+                required,
+
 
                 "Reduction Achieved":
-                    round(
-                        required - remaining,
-                        2
-                    ),
+                achieved,
+
 
                 "Reduction Remaining":
-                    round(
-                        remaining,
-                        2
-                    ),
+                round(
+                    remaining,
+                    2
+                ),
+
 
                 "Rebalance Status":
-                    "COMPLETE"
-                    if remaining <= 0
-                    else "PARTIAL",
+                "COMPLETE"
+                if remaining <= 0
+                else "PARTIAL",
+
 
                 "Sell Candidates":
-                    sells,
+                sells,
+
 
                 "Protected Holdings":
-                    protected
+                protected
+
             }
         )
+
 
 
     return reductions
@@ -403,7 +449,7 @@ def generate_reductions(portfolio):
 
 
 # ==================================================
-# Main capital allocator
+# Main allocator
 # ==================================================
 
 def generate_capital_allocation(
@@ -417,22 +463,30 @@ def generate_capital_allocation(
     result = {
 
         "Available Cash":
-            AVAILABLE_CASH,
+        AVAILABLE_CASH,
 
         "Cash Remaining":
-            AVAILABLE_CASH,
+        AVAILABLE_CASH,
 
-        "BUY": [],
+        "BUY":
+        [],
 
-        "REDUCE": [],
+        "REDUCE":
+        [],
 
-        "AVOID": [],
+        "AVOID":
+        [],
 
-        "RISKS": []
+        "RISKS":
+        []
 
     }
 
 
+
+    # ------------------------------
+    # Reduce
+    # ------------------------------
 
     result["REDUCE"] = generate_reductions(
         portfolio_summary
@@ -445,23 +499,31 @@ def generate_capital_allocation(
         result["AVOID"].append(
             {
                 "Sector":
-                    item["Sector"],
+                item["Sector"],
 
                 "Action":
-                    "Avoid new purchases",
+                "Avoid new purchases",
 
                 "Reason":
-                    "Sector allocation above target"
+                "Sector allocation above target"
             }
         )
 
 
+
+    # ------------------------------
+    # Risks
+    # ------------------------------
 
     if alerts:
 
         result["RISKS"] = alerts
 
 
+
+    # ------------------------------
+    # Buys
+    # ------------------------------
 
     if (
         opportunities is None
@@ -479,10 +541,10 @@ def generate_capital_allocation(
     candidates["Allocation Score"] = candidates.apply(
 
         lambda x:
-            allocation_score(
-                x,
-                sector_summary
-            ),
+        allocation_score(
+            x,
+            sector_summary
+        ),
 
         axis=1
 
@@ -497,11 +559,13 @@ def generate_capital_allocation(
          MIN_BUY_SCORE)
 
         &
+
         (candidates["Quality Score"]
          >=
          MIN_QUALITY_SCORE)
 
         &
+
         (
             candidates["Signal"]
             .isin(
@@ -540,45 +604,48 @@ def generate_capital_allocation(
             break
 
 
+
         amount = min(
             MAX_TRADE_VALUE,
             cash
         )
 
 
-        result["BUY"].append(
 
+        result["BUY"].append(
             {
+
                 "Ticker":
-                    stock["Ticker"],
+                stock["Ticker"],
 
                 "Sector":
-                    stock.get(
-                        "Sector"
-                    ),
+                stock.get(
+                    "Sector",
+                    "Unknown"
+                ),
 
                 "Amount":
-                    round(
-                        amount,
-                        2
-                    ),
+                round(
+                    amount,
+                    2
+                ),
 
                 "Investment Score":
-                    stock["Investment Score"],
+                stock["Investment Score"],
 
                 "Quality Score":
-                    stock["Quality Score"],
+                stock["Quality Score"],
 
                 "Confidence":
-                    stock.get(
-                        "Confidence"
-                    ),
+                stock.get(
+                    "Confidence",
+                    "Medium"
+                ),
 
                 "Reason":
-                    "High conviction opportunity"
+                "High conviction opportunity"
 
             }
-
         )
 
 
@@ -590,6 +657,7 @@ def generate_capital_allocation(
         cash + reserve,
         2
     )
+
 
 
     return result
