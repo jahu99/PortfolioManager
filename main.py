@@ -5,7 +5,6 @@ import traceback
 from analysis import recommendations
 from analysis import recommendation_learning
 
-from data.universe_manager import get_universe
 
 from data.market_data import get_stock_data
 from data.fundamentals import get_fundamentals
@@ -128,6 +127,9 @@ from analysis.portfolio_enrichment import (
 
 from data.universe import get_market_universe
 
+from analysis.universe_filter import filter_investable_universe
+
+from analysis.scanner import run_market_scan
 
 def main():
 
@@ -308,7 +310,11 @@ def main():
     # ---------------------------------
 
     
-    universe = get_market_universe()
+    tickers = get_market_universe()
+
+    tickers = filter_investable_universe(
+        tickers
+    )
 
 
     # ---------------------------------
@@ -322,57 +328,39 @@ def main():
     print(
         f"Portfolio holdings loaded: {portfolio_tickers}"
     )
-
-
-    print(
-        f"Scanning {len(universe)} stocks"
-    )
+    
 
     print(
-        f"Scanning {len(universe)} stocks"
+    f"Scanning universe: {len(tickers)} stocks"
     )
 
+
+    candidates = run_market_scan(
+        tickers,
+        limit=200
+    )
 
 
     results = []
-
 
 
     # ---------------------------------
     # Scan stocks
     # ---------------------------------
 
-    for ticker in universe:
+    for candidate in candidates:
 
 
         try:
+
+            ticker = candidate["Ticker"]
+
+            df = candidate["df"]
 
 
             print(
                 f"Scanning {ticker}"
             )
-
-
-            df = get_stock_data(
-                ticker
-            )
-
-
-            if df.empty:
-
-                continue
-
-
-
-            df = add_indicators(
-                df
-            )
-
-
-            if df.empty:
-
-                continue
-
 
 
             # ---------------------------------
@@ -409,7 +397,16 @@ def main():
 
 
 
-            score_result = score_stock(df)
+            try:
+                score_result = candidate["Score Result"]
+
+            except Exception as e:
+
+                print(
+                    f"SCORER FAILED {ticker}: {e}"
+                )
+
+                continue
 
 
             technical_score = score_result.get(

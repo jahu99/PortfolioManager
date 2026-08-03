@@ -1,286 +1,234 @@
 from analysis.adaptive_learning import get_adaptive_adjustments
 from analysis.investment_score import calculate_investment_score
 
+
+def safe_divide(
+    numerator,
+    denominator,
+    default=0
+):
+
+    try:
+
+        if denominator in (0, None):
+
+            return default
+
+
+        return numerator / denominator
+
+
+    except Exception:
+
+        return default
+    
 # =====================================================
 # Stock Scoring Engine
 # =====================================================
 
 
+import pandas as pd
+
+
 def score_stock(df):
 
-    latest = df.iloc[-1]
+    """
+    Technical scoring engine.
+
+    Returns:
+    - Technical Score
+    - Trend Score
+    - Momentum Score
+    - Volume Score
+    - Risk Score
+    - Reasons
+    - Risks
+    """
+
+    technical_score = 0
+
+    trend_score = 0
+    momentum_score = 0
+    volume_score = 0
+    risk_score = 0
 
     reasons = []
     risks = []
 
 
-    # =================================================
-    # Base Scores
-    # =================================================
-
-    trend_score = 0
-    momentum_score = 0
-    volume_score = 0
-    risk_score = 15
-
-
-    close = float(
-        latest["Close"]
-    )
-
-    sma50 = float(
-        latest["SMA50"]
-    )
-
-    sma200 = float(
-        latest["SMA200"]
-    )
-
-    rsi = float(
-        latest["RSI"]
-    )
+    if df.empty:
+        return {
+            "Technical Score": 0,
+            "Trend Score": 0,
+            "Momentum Score": 0,
+            "Volume Score": 0,
+            "Risk Score": 0,
+            "Technical Reasons": [],
+            "Technical Risks": []
+        }
 
 
-    rtn = float(
-        latest["Return_3m"]
-    ) * 100
+    latest = df.iloc[-1]
 
 
+    try:
 
-    # =================================================
-    # Trend Score (40)
-    # =================================================
-
-    distance200 = (
-
-        (
-            close
-            -
-            sma200
+        close = float(
+            latest["Close"]
         )
 
-        /
-
-        sma200
-
-    ) * 100
-
-
-
-    distance50 = (
-
-        (
-            close
-            -
-            sma50
+        sma50 = float(
+            latest["SMA50"]
         )
 
-        /
+        sma200 = float(
+            latest["SMA200"]
+        )
 
-        sma50
+        rsi = float(
+            latest["RSI"]
+        )
 
-    ) * 100
+        return_3m = float(
+            latest["Return_3m"]
+        )
+
+        volume = float(
+            latest["Volume"]
+        )
+
+        volume_avg = float(
+            latest["Volume_avg"]
+        )
+
+
+    except Exception as e:
+
+        print(
+            f"Score data error: {e}"
+        )
+
+        return {
+            "Technical Score": 0,
+            "Trend Score": 0,
+            "Momentum Score": 0,
+            "Volume Score": 0,
+            "Risk Score": 0,
+            "Technical Reasons": [],
+            "Technical Risks": []
+        }
 
 
 
-    # Long term trend
+    # =============================
+    # TREND SCORE (40)
+    # =============================
 
-    if distance200 > 0:
+    if close > sma200:
 
-        trend_score += 8
+        trend_score += 25
 
         reasons.append(
-            "Above 200 DMA"
+            "Price above 200 DMA"
         )
 
     else:
 
         risks.append(
-            "Below 200 DMA"
+            "Price below 200 DMA"
         )
 
-        risk_score -= 8
 
-
-
-    # Entry zone
-
-    if 0 <= distance50 <= 3:
+    if close > sma50:
 
         trend_score += 15
 
         reasons.append(
-            "Near 50 DMA entry zone"
-        )
-
-
-    elif distance50 > 15:
-
-        trend_score -= 5
-
-        risk_score -= 5
-
-        risks.append(
-            "Overextended above 50 DMA"
-        )
-
-
-    elif distance50 > 5:
-
-        trend_score += 2
-
-        risks.append(
-            "Extended above 50 DMA"
-        )
-
-
-    else:
-
-        trend_score += 8
-
-        reasons.append(
-            "Pullback opportunity"
-        )
-
-
-
-    # Moving average structure
-
-    if sma50 > sma200:
-
-        trend_score += 10
-
-        reasons.append(
-            "Positive long term trend"
+            "Price above 50 DMA"
         )
 
     else:
 
-        risk_score -= 5
-
         risks.append(
-            "Weak trend structure"
+            "Price below 50 DMA"
         )
 
 
 
-    # =================================================
-    # Momentum Score (35)
-    # =================================================
+    # =============================
+    # MOMENTUM SCORE (30)
+    # =============================
 
-
-    if 45 <= rsi <= 60:
+    if 50 <= rsi <= 70:
 
         momentum_score += 15
 
         reasons.append(
-            "Healthy RSI entry zone"
-        )
-
-
-    elif 60 < rsi <= 70:
-
-        momentum_score += 8
-
-        reasons.append(
-            "Strong momentum"
+            "Healthy RSI momentum"
         )
 
 
     elif rsi > 70:
-
-        risk_score -= 5
 
         risks.append(
             "Overbought RSI"
         )
 
 
-    elif 35 <= rsi < 45:
+    elif rsi < 40:
 
-        momentum_score += 5
+        risks.append(
+            "Weak RSI momentum"
+        )
+
+
+
+    if return_3m > 0.20:
+
+        momentum_score += 15
 
         reasons.append(
-            "Recovering momentum"
+            "Strong 3 month return"
+        )
+
+
+    elif return_3m > 0:
+
+        momentum_score += 8
+
+        reasons.append(
+            "Positive 3 month return"
         )
 
 
     else:
 
         risks.append(
-            "Weak RSI"
+            "Negative 3 month return"
         )
 
 
 
-    # MACD
+    # =============================
+    # VOLUME SCORE (20)
+    # =============================
 
-    if latest["MACD"] > latest["MACD_signal"]:
+    if volume_avg > 0:
 
-        momentum_score += 10
-
-        reasons.append(
-            "MACD bullish"
+        volume_ratio = (
+            volume /
+            volume_avg
         )
 
     else:
 
-        risks.append(
-            "MACD bearish"
-        )
+        volume_ratio = 0
 
-
-
-    # Recent performance
-
-    if 0 <= rtn <= 15:
-
-        momentum_score += 10
-
-        reasons.append(
-            "Healthy recent momentum"
-        )
-
-
-    elif rtn > 25:
-
-        risk_score -= 8
-
-        risks.append(
-            "Extended recent performance"
-        )
-
-
-    elif rtn > 0:
-
-        momentum_score += 5
-
-        reasons.append(
-            "Positive momentum"
-        )
-
-            # =================================================
-    # Volume Score (15)
-    # =================================================
-
-    volume_ratio = (
-
-        float(
-            latest["Volume"]
-        )
-
-        /
-
-        float(
-            latest["Volume_avg"]
-        )
-
-    )
 
 
     if volume_ratio > 1.5:
 
-        volume_score += 15
+        volume_score += 20
 
         reasons.append(
             "Strong volume confirmation"
@@ -296,370 +244,63 @@ def score_stock(df):
         )
 
 
-    elif volume_ratio > 1:
-
-        volume_score += 5
-
-        reasons.append(
-            "Average volume"
-        )
-
-
     else:
 
         risks.append(
-            "Weak volume"
+            "Weak volume confirmation"
         )
 
 
 
-    # =================================================
-    # Risk Score Adjustments (15)
-    # =================================================
+    # =============================
+    # RISK SCORE (10)
+    # =============================
 
+    if close > sma200:
 
-    if rsi > 75:
+        risk_score += 10
 
-        risk_score -= 8
+    else:
 
-        risks.append(
-            "Extreme overbought"
-        )
-
-
-    if close < sma50:
-
-        risk_score -= 3
-
-        risks.append(
-            "Below 50 DMA"
-        )
-
-
-    if close < sma200:
-
-        risk_score -= 5
-
-        risks.append(
-            "Below 200 DMA"
-        )
+        risk_score += 2
 
 
 
-    risk_score = max(
-        risk_score,
-        0
-    )
-
-
-
-    # =================================================
-    # Technical Score
-    # =================================================
-
-
-    base_score = (
-
-        trend_score
-
-        +
-
-        momentum_score
-
-        +
-
-        volume_score
-
-        +
-
-        risk_score
-
-    )
-
-
-    base_score = max(
-        min(
-            base_score,
-            100
-        ),
-        0
-    )
-
-
-
-    # =================================================
-    # Adaptive Learning Adjustment
-    # =================================================
-
-
-    adaptive_adjustment = 0
-
-
-    try:
-
-        adjustments = (
-            get_adaptive_adjustments()
-        )
-
-
-        signal = latest.get(
-            "Signal",
-            "BUY"
-        )
-
-
-        adaptive_adjustment = adjustments.get(
-            signal,
-            0
-        )
-
-
-    except Exception:
-
-        adaptive_adjustment = 0
-
-
+    # =============================
+    # FINAL SCORE
+    # =============================
 
     technical_score = (
-
-        base_score
-
+        trend_score
         +
-
-        adaptive_adjustment
-
+        momentum_score
+        +
+        volume_score
+        +
+        risk_score
     )
 
 
-
-    technical_score = max(
-        min(
-            technical_score,
-            100
-        ),
-        0
-    )
-
-
-
-    # =================================================
-    # Internal Component Scores
-    # =================================================
-
-    #
-    # These are placeholders until the
-    # quality and growth engines are connected.
-    #
-    # They keep compatibility with:
-    #
-    # - weight_optimizer.py
-    # - learning_calibration.py
-    # - reports
-    #
-
-
-    quality_score = round(
-        (
-            technical_score
-            *
-            0.7
-        ),
-        1
-    )
-
-
-    growth_score = round(
-        (
-            technical_score
-            *
-            0.5
-        ),
-        1
-    )
-
-
-
-    confidence_score = round(
-        (
-            (
-                trend_score / 40
-                +
-                momentum_score / 35
-                +
-                volume_score / 15
-                +
-                risk_score / 15
-            )
-
-            /
-
-            4
-
-        )
-
-        *
-
-        100,
-
-        1
-    )
-
-        # =================================================
-    # Final Investment Score
-    # =================================================
-
-    #
-    # Temporary blended investment score.
-    #
-    # The weight optimiser will eventually
-    # replace these defaults dynamically.
-    #
-
-    investment_score = calculate_investment_score(
-
+    technical_score = min(
         technical_score,
-
-        quality_score,
-
-        growth_score,
-
-        confidence_score
-
+        100
     )
-
-
-
-    # =================================================
-    # Final Signal
-    # =================================================
-
-
-    if investment_score >= 85:
-
-        signal = "STRONG BUY"
-
-
-    elif investment_score >= 70:
-
-        signal = "BUY"
-
-
-    elif investment_score >= 55:
-
-        signal = "WATCH"
-
-
-    elif investment_score >= 40:
-
-        signal = "HOLD"
-
-
-    else:
-
-        signal = "SELL"
-
-
-
-    # =================================================
-    # Return Result
-    # =================================================
 
 
     return {
 
+        "Technical Score": technical_score,
 
-        # ---------------------------------
-        # Core Scores
-        # ---------------------------------
+        "Trend Score": trend_score,
 
-        "Score": round(
-            base_score
-        ),
+        "Momentum Score": momentum_score,
 
+        "Volume Score": volume_score,
 
-        "Technical Score": round(
-            technical_score
-        ),
-
-
-        "Investment Score": round(
-            investment_score
-        ),
-
-
-        "Quality Score": round(
-            quality_score
-        ),
-
-
-        "Growth Score": round(
-            growth_score
-        ),
-
-
-        "Confidence Score": round(
-            confidence_score
-        ),
-
-
-
-        # ---------------------------------
-        # Technical Components
-        # ---------------------------------
-
-        "Trend Score": round(
-            trend_score
-        ),
-
-
-        "Momentum Score": round(
-            momentum_score
-        ),
-
-
-        "Volume Score": round(
-            volume_score
-        ),
-
-
-        "Risk Score": round(
-            risk_score
-        ),
-
-
-
-        "Adaptive Adjustment": round(
-            adaptive_adjustment,
-            2
-        ),
-
-
-
-        # ---------------------------------
-        # Recommendation
-        # ---------------------------------
-
-        "Signal": signal,
-
-
-        "Confidence": confidence_score,
-
-
-
-        # ---------------------------------
-        # Explanation
-        # ---------------------------------
+        "Risk Score": risk_score,
 
         "Technical Reasons": reasons,
 
-
-        "Technical Risks": risks,
-
-
-        "Recommendation Reasons": reasons,
-
-
-        "Recommendation Risks": risks
-
+        "Technical Risks": risks
 
     }

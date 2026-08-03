@@ -1,199 +1,215 @@
-import pandas as pd
 import os
+import json
+import requests
+from datetime import datetime, timedelta
 
-
-BASE_PATH = os.path.dirname(__file__)
-
+CACHE_FILE = "data/cache/nasdaq_universe.json"
 
 # -------------------------------------------------
-# S&P 500
+# Cache handling
 # -------------------------------------------------
 
-def get_sp500_universe():
+def load_universe_cache():
 
-    """
-    Loads S&P 500 tickers from local CSV.
-    """
-
-    file_path = os.path.join(
-        BASE_PATH,
-        "sp500.csv"
-    )
+    if not os.path.exists(CACHE_FILE):
+        return None
 
     try:
 
-        df = pd.read_csv(
-            file_path
+        with open(CACHE_FILE, "r") as f:
+            data = json.load(f)
+
+        cache_date = datetime.strptime(
+            data["date"],
+            "%Y-%m-%d"
         )
 
-        tickers = (
-            df["Ticker"]
-            .dropna()
-            .astype(str)
-            .tolist()
+        if datetime.today() - cache_date > timedelta(days=30):
+
+            print("Universe cache expired")
+
+            return None
+
+        print(
+            f"Using cached NASDAQ universe: {len(data['tickers'])} stocks"
+        )
+
+        return data["tickers"]
+
+    except Exception as e:
+
+        print(f"Universe cache error: {e}")
+
+        return None
+
+
+def save_universe_cache(tickers):
+
+    os.makedirs(
+        "data/cache",
+        exist_ok=True
+    )
+
+    with open(CACHE_FILE, "w") as f:
+
+        json.dump(
+            {
+                "date":
+                    datetime.today().strftime("%Y-%m-%d"),
+                "source":
+                    "NASDAQ",
+                "tickers":
+                    tickers
+            },
+            f,
+            indent=4
+        )
+
+    print(
+        f"NASDAQ universe cached: {len(tickers)} stocks"
+    )
+
+
+# -------------------------------------------------
+# Instrument cleanup
+# -------------------------------------------------
+
+EXCLUDED_SUFFIXES = (
+    "W",      # Warrants
+    "WS",
+    "WT",
+    "U",      # Units
+    "R",      # Rights
+    "RT",
+    "P"       # Preferred shares
+)
+
+
+def is_common_stock(ticker):
+
+    ticker = ticker.upper().strip()
+
+    if len(ticker) == 0:
+        return False
+
+    # Remove obvious non-equity suffixes
+    if ticker.endswith(EXCLUDED_SUFFIXES):
+        return False
+
+    # Ignore symbols containing punctuation
+    if any(ch in ticker for ch in ".-^/"):
+        return False
+
+    return True
+
+
+# -------------------------------------------------
+# NASDAQ loader
+# -------------------------------------------------
+
+def load_nasdaq_universe():
+
+    print("Loading NASDAQ universe...")
+
+    url = (
+        "https://api.nasdaq.com/api/screener/stocks"
+        "?tableonly=true"
+        "&limit=5000"
+    )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.nasdaq.com",
+        "Referer": "https://www.nasdaq.com/"
+    }
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=30
         )
 
         print(
-            f"Loaded {len(tickers)} stocks from S&P500 universe"
+            "NASDAQ STATUS:",
+            response.status_code
+        )
+
+        data = response.json()
+
+        rows = []
+
+        if "data" in data:
+
+            if isinstance(data["data"], dict):
+
+                rows = (
+                    data["data"]
+                    .get("table", {})
+                    .get("rows", [])
+                )
+
+        tickers = []
+
+        for row in rows:
+
+            symbol = row.get("symbol")
+
+            if not symbol:
+                continue
+
+            symbol = symbol.upper().strip()
+
+            if not symbol.isalpha():
+                continue
+
+            if len(symbol) > 5:
+                continue
+
+            if not is_common_stock(symbol):
+                continue
+
+            tickers.append(symbol)
+
+        tickers = sorted(
+            list(set(tickers))
+        )
+
+        print(
+            f"NASDAQ common stock universe: {len(tickers)} stocks"
         )
 
         return tickers
 
-
     except Exception as e:
 
-        print(
-            f"S&P500 universe error: {e}"
-        )
+        print(f"NASDAQ loader failed: {e}")
 
         return []
 
 
-
 # -------------------------------------------------
-# Nasdaq
-# -------------------------------------------------
-
-def get_nasdaq_universe():
-
-    """
-    Loads Nasdaq-listed tickers.
-    """
-
-    file_path = os.path.join(
-        BASE_PATH,
-        "nasdaq.csv"
-    )
-
-
-    try:
-
-        df = pd.read_csv(
-            file_path
-        )
-
-
-        tickers = (
-            df["Ticker"]
-            .dropna()
-            .astype(str)
-            .tolist()
-        )
-
-
-        print(
-            f"Loaded {len(tickers)} stocks from Nasdaq universe"
-        )
-
-
-        return tickers
-
-
-
-    except Exception as e:
-
-        print(
-            f"Nasdaq universe error: {e}"
-        )
-
-        return []
-
-
-
-# -------------------------------------------------
-# User holdings
-# -------------------------------------------------
-
-def get_holdings_universe():
-
-    """
-    Always include stocks the user owns.
-    """
-
-    file_path = os.path.join(
-        os.path.dirname(BASE_PATH),
-        "portfolio",
-        "holdings.csv"
-    )
-
-
-    try:
-
-        df = pd.read_csv(
-            file_path
-        )
-
-
-        tickers = (
-            df["Ticker"]
-            .dropna()
-            .astype(str)
-            .tolist()
-        )
-
-
-        print(
-            f"Loaded {len(tickers)} portfolio holdings"
-        )
-
-
-        return tickers
-
-
-
-    except Exception as e:
-
-        print(
-            f"Holdings universe error: {e}"
-        )
-
-        return []
-
-
-
-# -------------------------------------------------
-# Combined universe
+# Public interface
 # -------------------------------------------------
 
 def get_market_universe():
 
     """
-    Combines:
+    Returns cleaned investable NASDAQ universe.
 
-    - S&P500
-    - Nasdaq
-    - User holdings
-
-    Removes duplicates.
+    Cached for 30 days.
     """
 
+    cached = load_universe_cache()
 
-    universe = set()
+    if cached:
+        return cached
 
+    tickers = load_nasdaq_universe()
 
-    universe.update(
-        get_sp500_universe()
-    )
+    if tickers:
+        save_universe_cache(tickers)
 
-
-    universe.update(
-        get_nasdaq_universe()
-    )
-
-
-    universe.update(
-        get_holdings_universe()
-    )
-
-
-    universe = sorted(
-        universe
-    )
-
-
-    print(
-        f"TOTAL MARKET UNIVERSE: {len(universe)} stocks"
-    )
-
-
-    return universe
+    return tickers

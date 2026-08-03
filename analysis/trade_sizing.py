@@ -1,10 +1,12 @@
 import math
 import pandas as pd
 
-
 STARTER_POSITION_VALUE = 500
-
 MAX_NEW_POSITIONS = 5
+
+# New money available to invest each run
+# Set to 0 if you only want to rebalance.
+NEW_CASH_AVAILABLE = 2500
 
 
 def calculate_confidence(
@@ -17,34 +19,25 @@ def calculate_confidence(
 
     if investment_score >= 80:
         score += 40
-
     elif investment_score >= 70:
         score += 25
 
-
     if quality_score >= 70:
         score += 30
-
     elif quality_score >= 50:
         score += 15
 
-
     if signal == "STRONG BUY":
         score += 30
-
     elif signal == "BUY":
         score += 20
 
-
     if score >= 80:
         return "High"
-
     elif score >= 50:
         return "Medium"
-
     else:
         return "Low"
-
 
 
 def generate_trade_plan(
@@ -55,31 +48,24 @@ def generate_trade_plan(
 
     trades = []
 
-
     if (
         portfolio_summary is None
         or portfolio_summary.empty
     ):
         return pd.DataFrame()
 
-
-
     total_value = portfolio_summary[
         "Current Value"
     ].sum()
 
-
     if total_value <= 0:
         return pd.DataFrame()
-
-
 
     # ---------------------------------
     # Sector targets
     # ---------------------------------
 
     sector_targets = {}
-
 
     if (
         sector_optimisation is not None
@@ -104,38 +90,30 @@ def generate_trade_plan(
 
             }
 
-
-
     # ---------------------------------
     # SELL analysis
     # ---------------------------------
 
     sold_tickers = set()
 
-
     for _, holding in portfolio_summary.iterrows():
 
-
         ticker = holding["Ticker"]
-
 
         sector = holding.get(
             "Sector",
             "Unknown"
         )
 
-
         current_value = holding.get(
             "Current Value",
             0
         )
 
-
         allocation = (
             current_value /
             total_value
         ) * 100
-
 
         target_allocation = sector_targets.get(
             sector,
@@ -145,59 +123,44 @@ def generate_trade_plan(
             allocation
         )
 
-
-
         if allocation > target_allocation + 5:
-
 
             excess = (
                 allocation -
                 target_allocation
             )
 
-
             sell_value = (
                 excess /
                 100
             ) * total_value
-
-
 
             price = holding.get(
                 "Current Price",
                 0
             )
 
-
             if price <= 0:
                 continue
-
-
 
             shares = math.floor(
                 sell_value /
                 price
             )
 
-
             if shares <= 0:
                 continue
-
-
 
             trades.append(
                 {
 
                     "Priority": 1,
 
-                    "Action":
-                        "SELL",
+                    "Action": "SELL",
 
-                    "Ticker":
-                        ticker,
+                    "Ticker": ticker,
 
-                    "Sector":
-                        sector,
+                    "Sector": sector,
 
                     "Trade Value":
                         round(
@@ -205,8 +168,7 @@ def generate_trade_plan(
                             2
                         ),
 
-                    "Shares":
-                        -shares,
+                    "Shares": -shares,
 
                     "Current Allocation %":
                         round(
@@ -238,23 +200,17 @@ def generate_trade_plan(
                             ""
                         ),
 
-                    "Confidence":
-                        "High",
+                    "Confidence": "High",
 
                     "Reason":
-                        (
-                            f"{sector} above target allocation"
-                        )
+                        f"{sector} above target allocation"
 
                 }
             )
 
-
             sold_tickers.add(
                 ticker
             )
-
-
 
     # ---------------------------------
     # BUY candidate selection
@@ -262,37 +218,29 @@ def generate_trade_plan(
 
     candidates = []
 
-
     for stock in stock_results:
-
 
         ticker = stock.get(
             "Ticker"
         )
 
-
         if ticker in sold_tickers:
             continue
-
-
 
         signal = stock.get(
             "Signal",
             ""
         )
 
-
         investment_score = stock.get(
             "Investment Score",
             0
         )
 
-
         quality_score = stock.get(
             "Quality Score",
             0
         )
-
 
         if signal not in [
             "BUY",
@@ -300,18 +248,12 @@ def generate_trade_plan(
         ]:
             continue
 
-
-
         if investment_score < 80:
             continue
-
-
 
         candidates.append(
             stock
         )
-
-
 
     candidates = sorted(
         candidates,
@@ -323,118 +265,96 @@ def generate_trade_plan(
         reverse=True
     )
 
-
-
     # ---------------------------------
     # Available capital
     # ---------------------------------
 
-    available_capital = sum(
+    sell_capital = sum(
         -x["Trade Value"]
         for x in trades
         if x["Action"] == "SELL"
     )
 
-
-
-    # If no sells available,
-    # no forced buying yet.
-    #
-    # Future growth engine
-    # will introduce:
-    # contributions + cash
-    #
+    available_capital = (
+        sell_capital +
+        NEW_CASH_AVAILABLE
+    )
 
     if available_capital <= 0:
+
+        print(
+            "No capital available for buys."
+        )
 
         return pd.DataFrame(
             trades
         )
 
+    if len(candidates) == 0:
 
-
-    # ---------------------------------
-    # Hybrid allocation
-    #
-    # Starter positions:
-    # £500
-    #
-    # Never exceed available cash
-    # ---------------------------------
-
-    buy_budget = min(
-        available_capital,
-        STARTER_POSITION_VALUE *
-        min(
-            len(candidates),
-            MAX_NEW_POSITIONS
+        print(
+            "No qualifying BUY candidates."
         )
-    )
 
+        return pd.DataFrame(
+            trades
+        )
 
+    # ---------------------------------
+    # Starter allocations
+    # ---------------------------------
 
     selected_candidates = candidates[
         :MAX_NEW_POSITIONS
     ]
 
-
+    buy_budget = min(
+        available_capital,
+        STARTER_POSITION_VALUE *
+        len(selected_candidates)
+    )
 
     allocation_per_stock = (
         buy_budget /
         len(selected_candidates)
     )
 
-
-
     priority = 2
-
-
 
     for stock in selected_candidates:
 
-
         ticker = stock["Ticker"]
-
 
         price = stock.get(
             "Price",
             0
         )
 
-
         if price <= 0:
             continue
-
-
 
         shares = math.floor(
             allocation_per_stock /
             price
         )
 
-
         if shares <= 0:
             continue
-
-
 
         investment_score = stock.get(
             "Investment Score",
             0
         )
 
-
         quality_score = stock.get(
             "Quality Score",
             0
         )
 
-
         signal = stock.get(
             "Signal",
             ""
         )
-
 
         confidence = calculate_confidence(
             investment_score,
@@ -442,19 +362,14 @@ def generate_trade_plan(
             signal
         )
 
-
-
         trades.append(
             {
 
-                "Priority":
-                    priority,
+                "Priority": priority,
 
-                "Action":
-                    "BUY",
+                "Action": "BUY",
 
-                "Ticker":
-                    ticker,
+                "Ticker": ticker,
 
                 "Sector":
                     stock.get(
@@ -468,14 +383,11 @@ def generate_trade_plan(
                         2
                     ),
 
-                "Shares":
-                    shares,
+                "Shares": shares,
 
-                "Current Allocation %":
-                    0,
+                "Current Allocation %": 0,
 
-                "Target Allocation %":
-                    5,
+                "Target Allocation %": 5,
 
                 "Investment Score":
                     investment_score,
@@ -483,26 +395,22 @@ def generate_trade_plan(
                 "Quality Score":
                     quality_score,
 
-                "Signal":
-                    signal,
+                "Signal": signal,
 
                 "Confidence":
                     confidence,
 
                 "Reason":
-                    (
-                        "Starter position: "
-                        "high investment score "
-                        "with portfolio diversification benefit"
-                    )
+                    "Starter position using available capital"
 
             }
         )
 
-
         priority += 1
 
-
+    print(
+        f"Trade plan generated: {len(trades)} trades"
+    )
 
     return pd.DataFrame(
         trades
