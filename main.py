@@ -2,8 +2,6 @@ import pandas as pd
 import traceback
 
 
-from analysis import recommendations
-from analysis import recommendation_learning
 
 
 from data.market_data import get_stock_data
@@ -130,6 +128,10 @@ from data.universe import get_market_universe
 from analysis.universe_filter import filter_investable_universe
 
 from analysis.scanner import run_market_scan
+
+from analysis.capital_allocator import (
+    generate_capital_allocation
+)
 
 def main():
 
@@ -792,6 +794,7 @@ def main():
     portfolio_decisions = None
     portfolio_manager_review = None
     final_portfolio_decisions = None
+    capital_allocation = None
 
 
 
@@ -850,15 +853,26 @@ def main():
             sector_summary
         )
 
-        test_context = evaluate_portfolio_context(
-            results[0],
+        
+        if results:
+            test_context = evaluate_portfolio_context(
+                results[0],
+                portfolio_summary,
+                sector_summary,
+                portfolio_health
+            )
+        else:
+            test_context = None
+
+
+        capital_allocation = generate_capital_allocation(
             portfolio_summary,
-            sector_summary,
-            portfolio_health
+            pd.DataFrame(results),
+            sector_summary
         )
 
-        print("\nPORTFOLIO CONTEXT TEST")
-        print(test_context)
+
+        print(capital_allocation)
 
         try:
             ai_reviews = run_ai_agents(
@@ -1061,6 +1075,9 @@ def main():
         results
     )
 
+    if alerts is None:
+        alerts = pd.DataFrame()
+
 
     recommendation_history = get_learning_history()
 
@@ -1112,6 +1129,7 @@ def main():
     # ---------------------------------
     # Recommendation Intelligence
     # ---------------------------------
+    recommendation_intelligence = pd.DataFrame()
 
     try:
 
@@ -1194,36 +1212,35 @@ def main():
     # ---------------------------------
 
     create_report(
-    results,
-    portfolio_summary,
-    alerts,
-    sector_summary,
-    portfolio_actions,
-    portfolio_optimisation,
-    rebalance_recommendations,
-    portfolio_health,
-    decisions,
-    trade_plan,
-    performance_summary,
-    signal_performance,
-    horizon_performance,
-    score_performance,
-    score_bucket_performance,
-    component_score_performance,
-    signal_horizon_performance,
-    recommendation_intelligence,
-    portfolio_ai_review,
-    portfolio_manager_review,
-    growth_plan,
-    final_portfolio_decisions,
-    recommendation_learning
-)
-
-
-
-    print(
-        "\nReport complete"
+        results,
+        portfolio_summary,
+        alerts,
+        sector_summary,
+        portfolio_actions,
+        portfolio_optimisation,
+        rebalance_recommendations,
+        portfolio_health,
+        capital_allocation,
+        decisions,
+        trade_plan,
+        performance_summary,
+        signal_performance,
+        horizon_performance,
+        score_performance,
+        score_bucket_performance,
+        component_score_performance,
+        signal_horizon_performance,
+        recommendation_intelligence,
+        portfolio_ai_review,
+        portfolio_manager_review,
+        growth_plan,
+        final_portfolio_decisions,
+        recommendation_learning
     )
+
+
+
+    
 
 
 

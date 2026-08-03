@@ -2,14 +2,38 @@ import yfinance as yf
 import pandas as pd
 
 
+ETF_TICKERS = {
+    "IWDA",
+    "VUAA",
+    "SEC0"
+}
+
+
+def classify_security(ticker, name=""):
+
+    ticker = str(ticker).upper()
+    name = str(name).upper()
+
+    if ticker == "CASH":
+        return "CASH"
+
+    if ticker in ETF_TICKERS:
+        return "ETF"
+
+    if "ETF" in name:
+        return "ETF"
+
+    if "ISHARES" in name:
+        return "ETF"
+
+    if "VANGUARD" in name:
+        return "ETF"
+
+    return "STOCK"
+
+
 
 def get_close_series(data):
-
-    """
-    Handles yfinance returning either:
-    - normal Series
-    - DataFrame with multi-level columns
-    """
 
     close = data["Close"]
 
@@ -29,7 +53,7 @@ def analyse_portfolio(
 
 
     # ---------------------------------
-    # Create stock lookup
+    # Stock metadata lookup
     # ---------------------------------
 
     stock_lookup = {}
@@ -39,63 +63,243 @@ def analyse_portfolio(
 
         for stock in stock_results:
 
-            stock_lookup[
-                stock["Ticker"]
-            ] = {
+            ticker = stock.get(
+                "Ticker"
+            )
 
-                "Score": stock.get(
-                    "Score"
-                ),
 
-                "Signal": stock.get(
-                    "Signal"
-                ),
+            stock_lookup[ticker] = {
 
-                "Quality Score": stock.get(
-                    "Quality Score"
-                ),
+                "Score":
+                    stock.get("Score"),
 
-                "Investment Score": stock.get(
-                    "Investment Score"
-                ),
+                "Signal":
+                    stock.get("Signal"),
 
-                "Sector": stock.get(
-                    "Sector",
-                    "Unknown"
-                ),
+                "Quality Score":
+                    stock.get(
+                        "Quality Score"
+                    ),
 
-                "Industry": stock.get(
-                    "Industry",
-                    "Unknown"
-                )
+                "Investment Score":
+                    stock.get(
+                        "Investment Score"
+                    ),
+
+                "Sector":
+                    stock.get(
+                        "Sector",
+                        "Unknown"
+                    ),
+
+                "Industry":
+                    stock.get(
+                        "Industry",
+                        "Unknown"
+                    )
 
             }
 
 
 
     # ---------------------------------
-    # First pass - calculate values
+    # Validate normalised portfolio
     # ---------------------------------
 
-    total_value = 0
+    required = [
 
-    temp_results = []
+        "Ticker",
+        "Name",
+        "Shares",
+        "Current Value"
+
+    ]
 
 
+    missing = [
 
-    for _, stock in holdings.iterrows():
+        c for c in required
+        if c not in holdings.columns
 
-        ticker = stock["Ticker"]
+    ]
 
-        shares = float(
-            stock["Shares"]
+
+    if missing:
+
+        raise ValueError(
+            f"Missing portfolio columns: {missing}"
         )
 
-        average_cost = float(
-            stock["AverageCost"]
+
+
+    holdings = holdings.copy()
+
+
+
+    holdings["Shares"] = pd.to_numeric(
+        holdings["Shares"],
+        errors="coerce"
+    )
+
+
+    holdings["Current Value"] = pd.to_numeric(
+        holdings["Current Value"],
+        errors="coerce"
+    )
+
+
+
+    holdings["Ticker"] = (
+        holdings["Ticker"]
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+
+
+
+    holdings = holdings.dropna(
+        subset=[
+            "Ticker",
+            "Current Value"
+        ]
+    )
+
+
+
+    holdings = holdings[
+        holdings["Ticker"] != "TOTAL"
+    ]
+
+
+
+    total_value = holdings[
+        "Current Value"
+    ].sum()
+
+
+
+    if total_value <= 0:
+
+        raise ValueError(
+            "Portfolio value invalid"
         )
 
 
+
+    # ---------------------------------
+    # Analyse holdings
+    # ---------------------------------
+
+    for _, row in holdings.iterrows():
+
+
+        ticker = row["Ticker"]
+
+        name = row["Name"]
+
+        shares = row["Shares"]
+
+        current_value = float(
+            row["Current Value"]
+        )
+
+
+        security_type = classify_security(
+            ticker,
+            name
+        )
+
+
+        metadata = stock_lookup.get(
+            ticker,
+            {}
+        )
+
+
+
+        base = {
+
+            "Ticker":
+                ticker,
+
+            "Name":
+                name,
+
+            "Type":
+                security_type,
+
+            "Shares":
+                shares,
+
+            "Current Value":
+                current_value,
+
+            "Allocation %":
+                round(
+                    current_value /
+                    total_value *
+                    100,
+                    2
+                )
+
+        }
+
+
+
+        # -----------------------------
+        # Cash
+        # -----------------------------
+
+        if security_type == "CASH":
+
+            results.append({
+
+                **base,
+
+                "Sector":
+                    "Cash",
+
+                "Industry":
+                    "Cash",
+
+                "Trend":
+                    "Cash"
+
+            })
+
+            continue
+
+
+
+        # -----------------------------
+        # ETFs
+        # -----------------------------
+
+        if security_type == "ETF":
+
+            results.append({
+
+                **base,
+
+                "Sector":
+                    "ETF",
+
+                "Industry":
+                    "Fund",
+
+                "Trend":
+                    "Passive"
+
+            })
+
+            continue
+
+
+
+        # -----------------------------
+        # Stocks
+        # -----------------------------
 
         try:
 
@@ -113,6 +317,7 @@ def analyse_portfolio(
 
 
             if data.empty:
+
                 continue
 
 
@@ -124,6 +329,7 @@ def analyse_portfolio(
 
 
             if len(close) < 50:
+
                 continue
 
 
@@ -131,31 +337,6 @@ def analyse_portfolio(
             current_price = float(
                 close.iloc[-1]
             )
-
-
-            current_value = (
-                shares *
-                current_price
-            )
-
-
-            invested_value = (
-                shares *
-                average_cost
-            )
-
-
-            gain_loss = (
-                current_value -
-                invested_value
-            )
-
-
-            return_pct = (
-                gain_loss /
-                invested_value
-            ) * 100
-
 
 
             ma50 = float(
@@ -188,55 +369,62 @@ def analyse_portfolio(
 
 
 
-            metadata = stock_lookup.get(
-                ticker,
-                {}
-            )
+            results.append({
+
+                **base,
 
 
+                "Current Price":
+                    current_price,
 
-            temp_results.append(
-                {
+                "MA50":
+                    ma50,
 
-                    "Ticker": ticker,
+                "MA200":
+                    ma200,
 
-                    "Shares": shares,
-
-                    "Average Cost": average_cost,
-
-                    "Current Price": current_price,
-
-                    "Invested Value": invested_value,
-
-                    "Current Value": current_value,
-
-                    "Gain/Loss": gain_loss,
-
-                    "Return %": return_pct,
-
-                    "MA50": ma50,
-
-                    "MA200": ma200,
-
-                    "Trend": trend,
+                "Trend":
+                    trend,
 
 
-                    "Sector": metadata.get(
+                "Sector":
+                    metadata.get(
                         "Sector",
                         "Unknown"
                     ),
 
 
-                    "Industry": metadata.get(
+                "Industry":
+                    metadata.get(
                         "Industry",
                         "Unknown"
+                    ),
+
+
+                "Momentum Score":
+                    metadata.get(
+                        "Score"
+                    ),
+
+
+                "Momentum Signal":
+                    metadata.get(
+                        "Signal"
+                    ),
+
+
+                "Quality Score":
+                    metadata.get(
+                        "Quality Score"
+                    ),
+
+
+                "Investment Score":
+                    metadata.get(
+                        "Investment Score"
                     )
 
-                }
-            )
-
-
-            total_value += current_value
+            })
 
 
 
@@ -248,122 +436,69 @@ def analyse_portfolio(
 
 
 
-    # ---------------------------------
-    # Second pass - portfolio metrics
-    # ---------------------------------
-
-    for item in temp_results:
+    df = pd.DataFrame(
+        results
+    )
 
 
-        allocation = (
-            item["Current Value"]
-            /
-            total_value
-        ) * 100
+    if df.empty:
+
+        return df
 
 
-
-        ticker = item["Ticker"]
-
-
-        metadata = stock_lookup.get(
-            ticker,
-            {}
-        )
-
-
-
-        results.append(
-            {
-
-                **item,
-
-
-                "Allocation %": round(
-                    allocation,
-                    2
-                ),
-
-
-                "Momentum Score": metadata.get(
-                    "Score"
-                ),
-
-
-                "Momentum Signal": metadata.get(
-                    "Signal"
-                ),
-
-
-                "Quality Score": metadata.get(
-                    "Quality Score"
-                ),
-
-
-                "Investment Score": metadata.get(
-                    "Investment Score"
-                )
-
-            }
-        )
-
-
-
-    
 
     # ---------------------------------
-    # Sector allocation analysis
+    # Sector analysis
     # ---------------------------------
 
-    sector_totals = {}
+    sector_totals = (
 
-    for item in results:
+        df.groupby(
+            "Sector"
+        )["Current Value"]
+        .sum()
 
-        sector = item.get(
-            "Sector",
-            "Unknown"
+    )
+
+
+
+    df["Sector Allocation %"] = (
+
+        df["Sector"]
+        .map(
+            sector_totals /
+            total_value *
+            100
+        )
+        .round(2)
+
+    )
+
+
+
+    df["Sector Risk"] = (
+
+        df["Sector Allocation %"]
+        .apply(
+
+            lambda x:
+
+            "High"
+            if x > 40
+
+            else
+
+            "Medium"
+            if x > 25
+
+            else
+
+            "Low"
+
         )
 
-        sector_totals[sector] = (
-            sector_totals.get(
-                sector,
-                0
-            )
-            +
-            item["Current Value"]
-        )
+    )
 
 
-    for item in results:
 
-        sector = item.get(
-            "Sector",
-            "Unknown"
-        )
-
-        sector_allocation = (
-            sector_totals[sector]
-            /
-            total_value
-        ) * 100
-
-
-        item["Sector Allocation %"] = round(
-            sector_allocation,
-            2
-        )
-
-
-        if sector_allocation > 40:
-
-            item["Sector Risk"] = "High"
-
-        elif sector_allocation > 25:
-
-            item["Sector Risk"] = "Medium"
-
-        else:
-
-            item["Sector Risk"] = "Low"
-
-    return pd.DataFrame(results)
+    return df
