@@ -1,8 +1,330 @@
 import pandas as pd
 import os
 from datetime import datetime
-from openpyxl import load_workbook
 
+
+def create_capital_allocation_sheet(
+    writer,
+    capital_allocation
+):
+    """
+    Create Capital Allocation worksheet.
+
+    Shows:
+    - Available cash
+    - Buy recommendations
+    - Reduce/sell recommendations
+    - Avoid sectors
+    - Risks and alerts
+    """
+
+    print(
+        "Creating Capital Allocation"
+    )
+
+
+    if capital_allocation is None:
+
+        print(
+            "No capital allocation data available"
+        )
+
+        return
+
+
+
+    sheet = "Capital Allocation"
+
+
+
+    row = 0
+
+
+
+    # =====================================
+    # Summary
+    # =====================================
+
+    summary = pd.DataFrame(
+        {
+            "Metric": [
+                "Available Cash",
+                "Cash Remaining"
+            ],
+
+            "Value": [
+                capital_allocation.get(
+                    "Available Cash",
+                    0
+                ),
+
+                capital_allocation.get(
+                    "Cash Remaining",
+                    0
+                )
+            ]
+        }
+    )
+
+
+    summary.to_excel(
+        writer,
+        sheet_name=sheet,
+        startrow=row,
+        index=False
+    )
+
+
+    row += len(summary) + 3
+
+
+
+    # =====================================
+    # BUY
+    # =====================================
+
+    pd.DataFrame(
+        {
+            "Section":
+            [
+                "BUY RECOMMENDATIONS"
+            ]
+        }
+    ).to_excel(
+        writer,
+        sheet_name=sheet,
+        startrow=row,
+        index=False
+    )
+
+
+    row += 2
+
+
+
+    buys = pd.DataFrame(
+        capital_allocation.get(
+            "BUY",
+            []
+        )
+    )
+
+
+    if not buys.empty:
+
+        buys.to_excel(
+            writer,
+            sheet_name=sheet,
+            startrow=row,
+            index=False
+        )
+
+        row += len(buys) + 3
+
+
+
+    # =====================================
+    # REDUCE
+    # =====================================
+
+    pd.DataFrame(
+        {
+            "Section":
+            [
+                "REDUCE / SELL RECOMMENDATIONS"
+            ]
+        }
+    ).to_excel(
+        writer,
+        sheet_name=sheet,
+        startrow=row,
+        index=False
+    )
+
+
+    row += 2
+
+
+
+    reductions = []
+
+
+    for sector in capital_allocation.get(
+        "REDUCE",
+        []
+    ):
+
+
+        for sell in sector.get(
+            "Sell Candidates",
+            []
+        ):
+
+            reductions.append(
+                {
+                    "Sector":
+                        sector.get(
+                            "Sector"
+                    ),
+
+                    "Current Allocation %":
+                        sector.get(
+                            "Current Allocation %"
+                        ),
+
+                    "Target Allocation %":
+                        sector.get(
+                            "Target Allocation %"
+                        ),
+
+                    "Reduction Required":
+                        sector.get(
+                            "Reduction Required",
+                            0
+                        ),
+
+                    "Reduction Achieved":
+                        sector.get(
+                            "Reduction Achieved",
+                            0
+                        ),
+
+                    "Reduction Remaining":
+                        sector.get(
+                            "Reduction Remaining",
+                            0
+                        ),
+
+                    "Rebalance Status":
+                        sector.get(
+                            "Rebalance Status",
+                            ""
+                        ),
+
+                    "Ticker":
+                        sell.get(
+                            "Ticker"
+                        ),
+
+                    "Sell Amount":
+                        sell.get(
+                            "Sell Amount",
+                            sell.get(
+                                "Sell Value",
+                                0
+                            )
+                        ),
+
+                    "Reason":
+                        sell.get(
+                            "Reason"
+                        )
+                }
+            )
+
+
+
+    reduce_df = pd.DataFrame(
+        reductions
+    )
+
+
+    if not reduce_df.empty:
+
+        reduce_df.to_excel(
+            writer,
+            sheet_name=sheet,
+            startrow=row,
+            index=False
+        )
+
+        row += len(reduce_df) + 3
+
+
+
+    # =====================================
+    # AVOID
+    # =====================================
+
+    pd.DataFrame(
+        {
+            "Section":
+            [
+                "AVOID"
+            ]
+        }
+    ).to_excel(
+        writer,
+        sheet_name=sheet,
+        startrow=row,
+        index=False
+    )
+
+
+    row += 2
+
+
+
+    avoid_df = pd.DataFrame(
+        capital_allocation.get(
+            "AVOID",
+            []
+        )
+    )
+
+
+    if not avoid_df.empty:
+
+        avoid_df.to_excel(
+            writer,
+            sheet_name=sheet,
+            startrow=row,
+            index=False
+        )
+
+        row += len(avoid_df) + 3
+
+
+
+    # =====================================
+    # RISKS
+    # =====================================
+
+    pd.DataFrame(
+        {
+            "Section":
+            [
+                "RISKS / ALERTS"
+            ]
+        }
+    ).to_excel(
+        writer,
+        sheet_name=sheet,
+        startrow=row,
+        index=False
+    )
+
+
+    row += 2
+
+
+
+    risks_df = pd.DataFrame(
+        capital_allocation.get(
+            "RISKS",
+            []
+        )
+    )
+
+
+    if not risks_df.empty:
+
+        risks_df.to_excel(
+            writer,
+            sheet_name=sheet,
+            startrow=row,
+            index=False
+        )
 
 def create_report(
     results,
@@ -13,6 +335,7 @@ def create_report(
     portfolio_optimisation,
     rebalance_recommendations,
     portfolio_health,
+    capital_allocation,
     decisions,
     trade_plan,
     performance_summary=None,
@@ -63,7 +386,8 @@ def create_report(
         "portfolio_ai_review": portfolio_ai_review,
         "portfolio_manager_review": portfolio_manager_review,
         "final_portfolio_decisions": final_portfolio_decisions,
-        "recommendation_learning": recommendation_learning
+        "recommendation_learning": recommendation_learning,
+        "capital_allocation": capital_allocation,    
 
 
     }
@@ -440,8 +764,9 @@ def create_report(
 
                     "Portfolio Actions shows recommended changes",
 
-                    "Recommendation Intelligence measures historical recommendation quality"
+                    "Capital Allocation shows suggested buys, reductions, sector avoidance and cash deployment",
 
+                    "Recommendation Intelligence measures historical recommendation quality"
                 ]
             }
 
@@ -449,6 +774,20 @@ def create_report(
             writer,
             sheet_name="How To Use",
             index=False
+        )
+
+        # =================================
+        # Capital Allocation
+        # =================================
+
+        print(
+            "Creating Capital Allocation"
+        )
+
+
+        create_capital_allocation_sheet(
+            writer,
+            capital_allocation
         )
 
         # =================================
