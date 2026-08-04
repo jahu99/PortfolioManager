@@ -2,27 +2,34 @@
 Capital Allocation Engine
 
 Purpose:
+
 - Manage portfolio capital allocation
 - Use discretionary spend limit
 - Reinvest released capital
 - Decide:
+
     BUY NEW
     BUY MORE
     HOLD
     REDUCE
     SELL
-    AVOID
 
-Interface intentionally unchanged.
+Interface preserved for:
+main.py
+excel_report.py
+
 """
-
 
 import pandas as pd
 
 
 from config.investment_config import (
     DISCRETIONARY_SPEND_LIMIT,
-    MAX_POSITION_PERCENT
+    MAX_NEW_BUYS,
+    MAX_BUY_MORE,
+    MIN_NEW_BUY_SCORE,
+    MIN_BUY_MORE_SCORE,
+    MIN_ALLOCATION_AMOUNT
 )
 
 
@@ -35,7 +42,7 @@ def safe_float(value, default=0.0):
 
     try:
 
-        if pd.isna(value):
+        if value is None:
             return default
 
         return float(value)
@@ -46,98 +53,18 @@ def safe_float(value, default=0.0):
 
 
 
-def normalise_ticker(value):
+def safe_text(value, default=""):
 
-    return str(value).upper().strip()
+    if value is None:
+        return default
 
-
-
-def get_existing_holdings(portfolio_summary):
-
-    """
-    Returns set of existing portfolio tickers
-    """
-
-    if (
-        isinstance(portfolio_summary, pd.DataFrame)
-        and
-        "Ticker" in portfolio_summary.columns
-    ):
-
-        return set(
-
-            portfolio_summary["Ticker"]
-            .astype(str)
-            .str.upper()
-            .tolist()
-
-        )
-
-
-    return set()
-
-
-
-def get_current_value(
-    ticker,
-    portfolio_summary
-):
-
-    """
-    Find holding value from portfolio summary
-    """
-
-    if (
-        not isinstance(
-            portfolio_summary,
-            pd.DataFrame
-        )
-        or
-        portfolio_summary.empty
-    ):
-
-        return 0
-
-
-
-    if "Ticker" not in portfolio_summary.columns:
-
-        return 0
-
-
-
-    rows = portfolio_summary[
-        portfolio_summary["Ticker"]
-        .astype(str)
-        .str.upper()
-        ==
-        ticker
-    ]
-
-
-
-    if rows.empty:
-
-        return 0
-
-
-
-    return safe_float(
-
-        rows.iloc[0]
-        .get(
-            "Current Value",
-            0
-        )
-
-    )
+    return str(value)
 
 
 
 # =====================================================
-# Main Engine
+# Capital Allocation Engine
 # =====================================================
-
 
 def generate_capital_allocation(
     portfolio_summary,
@@ -147,44 +74,15 @@ def generate_capital_allocation(
 
 
     if portfolio_summary is None:
-
         portfolio_summary = pd.DataFrame()
 
 
-
     if opportunities is None:
-
         opportunities = pd.DataFrame()
 
 
-
     if portfolio_decisions is None:
-
         portfolio_decisions = pd.DataFrame()
-
-
-
-    # Allow list input from existing pipeline
-
-    if isinstance(
-        opportunities,
-        list
-    ):
-
-        opportunities = pd.DataFrame(
-            opportunities
-        )
-
-
-
-    if isinstance(
-        portfolio_decisions,
-        list
-    ):
-
-        portfolio_decisions = pd.DataFrame(
-            portfolio_decisions
-        )
 
 
 
@@ -192,19 +90,63 @@ def generate_capital_allocation(
 
 
 
-    existing_holdings = get_existing_holdings(
-        portfolio_summary
-    )
+    # =================================================
+    # Existing portfolio values
+    # =================================================
+
+    portfolio_values = {}
+
+    existing_tickers = set()
 
 
+
+    if (
+        isinstance(
+            portfolio_summary,
+            pd.DataFrame
+        )
+        and
+        not portfolio_summary.empty
+    ):
+
+
+        if "Ticker" in portfolio_summary.columns:
+
+
+            for _, holding in portfolio_summary.iterrows():
+
+
+                ticker = safe_text(
+                    holding.get(
+                        "Ticker",
+                        ""
+                    )
+                ).upper()
+
+
+                if ticker:
+
+
+                    existing_tickers.add(
+                        ticker
+                    )
+
+
+                    portfolio_values[ticker] = safe_float(
+                        holding.get(
+                            "Current Value",
+                            0
+                        )
+                    )
+
+
+
+    # =================================================
+    # Calculate released capital
+    # =================================================
 
     released_capital = 0
 
-
-
-    # =================================================
-    # Existing portfolio decisions
-    # =================================================
 
 
     if not portfolio_decisions.empty:
@@ -213,21 +155,24 @@ def generate_capital_allocation(
         for _, row in portfolio_decisions.iterrows():
 
 
-            ticker = normalise_ticker(
+            ticker = safe_text(
                 row.get(
                     "Ticker",
                     ""
                 )
-            )
+            ).upper()
 
 
-            if not ticker:
+
+            # Cash is not a trade
+
+            if ticker == "CASH":
 
                 continue
 
 
 
-            action = str(
+            action = safe_text(
                 row.get(
                     "Action",
                     "HOLD"
@@ -236,42 +181,29 @@ def generate_capital_allocation(
 
 
 
-            current_value = get_current_value(
+            current_value = portfolio_values.get(
                 ticker,
-                portfolio_summary
+                0
             )
 
 
 
-            # Existing weak holdings
-
-            if (
-                action in [
-                    "REDUCE",
-                    "SELL"
-                ]
-                or
-                (
-                    ticker in existing_holdings
-                    and
-                    safe_float(
-                        row.get(
-                            "Investment Score",
-                            100
-                        )
-                    )
-                    < 60
-                )
-            ):
+            if action in [
+                "REDUCE",
+                "SELL"
+            ]:
 
 
-                reduce_amount = round(
+                release_amount = round(
+
                     current_value * 0.25,
+
                     2
+
                 )
 
 
-                released_capital += reduce_amount
+                released_capital += release_amount
 
 
 
@@ -283,16 +215,13 @@ def generate_capital_allocation(
                             ticker,
 
                         "Action":
-                            "SELL"
-                            if action == "SELL"
-                            else
-                            "REDUCE",
+                            action,
 
                         "Existing Holding":
                             "Yes",
 
                         "Amount":
-                            reduce_amount,
+                            -release_amount,
 
                         "Funding Source":
                             "Released Capital",
@@ -300,44 +229,63 @@ def generate_capital_allocation(
                         "Reason":
                             row.get(
                                 "Reason",
-                                "Weakening investment profile"
+                                "Weak holding reduced"
                             )
 
                     }
 
                 )
 
-                continue
 
-                # =================================================
-    # HOLD / BUY MORE existing holdings
+
+    # =================================================
+    # Available capital
     # =================================================
 
-    buy_candidates = []
+    total_available_capital = round(
+
+        DISCRETIONARY_SPEND_LIMIT
+
+        +
+
+        released_capital,
+
+        2
+
+    )
+
+
+
+    # =================================================
+    # BUY MORE candidates
+    # =================================================
+
+    buy_more_candidates = []
+
 
 
     if not portfolio_decisions.empty:
 
+
         for _, row in portfolio_decisions.iterrows():
 
-            ticker = normalise_ticker(
+
+            ticker = safe_text(
                 row.get(
                     "Ticker",
                     ""
                 )
-            )
+            ).upper()
 
 
-            if not ticker:
-                continue
 
-
-            action = str(
+            action = safe_text(
                 row.get(
                     "Action",
                     ""
                 )
             ).upper()
+
 
 
             score = safe_float(
@@ -348,78 +296,68 @@ def generate_capital_allocation(
             )
 
 
-            # Existing holdings only
 
-            if ticker in existing_holdings:
+            if (
 
+                ticker
 
-                if action in [
+                and
+
+                action in [
                     "BUY",
-                    "ADD",
-                    "BUY MORE"
-                ]:
+                    "BUY MORE",
+                    "ADD"
+                ]
 
-                    buy_candidates.append(
+                and
 
-                        {
+                score >= MIN_BUY_MORE_SCORE
 
-                            "Ticker":
-                                ticker,
+                and
 
-                            "Action":
-                                "BUY MORE",
+                ticker in existing_tickers
 
-                            "Existing Holding":
-                                "Yes",
-
-                            "Score":
-                                score,
-
-                            "Reason":
-                                "Increase existing high conviction holding"
-
-                        }
-
-                    )
+            ):
 
 
-                elif action == "HOLD":
+                buy_more_candidates.append(
 
+                    {
 
-                    allocations.append(
+                        "Ticker":
+                            ticker,
 
-                        {
+                        "Score":
+                            score,
 
-                            "Ticker":
-                                ticker,
+                        "Existing Holding":
+                            "Yes",
 
-                            "Action":
-                                "HOLD",
+                        "Reason":
+                            "Increase existing high conviction holding"
 
-                            "Existing Holding":
-                                "Yes",
+                    }
 
-                            "Amount":
-                                0,
-
-                            "Funding Source":
-                                "",
-
-                            "Reason":
-                                row.get(
-                                    "Reason",
-                                    "Maintain position"
-                                )
-
-                        }
-
-                    )
+                )
 
 
 
+    buy_more_candidates = sorted(
+
+        buy_more_candidates,
+
+        key=lambda x:
+            x["Score"],
+
+        reverse=True
+
+    )[:MAX_BUY_MORE]
+
+        # =================================================
+    # BUY NEW candidates
     # =================================================
-    # New opportunity candidates
-    # =================================================
+
+    buy_new_candidates = []
 
 
     if not opportunities.empty:
@@ -428,17 +366,12 @@ def generate_capital_allocation(
         for _, row in opportunities.iterrows():
 
 
-            ticker = normalise_ticker(
+            ticker = safe_text(
                 row.get(
                     "Ticker",
                     ""
                 )
-            )
-
-
-            if not ticker:
-
-                continue
+            ).upper()
 
 
 
@@ -451,32 +384,36 @@ def generate_capital_allocation(
 
 
 
-            # Existing holdings never become BUY NEW
+            # IMPORTANT:
+            # Do not buy new stocks already held
 
-            if ticker in existing_holdings:
+            if (
 
-                continue
+                ticker
+
+                and
+
+                ticker not in existing_tickers
+
+                and
+
+                score >= MIN_NEW_BUY_SCORE
+
+            ):
 
 
-
-            if score >= 75:
-
-
-                buy_candidates.append(
+                buy_new_candidates.append(
 
                     {
 
                         "Ticker":
                             ticker,
 
-                        "Action":
-                            "BUY NEW",
+                        "Score":
+                            score,
 
                         "Existing Holding":
                             "No",
-
-                        "Score":
-                            score,
 
                         "Reason":
                             "High conviction opportunity"
@@ -486,7 +423,245 @@ def generate_capital_allocation(
                 )
 
 
-            else:
+
+    buy_new_candidates = sorted(
+
+        buy_new_candidates,
+
+        key=lambda x:
+            x["Score"],
+
+        reverse=True
+
+    )[:MAX_NEW_BUYS]
+
+
+
+    # =================================================
+    # Allocate capital
+    #
+    # Split equally across:
+    #
+    # BUY MORE
+    # BUY NEW
+    #
+    # =================================================
+
+    buy_candidates = (
+
+        buy_more_candidates
+
+        +
+
+        buy_new_candidates
+
+    )
+
+
+    if buy_candidates:
+
+
+        allocation_amount = round(
+
+            total_available_capital
+
+            /
+
+            len(
+                buy_candidates
+            ),
+
+            2
+
+        )
+
+
+    else:
+
+        allocation_amount = 0
+
+
+
+    capital_allocated = 0
+
+
+
+    for candidate in buy_candidates:
+
+
+        amount = min(
+
+            allocation_amount,
+
+            total_available_capital - capital_allocated
+
+        )
+
+
+        if amount < MIN_ALLOCATION_AMOUNT:
+
+            continue
+
+
+
+        action = (
+
+            "BUY MORE"
+
+            if candidate["Existing Holding"] == "Yes"
+
+            else
+
+            "BUY NEW"
+
+        )
+
+
+        allocations.append(
+
+            {
+
+                "Ticker":
+                    candidate["Ticker"],
+
+                "Action":
+                    action,
+
+                "Existing Holding":
+                    candidate["Existing Holding"],
+
+                "Amount":
+                    round(
+                        amount,
+                        2
+                    ),
+
+                "Funding Source":
+                    "Discretionary Spend + Released Capital",
+
+                "Reason":
+                    candidate["Reason"]
+
+            }
+
+        )
+
+
+        capital_allocated += amount
+
+
+
+    # =================================================
+    # HOLD positions
+    # =================================================
+
+    if not portfolio_decisions.empty:
+
+
+        for _, row in portfolio_decisions.iterrows():
+
+
+            ticker = safe_text(
+                row.get(
+                    "Ticker",
+                    ""
+                )
+            ).upper()
+
+
+
+            action = safe_text(
+                row.get(
+                    "Action",
+                    ""
+                )
+            ).upper()
+
+
+
+            if (
+
+                action == "HOLD"
+
+                and
+
+                ticker != "CASH"
+
+            ):
+
+
+                allocations.append(
+
+                    {
+
+                        "Ticker":
+                            ticker,
+
+                        "Action":
+                            "HOLD",
+
+                        "Existing Holding":
+                            "Yes",
+
+                        "Amount":
+                            0,
+
+                        "Funding Source":
+                            "",
+
+                        "Reason":
+                            row.get(
+                                "Reason",
+                                "Maintain position"
+                            )
+
+                    }
+
+                )
+
+
+
+    # =================================================
+    # AVOID non-held opportunities
+    # =================================================
+
+    if not opportunities.empty:
+
+
+        for _, row in opportunities.iterrows():
+
+
+            ticker = safe_text(
+                row.get(
+                    "Ticker",
+                    ""
+                )
+            ).upper()
+
+
+
+            score = safe_float(
+                row.get(
+                    "Investment Score",
+                    0
+                )
+            )
+
+
+
+            if (
+
+                ticker
+
+                and
+
+                ticker not in existing_tickers
+
+                and
+
+                score < MIN_NEW_BUY_SCORE
+
+            ):
 
 
                 allocations.append(
@@ -509,7 +684,7 @@ def generate_capital_allocation(
                             "",
 
                         "Reason":
-                            "Low conviction opportunity"
+                            "Low conviction"
 
                     }
 
@@ -518,118 +693,8 @@ def generate_capital_allocation(
 
 
     # =================================================
-    # Allocate available capital
+    # Create allocation dataframe
     # =================================================
-
-
-    available_capital = (
-
-        DISCRETIONARY_SPEND_LIMIT
-
-        +
-
-        released_capital
-
-    )
-
-
-    buy_candidates = sorted(
-
-        buy_candidates,
-
-        key=lambda x: x["Score"],
-
-        reverse=True
-
-    )
-
-
-
-    # Maximum number of positions to fund
-
-    max_new_allocations = min(
-
-        len(buy_candidates),
-
-        10
-
-    )
-
-
-
-    selected = buy_candidates[
-        :max_new_allocations
-    ]
-
-
-
-    if selected:
-
-
-        total_score = sum(
-
-            x["Score"]
-
-            for x in selected
-
-        )
-
-
-        for candidate in selected:
-
-
-            allocation = round(
-
-                available_capital
-
-                *
-
-                (
-                    candidate["Score"]
-
-                    /
-
-                    total_score
-
-                ),
-
-                2
-
-            )
-
-
-            allocations.append(
-
-                {
-
-                    "Ticker":
-                        candidate["Ticker"],
-
-                    "Action":
-                        candidate["Action"],
-
-                    "Existing Holding":
-                        candidate["Existing Holding"],
-
-                    "Amount":
-                        allocation,
-
-                    "Funding Source":
-                        "Discretionary Spend + Released Capital",
-
-                    "Reason":
-                        candidate["Reason"]
-
-                }
-
-            )
-
-
-
-    # =================================================
-    # Create Allocation dataframe
-    # =================================================
-
 
     allocation_df = pd.DataFrame(
         allocations
@@ -637,45 +702,27 @@ def generate_capital_allocation(
 
 
 
-    if allocation_df.empty:
+    if not allocation_df.empty:
 
 
-        allocation_df = pd.DataFrame(
+        allocation_df = allocation_df[
 
-            columns=[
-
+            [
                 "Ticker",
                 "Action",
                 "Existing Holding",
                 "Amount",
                 "Funding Source",
                 "Reason"
-
             ]
 
-        )
+        ]
 
 
 
     # =================================================
     # Capital Summary
     # =================================================
-
-
-    allocated = allocation_df[
-
-        allocation_df["Action"]
-
-        .isin(
-            [
-                "BUY NEW",
-                "BUY MORE"
-            ]
-        )
-
-    ]["Amount"].sum()
-
-
 
     summary = pd.DataFrame(
 
@@ -686,7 +733,7 @@ def generate_capital_allocation(
                 "Metric":
                     "Discretionary Spend Limit",
 
-                "Value":
+                "Amount":
                     DISCRETIONARY_SPEND_LIMIT
 
             },
@@ -696,7 +743,7 @@ def generate_capital_allocation(
                 "Metric":
                     "Capital Released From Sales",
 
-                "Value":
+                "Amount":
                     round(
                         released_capital,
                         2
@@ -709,9 +756,9 @@ def generate_capital_allocation(
                 "Metric":
                     "Total Available Capital",
 
-                "Value":
+                "Amount":
                     round(
-                        available_capital,
+                        total_available_capital,
                         2
                     )
 
@@ -722,9 +769,9 @@ def generate_capital_allocation(
                 "Metric":
                     "Capital Allocated",
 
-                "Value":
+                "Amount":
                     round(
-                        allocated,
+                        capital_allocated,
                         2
                     )
 
@@ -735,14 +782,11 @@ def generate_capital_allocation(
                 "Metric":
                     "Remaining Capital",
 
-                "Value":
+                "Amount":
                     round(
-
-                        available_capital
-
+                        total_available_capital
                         -
-
-                        allocated,
+                        capital_allocated,
 
                         2
 
@@ -755,7 +799,7 @@ def generate_capital_allocation(
                 "Metric":
                     "BUY NEW Count",
 
-                "Value":
+                "Amount":
                     len(
 
                         allocation_df[
@@ -763,6 +807,7 @@ def generate_capital_allocation(
                             allocation_df["Action"]
 
                             ==
+
                             "BUY NEW"
 
                         ]
@@ -776,7 +821,7 @@ def generate_capital_allocation(
                 "Metric":
                     "BUY MORE Count",
 
-                "Value":
+                "Amount":
                     len(
 
                         allocation_df[
@@ -784,6 +829,7 @@ def generate_capital_allocation(
                             allocation_df["Action"]
 
                             ==
+
                             "BUY MORE"
 
                         ]
@@ -797,7 +843,7 @@ def generate_capital_allocation(
                 "Metric":
                     "REDUCE / SELL Count",
 
-                "Value":
+                "Amount":
                     len(
 
                         allocation_df[

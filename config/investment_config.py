@@ -6,15 +6,16 @@ Portfolio Manager Configuration
 # CASH CONTRIBUTIONS
 # ==========================================
 
+AVAILABLE_CASH = 15
 
-
-MIN_TRADE_VALUE = 5
+MIN_TRADE_VALUE = 1
 
 MAX_TRADE_VALUE = 8
 
 
 # Keep cash reserve
 CASH_RESERVE_PERCENT = 10
+
 
 
 # ==========================================
@@ -47,22 +48,43 @@ MIN_BUY_SCORE = 75
 
 MIN_QUALITY_SCORE = 40
 
+
 # ==========================================
-# CAPITAL ALLOCATION
+# CAPITAL ALLOCATION RULES
 # ==========================================
 
-# Maximum new investment added each cycle
-# Used by capital allocator
+# Organic growth approach:
+# keep turnover low and concentrate capital
+
 DISCRETIONARY_SPEND_LIMIT = 15
 
-# Legacy compatibility
-AVAILABLE_CASH = DISCRETIONARY_SPEND_LIMIT
+
+# Maximum number of new companies added
+MAX_NEW_BUYS = 3
+
+
+# Maximum number of existing holdings increased
+MAX_BUY_MORE = 5
+
+
+# Minimum conviction thresholds
+
+MIN_NEW_BUY_SCORE = 85
+
+MIN_BUY_MORE_SCORE = 80
+
+
+# Minimum size for a trade to appear
+MIN_ALLOCATION_AMOUNT = 1
+
+
 
 # ==========================================
 # PORTFOLIO RISK
 # ==========================================
 
 MAX_POSITION_PERCENT = 15
+
 
 
 TARGET_SECTOR_ALLOCATIONS = {
