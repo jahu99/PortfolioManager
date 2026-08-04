@@ -102,24 +102,56 @@ def create_capital_allocation_sheet(
 
 
 
-    buys = pd.DataFrame(
+    row += 2
+
+
+    # ==========================================
+    # CAPITAL SUMMARY
+    # ==========================================
+
+    summary = pd.DataFrame(
         capital_allocation.get(
-            "BUY",
+            "Capital Summary",
             []
         )
     )
 
 
-    if not buys.empty:
+    if not summary.empty:
 
-        buys.to_excel(
+        summary.to_excel(
             writer,
             sheet_name=sheet,
             startrow=row,
             index=False
         )
 
-        row += len(buys) + 3
+        row += len(summary) + 3
+
+
+
+        # ==========================================
+        # CAPITAL ALLOCATION ACTIONS
+        # ==========================================
+
+        allocation = pd.DataFrame(
+            capital_allocation.get(
+                "Capital Allocation",
+                []
+            )
+        )
+
+
+        if not allocation.empty:
+
+            allocation.to_excel(
+                writer,
+                sheet_name=sheet,
+                startrow=row,
+                index=False
+            )
+
+            row += len(allocation) + 3
 
 
 

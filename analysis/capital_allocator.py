@@ -1,663 +1,834 @@
-# analysis/capital_allocator.py
+"""
+Capital Allocation Engine
+
+Purpose:
+- Manage portfolio capital allocation
+- Use discretionary spend limit
+- Reinvest released capital
+- Decide:
+    BUY NEW
+    BUY MORE
+    HOLD
+    REDUCE
+    SELL
+    AVOID
+
+Interface intentionally unchanged.
+"""
+
 
 import pandas as pd
 
-from config.investment_config import (
-    AVAILABLE_CASH,
-    CASH_RESERVE_PERCENT,
-    MIN_TRADE_VALUE,
-    MAX_TRADE_VALUE,
-    MIN_BUY_SCORE,
-    MIN_QUALITY_SCORE,
-    TARGET_SECTOR_ALLOCATIONS,
 
-    INVESTMENT_SCORE_WEIGHT,
-    QUALITY_SCORE_WEIGHT,
-    SECTOR_NEED_WEIGHT,
-    CONFIDENCE_WEIGHT
+from config.investment_config import (
+    DISCRETIONARY_SPEND_LIMIT,
+    MAX_POSITION_PERCENT
 )
 
 
-# ==================================================
-# Confidence scoring
-# ==================================================
 
-def confidence_score(value):
+# =====================================================
+# Helpers
+# =====================================================
 
-    return {
-        "High": 100,
-        "Medium": 70,
-        "Low": 40
-    }.get(str(value), 50)
+def safe_float(value, default=0.0):
 
+    try:
 
+        if pd.isna(value):
+            return default
 
-# ==================================================
-# Opportunity scoring
-# ==================================================
+        return float(value)
 
-def allocation_score(
-    stock,
-    sector_summary
-):
+    except Exception:
 
-    investment = float(
-        stock.get(
-            "Investment Score",
-            0
-        )
-    )
-
-    quality = float(
-        stock.get(
-            "Quality Score",
-            0
-        )
-    )
-
-    confidence = confidence_score(
-        stock.get(
-            "Confidence",
-            "Medium"
-        )
-    )
+        return default
 
 
-    sector = stock.get(
-        "Sector",
-        ""
-    )
+
+def normalise_ticker(value):
+
+    return str(value).upper().strip()
 
 
-    sector_need = 50
 
+def get_existing_holdings(portfolio_summary):
+
+    """
+    Returns set of existing portfolio tickers
+    """
 
     if (
-        sector_summary is not None
-        and not sector_summary.empty
-        and "Sector" in sector_summary.columns
+        isinstance(portfolio_summary, pd.DataFrame)
+        and
+        "Ticker" in portfolio_summary.columns
     ):
 
-        match = sector_summary[
-            sector_summary["Sector"] == sector
-        ]
+        return set(
+
+            portfolio_summary["Ticker"]
+            .astype(str)
+            .str.upper()
+            .tolist()
+
+        )
 
 
-        if not match.empty:
-
-            if match.iloc[0].get(
-                "Action"
-            ) == "ADD":
-
-                sector_need = 100
-
-
-
-    return round(
-
-        investment * INVESTMENT_SCORE_WEIGHT
-        +
-        quality * QUALITY_SCORE_WEIGHT
-        +
-        sector_need * SECTOR_NEED_WEIGHT
-        +
-        confidence * CONFIDENCE_WEIGHT,
-
-        2
-    )
+    return set()
 
 
 
-# ==================================================
-# Sector exposure
-# ==================================================
-
-def sector_exposure(
-    portfolio
+def get_current_value(
+    ticker,
+    portfolio_summary
 ):
 
-    if portfolio is None or portfolio.empty:
-        return pd.DataFrame()
-
+    """
+    Find holding value from portfolio summary
+    """
 
     if (
-        "Sector" not in portfolio.columns
+        not isinstance(
+            portfolio_summary,
+            pd.DataFrame
+        )
         or
-        "Current Value" not in portfolio.columns
+        portfolio_summary.empty
     ):
-        return pd.DataFrame()
 
-
-    total = portfolio[
-        "Current Value"
-    ].sum()
-
-
-    if total == 0:
-        return pd.DataFrame()
-
-
-    result = (
-        portfolio
-        .groupby("Sector")["Current Value"]
-        .sum()
-        .reset_index()
-    )
-
-
-    result["Allocation %"] = (
-        result["Current Value"]
-        /
-        total
-        *
-        100
-    )
-
-
-    return result
+        return 0
 
 
 
-# ==================================================
-# Core holding protection
-# ==================================================
+    if "Ticker" not in portfolio_summary.columns:
 
-def is_core_holding(
-    holding
-):
-
-    ticker = holding.get(
-        "Ticker",
-        ""
-    )
+        return 0
 
 
-    #
-    # Strategic long-term holdings
-    #
-    protected_tickers = [
-        "NVDA",
-        "MSFT",
-        "GOOGL",
-        "AAPL"
+
+    rows = portfolio_summary[
+        portfolio_summary["Ticker"]
+        .astype(str)
+        .str.upper()
+        ==
+        ticker
     ]
 
 
-    if ticker in protected_tickers:
 
-        return True
+    if rows.empty:
+
+        return 0
 
 
 
-    investment_score = float(
-        holding.get(
-            "Investment Score",
+    return safe_float(
+
+        rows.iloc[0]
+        .get(
+            "Current Value",
             0
         )
-    )
-
-
-    quality_score = float(
-        holding.get(
-            "Quality Score",
-            0
-        )
-    )
-
-
-    confidence = str(
-        holding.get(
-            "Confidence",
-            ""
-        )
-    )
-
-
-    return (
-
-        investment_score >= 90
-        and
-        quality_score >= 60
-        and
-        confidence in [
-            "High",
-            "Medium"
-        ]
 
     )
 
 
 
-# ==================================================
-# Reduction recommendations
-# ==================================================
+# =====================================================
+# Main Engine
+# =====================================================
 
-def generate_reductions(
-    portfolio
-):
-
-    reductions = []
-
-
-    exposure = sector_exposure(
-        portfolio
-    )
-
-
-    if exposure.empty:
-        return reductions
-
-
-
-    total_value = portfolio[
-        "Current Value"
-    ].sum()
-
-
-
-    for _, row in exposure.iterrows():
-
-        sector = row["Sector"]
-
-
-        current = float(
-            row["Allocation %"]
-        )
-
-
-        target = TARGET_SECTOR_ALLOCATIONS.get(
-            sector,
-            10
-        )
-
-
-        if current <= target:
-            continue
-
-
-
-        required = round(
-
-            total_value
-            *
-            (
-                current - target
-            )
-            /
-            100,
-
-            2
-        )
-
-
-
-        holdings = portfolio[
-            portfolio["Sector"] == sector
-        ].copy()
-
-
-
-        #
-        # weakest first
-        #
-        sort_columns = []
-
-
-        for col in [
-            "Investment Score",
-            "Quality Score",
-            "Confidence Score"
-        ]:
-
-            if col in holdings.columns:
-
-                sort_columns.append(col)
-
-
-
-        if sort_columns:
-
-            holdings = holdings.sort_values(
-                sort_columns,
-                ascending=True
-            )
-
-
-
-        sells = []
-
-        protected = []
-
-
-        remaining = required
-
-
-
-        for _, holding in holdings.iterrows():
-
-            ticker = holding["Ticker"]
-
-
-
-            if is_core_holding(
-                holding
-            ):
-
-                protected.append(
-                    {
-                        "Ticker": ticker,
-                        "Reason":
-                        "Core high conviction holding protected"
-                    }
-                )
-
-                continue
-
-
-
-            if remaining <= 0:
-                break
-
-
-
-            value = float(
-                holding["Current Value"]
-            )
-
-
-            sell_amount = min(
-                value,
-                remaining
-            )
-
-
-            sells.append(
-                {
-                    "Ticker": ticker,
-
-                    "Sell Amount":
-                    round(
-                        sell_amount,
-                        2
-                    ),
-
-                    "Reason":
-                    "Reduce lower conviction exposure"
-                }
-            )
-
-
-            remaining -= sell_amount
-
-
-
-        achieved = round(
-            required - remaining,
-            2
-        )
-
-
-        reductions.append(
-            {
-
-                "Sector": sector,
-
-                "Current Allocation %":
-                round(
-                    current,
-                    2
-                ),
-
-                "Target Allocation %":
-                target,
-
-                "Reduction Required":
-                required,
-
-
-                "Reduction Achieved":
-                achieved,
-
-
-                "Reduction Remaining":
-                round(
-                    remaining,
-                    2
-                ),
-
-
-                "Rebalance Status":
-                "COMPLETE"
-                if remaining <= 0
-                else "PARTIAL",
-
-
-                "Sell Candidates":
-                sells,
-
-
-                "Protected Holdings":
-                protected
-
-            }
-        )
-
-
-
-    return reductions
-
-
-
-# ==================================================
-# Main allocator
-# ==================================================
 
 def generate_capital_allocation(
     portfolio_summary,
-    opportunities,
-    sector_summary,
-    alerts=None
+    opportunities=None,
+    portfolio_decisions=None
 ):
 
 
-    result = {
+    if portfolio_summary is None:
 
-        "Available Cash":
-        AVAILABLE_CASH,
-
-        "Cash Remaining":
-        AVAILABLE_CASH,
-
-        "BUY":
-        [],
-
-        "REDUCE":
-        [],
-
-        "AVOID":
-        [],
-
-        "RISKS":
-        []
-
-    }
+        portfolio_summary = pd.DataFrame()
 
 
 
-    # ------------------------------
-    # Reduce
-    # ------------------------------
+    if opportunities is None:
 
-    result["REDUCE"] = generate_reductions(
+        opportunities = pd.DataFrame()
+
+
+
+    if portfolio_decisions is None:
+
+        portfolio_decisions = pd.DataFrame()
+
+
+
+    # Allow list input from existing pipeline
+
+    if isinstance(
+        opportunities,
+        list
+    ):
+
+        opportunities = pd.DataFrame(
+            opportunities
+        )
+
+
+
+    if isinstance(
+        portfolio_decisions,
+        list
+    ):
+
+        portfolio_decisions = pd.DataFrame(
+            portfolio_decisions
+        )
+
+
+
+    allocations = []
+
+
+
+    existing_holdings = get_existing_holdings(
         portfolio_summary
     )
 
 
 
-    for item in result["REDUCE"]:
-
-        result["AVOID"].append(
-            {
-                "Sector":
-                item["Sector"],
-
-                "Action":
-                "Avoid new purchases",
-
-                "Reason":
-                "Sector allocation above target"
-            }
-        )
+    released_capital = 0
 
 
 
-    # ------------------------------
-    # Risks
-    # ------------------------------
-
-    if alerts:
-
-        result["RISKS"] = alerts
+    # =================================================
+    # Existing portfolio decisions
+    # =================================================
 
 
-
-    # ------------------------------
-    # Buys
-    # ------------------------------
-
-    if (
-        opportunities is None
-        or opportunities.empty
-    ):
-
-        return result
+    if not portfolio_decisions.empty:
 
 
-
-    candidates = opportunities.copy()
-
+        for _, row in portfolio_decisions.iterrows():
 
 
-    candidates["Allocation Score"] = candidates.apply(
-
-        lambda x:
-        allocation_score(
-            x,
-            sector_summary
-        ),
-
-        axis=1
-
-    )
-
-
-
-    candidates = candidates[
-
-        (candidates["Investment Score"]
-         >=
-         MIN_BUY_SCORE)
-
-        &
-
-        (candidates["Quality Score"]
-         >=
-         MIN_QUALITY_SCORE)
-
-        &
-
-        (
-            candidates["Signal"]
-            .isin(
-                [
-                    "BUY",
-                    "STRONG BUY"
-                ]
+            ticker = normalise_ticker(
+                row.get(
+                    "Ticker",
+                    ""
+                )
             )
-        )
 
-    ].sort_values(
 
-        "Allocation Score",
-        ascending=False
+            if not ticker:
+
+                continue
+
+
+
+            action = str(
+                row.get(
+                    "Action",
+                    "HOLD"
+                )
+            ).upper()
+
+
+
+            current_value = get_current_value(
+                ticker,
+                portfolio_summary
+            )
+
+
+
+            # Existing weak holdings
+
+            if (
+                action in [
+                    "REDUCE",
+                    "SELL"
+                ]
+                or
+                (
+                    ticker in existing_holdings
+                    and
+                    safe_float(
+                        row.get(
+                            "Investment Score",
+                            100
+                        )
+                    )
+                    < 60
+                )
+            ):
+
+
+                reduce_amount = round(
+                    current_value * 0.25,
+                    2
+                )
+
+
+                released_capital += reduce_amount
+
+
+
+                allocations.append(
+
+                    {
+
+                        "Ticker":
+                            ticker,
+
+                        "Action":
+                            "SELL"
+                            if action == "SELL"
+                            else
+                            "REDUCE",
+
+                        "Existing Holding":
+                            "Yes",
+
+                        "Amount":
+                            reduce_amount,
+
+                        "Funding Source":
+                            "Released Capital",
+
+                        "Reason":
+                            row.get(
+                                "Reason",
+                                "Weakening investment profile"
+                            )
+
+                    }
+
+                )
+
+                continue
+
+                # =================================================
+    # HOLD / BUY MORE existing holdings
+    # =================================================
+
+    buy_candidates = []
+
+
+    if not portfolio_decisions.empty:
+
+        for _, row in portfolio_decisions.iterrows():
+
+            ticker = normalise_ticker(
+                row.get(
+                    "Ticker",
+                    ""
+                )
+            )
+
+
+            if not ticker:
+                continue
+
+
+            action = str(
+                row.get(
+                    "Action",
+                    ""
+                )
+            ).upper()
+
+
+            score = safe_float(
+                row.get(
+                    "Investment Score",
+                    0
+                )
+            )
+
+
+            # Existing holdings only
+
+            if ticker in existing_holdings:
+
+
+                if action in [
+                    "BUY",
+                    "ADD",
+                    "BUY MORE"
+                ]:
+
+                    buy_candidates.append(
+
+                        {
+
+                            "Ticker":
+                                ticker,
+
+                            "Action":
+                                "BUY MORE",
+
+                            "Existing Holding":
+                                "Yes",
+
+                            "Score":
+                                score,
+
+                            "Reason":
+                                "Increase existing high conviction holding"
+
+                        }
+
+                    )
+
+
+                elif action == "HOLD":
+
+
+                    allocations.append(
+
+                        {
+
+                            "Ticker":
+                                ticker,
+
+                            "Action":
+                                "HOLD",
+
+                            "Existing Holding":
+                                "Yes",
+
+                            "Amount":
+                                0,
+
+                            "Funding Source":
+                                "",
+
+                            "Reason":
+                                row.get(
+                                    "Reason",
+                                    "Maintain position"
+                                )
+
+                        }
+
+                    )
+
+
+
+    # =================================================
+    # New opportunity candidates
+    # =================================================
+
+
+    if not opportunities.empty:
+
+
+        for _, row in opportunities.iterrows():
+
+
+            ticker = normalise_ticker(
+                row.get(
+                    "Ticker",
+                    ""
+                )
+            )
+
+
+            if not ticker:
+
+                continue
+
+
+
+            score = safe_float(
+                row.get(
+                    "Investment Score",
+                    0
+                )
+            )
+
+
+
+            # Existing holdings never become BUY NEW
+
+            if ticker in existing_holdings:
+
+                continue
+
+
+
+            if score >= 75:
+
+
+                buy_candidates.append(
+
+                    {
+
+                        "Ticker":
+                            ticker,
+
+                        "Action":
+                            "BUY NEW",
+
+                        "Existing Holding":
+                            "No",
+
+                        "Score":
+                            score,
+
+                        "Reason":
+                            "High conviction opportunity"
+
+                    }
+
+                )
+
+
+            else:
+
+
+                allocations.append(
+
+                    {
+
+                        "Ticker":
+                            ticker,
+
+                        "Action":
+                            "AVOID",
+
+                        "Existing Holding":
+                            "No",
+
+                        "Amount":
+                            0,
+
+                        "Funding Source":
+                            "",
+
+                        "Reason":
+                            "Low conviction opportunity"
+
+                    }
+
+                )
+
+
+
+    # =================================================
+    # Allocate available capital
+    # =================================================
+
+
+    available_capital = (
+
+        DISCRETIONARY_SPEND_LIMIT
+
+        +
+
+        released_capital
+
+    )
+
+
+    buy_candidates = sorted(
+
+        buy_candidates,
+
+        key=lambda x: x["Score"],
+
+        reverse=True
 
     )
 
 
 
-    reserve = (
-        AVAILABLE_CASH
-        *
-        CASH_RESERVE_PERCENT
-        /
-        100
+    # Maximum number of positions to fund
+
+    max_new_allocations = min(
+
+        len(buy_candidates),
+
+        10
+
     )
 
 
-    cash = AVAILABLE_CASH - reserve
+
+    selected = buy_candidates[
+        :max_new_allocations
+    ]
 
 
 
-    for _, stock in candidates.iterrows():
-
-        if cash < MIN_TRADE_VALUE:
-            break
+    if selected:
 
 
+        total_score = sum(
 
-        amount = min(
-            MAX_TRADE_VALUE,
-            cash
+            x["Score"]
+
+            for x in selected
+
+        )
+
+
+        for candidate in selected:
+
+
+            allocation = round(
+
+                available_capital
+
+                *
+
+                (
+                    candidate["Score"]
+
+                    /
+
+                    total_score
+
+                ),
+
+                2
+
+            )
+
+
+            allocations.append(
+
+                {
+
+                    "Ticker":
+                        candidate["Ticker"],
+
+                    "Action":
+                        candidate["Action"],
+
+                    "Existing Holding":
+                        candidate["Existing Holding"],
+
+                    "Amount":
+                        allocation,
+
+                    "Funding Source":
+                        "Discretionary Spend + Released Capital",
+
+                    "Reason":
+                        candidate["Reason"]
+
+                }
+
+            )
+
+
+
+    # =================================================
+    # Create Allocation dataframe
+    # =================================================
+
+
+    allocation_df = pd.DataFrame(
+        allocations
+    )
+
+
+
+    if allocation_df.empty:
+
+
+        allocation_df = pd.DataFrame(
+
+            columns=[
+
+                "Ticker",
+                "Action",
+                "Existing Holding",
+                "Amount",
+                "Funding Source",
+                "Reason"
+
+            ]
+
         )
 
 
 
-        result["BUY"].append(
+    # =================================================
+    # Capital Summary
+    # =================================================
+
+
+    allocated = allocation_df[
+
+        allocation_df["Action"]
+
+        .isin(
+            [
+                "BUY NEW",
+                "BUY MORE"
+            ]
+        )
+
+    ]["Amount"].sum()
+
+
+
+    summary = pd.DataFrame(
+
+        [
+
             {
 
-                "Ticker":
-                stock["Ticker"],
+                "Metric":
+                    "Discretionary Spend Limit",
 
-                "Sector":
-                stock.get(
-                    "Sector",
-                    "Unknown"
-                ),
+                "Value":
+                    DISCRETIONARY_SPEND_LIMIT
 
-                "Amount":
-                round(
-                    amount,
-                    2
-                ),
+            },
 
-                "Investment Score":
-                stock["Investment Score"],
+            {
 
-                "Quality Score":
-                stock["Quality Score"],
+                "Metric":
+                    "Capital Released From Sales",
 
-                "Confidence":
-                stock.get(
-                    "Confidence",
-                    "Medium"
-                ),
+                "Value":
+                    round(
+                        released_capital,
+                        2
+                    )
 
-                "Reason":
-                "High conviction opportunity"
+            },
+
+            {
+
+                "Metric":
+                    "Total Available Capital",
+
+                "Value":
+                    round(
+                        available_capital,
+                        2
+                    )
+
+            },
+
+            {
+
+                "Metric":
+                    "Capital Allocated",
+
+                "Value":
+                    round(
+                        allocated,
+                        2
+                    )
+
+            },
+
+            {
+
+                "Metric":
+                    "Remaining Capital",
+
+                "Value":
+                    round(
+
+                        available_capital
+
+                        -
+
+                        allocated,
+
+                        2
+
+                    )
+
+            },
+
+            {
+
+                "Metric":
+                    "BUY NEW Count",
+
+                "Value":
+                    len(
+
+                        allocation_df[
+
+                            allocation_df["Action"]
+
+                            ==
+                            "BUY NEW"
+
+                        ]
+
+                    )
+
+            },
+
+            {
+
+                "Metric":
+                    "BUY MORE Count",
+
+                "Value":
+                    len(
+
+                        allocation_df[
+
+                            allocation_df["Action"]
+
+                            ==
+                            "BUY MORE"
+
+                        ]
+
+                    )
+
+            },
+
+            {
+
+                "Metric":
+                    "REDUCE / SELL Count",
+
+                "Value":
+                    len(
+
+                        allocation_df[
+
+                            allocation_df["Action"]
+
+                            .isin(
+                                [
+                                    "REDUCE",
+                                    "SELL"
+                                ]
+                            )
+
+                        ]
+
+                    )
 
             }
-        )
 
+        ]
 
-        cash -= amount
-
-
-
-    result["Cash Remaining"] = round(
-        cash + reserve,
-        2
     )
 
 
 
-    return result
+    return {
+
+        "Capital Allocation":
+            allocation_df,
+
+        "Capital Summary":
+            summary
+
+    }

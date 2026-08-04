@@ -1,22 +1,36 @@
 import pandas as pd
+
 from data.database import get_connection
+
+
+
+def get_reliability(count):
+
+    if count < 20:
+        return 0
+
+    return 1
+
 
 
 def get_adaptive_adjustments():
 
     """
-    Learns from historical recommendation outcomes.
+    Converts historical recommendation performance
+    into scoring adjustments.
 
     Returns:
+
     {
-        "BUY": adjustment,
-        "SELL": adjustment,
-        "HOLD": adjustment,
-        "WATCH": adjustment
+       ("BUY","High","Technology"): -5,
+       ("WATCH","Good","Financial Services"): +3
     }
+
     """
 
-    print("ADAPTIVE LEARNING ENGINE START")
+    print(
+        "ADAPTIVE LEARNING ENGINE START"
+    )
 
 
     try:
@@ -25,18 +39,40 @@ def get_adaptive_adjustments():
 
 
         query = """
+
         SELECT
+
             Signal,
+
+            Investment_Score,
+
+            Sector,
+
             AVG(return_percent) AS avg_return,
+
             COUNT(*) AS samples
+
+
         FROM recommendation_evaluations
-        GROUP BY Signal
+
+
+        GROUP BY
+
+            Signal,
+
+            Investment_Score,
+
+            Sector
+
         """
 
 
         df = pd.read_sql(
+
             query,
+
             conn
+
         )
 
 
@@ -53,64 +89,119 @@ def get_adaptive_adjustments():
         return {}
 
 
+
     if df.empty:
 
         return {}
 
 
+
     adjustments = {}
+
 
 
     for _, row in df.iterrows():
 
-        signal = row["Signal"]
 
-        avg_return = row["avg_return"]
+        samples = int(
+            row["samples"]
+        )
 
-        samples = row["samples"]
 
-
-        #
-        # Only trust signals with enough history
-        #
-
-        if samples < 10:
-
-            adjustments[signal] = 0
+        if samples < 20:
 
             continue
 
 
+
+        signal = row["Signal"]
+
+
+        sector = row["Sector"]
+
+
+
+        score = float(
+            row["Investment_Score"]
+        )
+
+
+        avg_return = float(
+            row["avg_return"]
+        )
+
+
+
+        # score bucket
+
+        if score >= 85:
+
+            bucket = "High"
+
+        elif score >= 70:
+
+            bucket = "Good"
+
+        elif score >= 50:
+
+            bucket = "Medium"
+
+        else:
+
+            bucket = "Low"
+
+
+
         #
-        # Convert historical performance
+        # Convert performance
         # into score adjustment
         #
 
-        adjustment = avg_return * 3
+        adjustment = avg_return * 5
 
 
-        #
-        # Limit influence
-        #
 
         adjustment = max(
+
             min(
+
                 adjustment,
-                15
+
+                10
+
             ),
-            -15
+
+            -10
+
         )
 
 
-        adjustments[signal] = round(
+
+        adjustments[
+
+            (
+                signal,
+                bucket,
+                sector
+
+            )
+
+        ] = round(
+
             adjustment,
+
             2
+
         )
+
 
 
     print(
+
         "ADAPTIVE ADJUSTMENTS:",
+
         adjustments
+
     )
 
 

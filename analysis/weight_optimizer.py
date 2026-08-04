@@ -1,10 +1,10 @@
 # analysis/weight_optimizer.py
 
 import os
-import json
 import pandas as pd
 
 from data.database import get_connection
+from analysis.weight_controller import save_weights
 
 
 WEIGHT_FILE = "data/optimised_weights.json"
@@ -18,15 +18,14 @@ DEFAULT_WEIGHTS = {
 
     "technical_score": 50.0,
 
-    "quality_score": 15.0,
+    "quality_score": 20.0,
 
-    "growth_score": 15.0,
+    "growth_score": 10.0,
 
-    "confidence_score": 10.0,
-
-    "investment_score": 10.0
+    "investment_score": 20.0
 
 }
+
 
 
 # =====================================================
@@ -47,8 +46,6 @@ def load_learning_data():
         quality_score,
 
         growth_score,
-
-        confidence_score,
 
         investment_score,
 
@@ -74,7 +71,6 @@ def load_learning_data():
     conn.close()
 
 
-    # Ensure numeric
 
     numeric_columns = [
 
@@ -83,8 +79,6 @@ def load_learning_data():
         "quality_score",
 
         "growth_score",
-
-        "confidence_score",
 
         "investment_score",
 
@@ -95,26 +89,33 @@ def load_learning_data():
 
     for col in numeric_columns:
 
+
         if col not in df.columns:
 
             df[col] = 0
 
 
         df[col] = pd.to_numeric(
+
             df[col],
+
             errors="coerce"
+
         ).fillna(0)
+
 
 
     return df
 
 
 
+
 # =====================================================
-# Component correlation analysis
+# Analyse component performance
 # =====================================================
 
 def analyse_components(df):
+
 
     print(
         "\nCOMPONENT PERFORMANCE ANALYSIS"
@@ -129,21 +130,28 @@ def analyse_components(df):
 
         "growth_score",
 
-        "confidence_score",
-
         "investment_score"
 
     ]
 
 
-    rows = []
+    results = []
+
 
 
     for component in components:
 
 
-        correlation = df[component].corr(
-            df["return_percent"]
+        correlation = (
+
+            df[component]
+
+            .corr(
+
+                df["return_percent"]
+
+            )
+
         )
 
 
@@ -153,28 +161,31 @@ def analyse_components(df):
 
 
 
-        rows.append(
+        results.append(
 
             {
 
-                "Component": component,
+                "Component":
+                    component,
 
-                "Correlation": round(
-                    correlation,
-                    3
-                )
+                "Correlation":
+                    round(
+                        correlation,
+                        3
+                    )
 
             }
 
         )
 
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(results)
+
 
 
 
 # =====================================================
-# Calculate optimal weights
+# Calculate optimised weights
 # =====================================================
 
 def calculate_weights(component_results):
@@ -187,30 +198,25 @@ def calculate_weights(component_results):
 
     MIN_WEIGHTS = {
 
-
         "technical_score": 30,
 
         "quality_score": 10,
 
         "growth_score": 10,
 
-        "confidence_score": 10,
-
         "investment_score": 10
 
     }
 
 
-    MAX_WEIGHTS = {
 
+    MAX_WEIGHTS = {
 
         "technical_score": 60,
 
         "quality_score": 30,
 
         "growth_score": 30,
-
-        "confidence_score": 30,
 
         "investment_score": 40
 
@@ -225,34 +231,35 @@ def calculate_weights(component_results):
     for _, row in component_results.iterrows():
 
 
-        correlation = row["Correlation"]
-
-
-        # Ignore negative predictors
-
         correlation = max(
-            correlation,
+
+            row["Correlation"],
+
             0
+
         )
 
 
         correlations[
+
             row["Component"]
+
         ] = correlation
 
 
 
+
     total = sum(
+
         correlations.values()
+
     )
 
 
 
-    # fallback
-
     if total == 0:
 
-        return DEFAULT_WEIGHTS
+        return DEFAULT_WEIGHTS.copy()
 
 
 
@@ -279,10 +286,7 @@ def calculate_weights(component_results):
 
             weight,
 
-            MIN_WEIGHTS.get(
-                component,
-                5
-            )
+            MIN_WEIGHTS[component]
 
         )
 
@@ -291,88 +295,54 @@ def calculate_weights(component_results):
 
             weight,
 
-            MAX_WEIGHTS.get(
-                component,
-                50
-            )
+            MAX_WEIGHTS[component]
 
         )
 
 
         weights[component] = round(
+
             weight,
+
             1
+
         )
 
 
 
-    # Normalise to 100%
+    # normalise
 
     total_weight = sum(
+
         weights.values()
+
     )
 
 
 
-    for component in weights:
+    for key in weights:
 
-        weights[component] = round(
 
-            (
+        weights[key] = round(
 
-                weights[component]
+            weights[key]
 
-                /
+            /
 
-                total_weight
+            total_weight
 
-            )
+            *
 
-            * 100,
+            100,
 
             1
 
         )
+
 
 
     return weights
 
-
-
-# =====================================================
-# Save weights
-# =====================================================
-
-def save_weights(weights):
-
-
-    os.makedirs(
-
-        "data",
-
-        exist_ok=True
-
-    )
-
-
-    with open(
-
-        WEIGHT_FILE,
-
-        "w"
-
-    ) as f:
-
-
-        json.dump(
-
-            weights,
-
-            f,
-
-            indent=4
-
-        )
 
 
 
@@ -386,13 +356,11 @@ def generate_actions(component_results):
     actions = []
 
 
+
     for _, row in component_results.iterrows():
 
 
-        correlation = row["Correlation"]
-
-
-        if correlation > 0:
+        if row["Correlation"] > 0:
 
 
             action = "Increase weighting"
@@ -405,7 +373,7 @@ def generate_actions(component_results):
         else:
 
 
-            action = "Reduce weighting"
+            action = "Maintain or reduce"
 
             reason = (
                 "Negative historical return correlation"
@@ -420,10 +388,11 @@ def generate_actions(component_results):
                 "Component":
                     row["Component"],
 
+                "Correlation":
+                    row["Correlation"],
 
                 "Action":
                     action,
-
 
                 "Reason":
                     reason
@@ -437,12 +406,16 @@ def generate_actions(component_results):
 
 
 
+
+# =====================================================
+# Main optimiser
+# =====================================================
+
 # =====================================================
 # Main optimiser
 # =====================================================
 
 def run_weight_optimizer():
-
 
     print(
         "WEIGHT OPTIMISER START"
@@ -452,20 +425,21 @@ def run_weight_optimizer():
     df = load_learning_data()
 
 
-
     print(
         f"Learning records: {len(df)}"
     )
 
 
-
     if df.empty:
-
 
         return {
 
             "Component Performance":
                 pd.DataFrame(),
+
+
+            "Raw Weights":
+                DEFAULT_WEIGHTS,
 
 
             "Recommended Weights":
@@ -479,44 +453,94 @@ def run_weight_optimizer():
 
 
 
+    # -------------------------------------
+    # Analyse component performance
+    # -------------------------------------
+
     component_results = analyse_components(
         df
     )
 
 
     print(
+        "\nCOMPONENT PERFORMANCE"
+    )
+
+
+    print(
         component_results
     )
 
 
 
-    weights = calculate_weights(
+    # -------------------------------------
+    # Generate raw optimiser weights
+    # -------------------------------------
+
+    raw_weights = calculate_weights(
         component_results
     )
 
 
-
     print(
-        "\nOPTIMISED WEIGHTS"
+        "\nRAW OPTIMISER WEIGHTS"
     )
 
 
     print(
-        weights
+        raw_weights
     )
 
 
+
+    # -------------------------------------
+    # Apply governance controller
+    # -------------------------------------
+
+    from analysis.weight_controller import (
+        govern_weights,
+        save_weights
+    )
+
+
+    governed_weights = govern_weights(
+        raw_weights
+    )
+
+
+    print(
+        "\nGOVERNED WEIGHTS"
+    )
+
+
+    print(
+        governed_weights
+    )
+
+
+
+    # -------------------------------------
+    # Persist production weights
+    # -------------------------------------
 
     save_weights(
-        weights
+        governed_weights
     )
 
 
+    print(
+        "\nWEIGHTS SAVED"
+    )
+
+
+
+    # -------------------------------------
+    # Generate explanation
+    # -------------------------------------
 
     actions = generate_actions(
         component_results
     )
-
 
 
     print(
@@ -527,7 +551,6 @@ def run_weight_optimizer():
     print(
         actions
     )
-
 
 
     print(
@@ -543,8 +566,15 @@ def run_weight_optimizer():
             component_results,
 
 
+        # Research output only
+        "Raw Weights":
+            raw_weights,
+
+
+        # Production output
+        # Used by reporting layer
         "Recommended Weights":
-            weights,
+            governed_weights,
 
 
         "Weight Actions":

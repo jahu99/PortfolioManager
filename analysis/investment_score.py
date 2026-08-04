@@ -1,55 +1,160 @@
 from analysis.weight_controller import get_weights
+from analysis.adaptive_learning import get_adaptive_adjustments
+
+
+# =====================================================
+# Helpers
+# =====================================================
+
+def safe_float(value):
+
+    try:
+
+        return float(value)
+
+    except Exception:
+
+        return 0.0
+
+
+
+def clamp(
+    value,
+    minimum=0,
+    maximum=100
+):
+
+    return max(
+        min(
+            value,
+            maximum
+        ),
+        minimum
+    )
+
 
 
 # =====================================================
 # Investment Score Engine
 # =====================================================
 
-
 def calculate_investment_score(
+
     technical_score,
+
     quality_score,
+
     growth_score,
-    confidence_score=0
+
+    confidence_score=0,
+
+    signal="",
+
+    score_bucket="",
+
+    sector=""
+
 ):
+
     """
-    Calculates adaptive investment score.
+    Calculates final investment conviction score.
 
-    Uses weights produced by
-    weight_optimizer.py
+    Inputs:
 
-    Falls back to defaults through
-    weight_controller.py
+    technical_score
+        Technical market strength
+
+    quality_score
+        Business quality
+
+    growth_score
+        Growth characteristics
+
+    confidence_score
+        AI confidence 0-100
+
+    signal
+        BUY / WATCH / SELL
+
+    score_bucket
+        Low / Medium / Good / High
+
+    sector
+        Sector classification
+
+
+    Returns:
+
+    Final Investment Score 0-100
+
     """
 
+
+
+    # -------------------------------------------------
+    # Normalise inputs
+    # -------------------------------------------------
+
+    technical_score = safe_float(
+        technical_score
+    )
+
+
+    quality_score = safe_float(
+        quality_score
+    )
+
+
+    growth_score = safe_float(
+        growth_score
+    )
+
+
+    confidence_score = safe_float(
+        confidence_score
+    )
+
+
+
+    # -------------------------------------------------
+    # Load adaptive weights
+    # -------------------------------------------------
 
     weights = get_weights()
 
 
-    investment_weight = weights.get(
-        "investment_score",
-        0
-    )
-
 
     technical_weight = weights.get(
+
         "technical_score",
+
         50
+
     )
 
 
     quality_weight = weights.get(
+
         "quality_score",
-        20
+
+        30
+
     )
 
 
     growth_weight = weights.get(
+
         "growth_score",
-        10
+
+        20
+
     )
 
 
+
+    # -------------------------------------------------
+    # Base investment score
+    # -------------------------------------------------
 
     score = (
 
@@ -59,6 +164,7 @@ def calculate_investment_score(
         /
         100
 
+
         +
 
         quality_score
@@ -66,6 +172,7 @@ def calculate_investment_score(
         quality_weight
         /
         100
+
 
         +
 
@@ -79,38 +186,96 @@ def calculate_investment_score(
 
 
 
+    # -------------------------------------------------
     # Confidence adjustment
-    # avoids low confidence scores dominating
+    # -------------------------------------------------
 
-    if confidence_score:
+    if confidence_score > 0:
 
-        score = (
 
-            score
-            *
+        confidence_multiplier = (
+
+            0.85
+
+            +
+
             (
-                0.8
-                +
-                (
-                    confidence_score
-                    /
-                    500
-                )
+                confidence_score
+                /
+                100
+                *
+                0.15
             )
 
         )
 
 
+        score *= confidence_multiplier
+
+
+
+    # -------------------------------------------------
+    # Adaptive learning adjustment
+    # -------------------------------------------------
+
+    try:
+
+
+        adjustments = get_adaptive_adjustments()
+
+
+
+        learning_adjustment = adjustments.get(
+
+            (
+
+                signal,
+
+                score_bucket,
+
+                sector
+
+            ),
+
+            0
+
+        )
+
+
+        score += learning_adjustment
+
+
+
+    except Exception as e:
+
+
+        print(
+
+            "Adaptive learning adjustment skipped:",
+
+            e
+
+        )
+
+
+
+    # -------------------------------------------------
+    # Final score
+    # -------------------------------------------------
+
+    score = clamp(
+
+        score
+
+    )
+
 
     return round(
-        max(
-            min(
-                score,
-                100
-            ),
-            0
-        ),
+
+        score,
+
         1
+
     )
 
 
@@ -119,32 +284,45 @@ def calculate_investment_score(
 # Diagnostic Test
 # =====================================================
 
-
 def test_investment_score():
+
 
     score = calculate_investment_score(
 
-        technical_score=80,
+        technical_score=85,
 
         quality_score=70,
 
-        growth_score=60,
+        growth_score=80,
 
-        confidence_score=75
+        confidence_score=90,
+
+        signal="BUY",
+
+        score_bucket="High",
+
+        sector="Technology"
 
     )
 
 
     print(
+
         "Investment Score:",
+
         score
+
     )
 
 
     print(
+
         "Weights:",
+
         get_weights()
+
     )
+
 
 
 if __name__ == "__main__":

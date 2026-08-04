@@ -1,10 +1,6 @@
 import pandas as pd
 import traceback
 
-
-
-
-from data.market_data import get_stock_data
 from data.fundamentals import get_fundamentals
 
 from data.database import (
@@ -29,7 +25,6 @@ from data.database_queries import (
 )
 
 
-from analysis.indicators import add_indicators
 from analysis.scorer import score_stock
 from analysis.quality import score_quality
 from analysis.signals import generate_signal
@@ -132,6 +127,12 @@ from analysis.scanner import run_market_scan
 from analysis.capital_allocator import (
     generate_capital_allocation
 )
+
+from analysis.stock_analyser import analyse_stock
+
+from analysis.forward_returns import calculate_forward_returns
+from analysis.weight_optimizer import run_weight_optimizer
+
 
 def main():
 
@@ -701,6 +702,58 @@ def main():
 
 
     # ---------------------------------
+    # Track already analysed stocks
+    # ---------------------------------
+
+    scanned = {
+        str(r["Ticker"]).upper()
+        for r in results
+        if "Ticker" in r
+    }
+
+
+    print(
+        "SCANNED STOCK COUNT:",
+        len(scanned)
+    )
+
+
+    
+    for ticker in portfolio_tickers:
+
+        if ticker not in scanned:
+
+
+
+
+            try:
+
+                print(
+                    "Adding holding to scanner:",
+                    ticker
+                )
+
+
+                holding_analysis = analyse_stock(
+                    ticker
+                )
+
+
+                if holding_analysis:
+
+                    results.append(
+                        holding_analysis
+                    )
+
+
+            except Exception as e:
+
+                print(
+                    "Holding enrichment failed:",
+                    ticker,
+                    e
+                )
+    # ---------------------------------
     # Rank stocks
     # ---------------------------------
     print(
@@ -806,8 +859,6 @@ def main():
             results
         )
 
-        
-
 
         portfolio_summary = enrich_portfolio_holdings(
             portfolio_summary,
@@ -865,34 +916,11 @@ def main():
             test_context = None
 
 
-        capital_allocation = generate_capital_allocation(
-            portfolio_summary,
-            pd.DataFrame(results),
-            sector_summary
-        )
-
-
-        print(capital_allocation)
-
-        try:
-            ai_reviews = run_ai_agents(
-                results,
-                portfolio_summary,
-                sector_summary,
-                portfolio_health
-            )
-        except Exception as e:
-
-            print(
-                f"AI agents skipped: {e}"
-            )
-
-            ai_reviews = []
-
         portfolio_decisions = generate_portfolio_decisions(
-            holdings,
+            portfolio_summary,
             pd.DataFrame(results)
         )
+
 
         print(
             "\nPORTFOLIO DECISIONS"
@@ -901,6 +929,49 @@ def main():
         for decision in portfolio_decisions[:10]:
             print(decision)
 
+
+
+        # Convert stock results into dataframe for capital allocator
+
+        if isinstance(results, list):
+
+            opportunities_df = pd.DataFrame(
+                results
+            )
+
+        else:
+
+            opportunities_df = results
+
+
+
+        capital_allocation = generate_capital_allocation(
+
+            portfolio_summary=portfolio_summary,
+
+            opportunities=opportunities_df,
+
+            portfolio_decisions=portfolio_decisions
+
+        )
+    
+
+
+        try:
+            ai_reviews = run_ai_agents(
+                results,
+                portfolio_summary,
+                sector_summary,
+                portfolio_health
+            )
+
+        except Exception as e:
+
+            print(
+                f"AI agents skipped: {e}"
+            )
+
+            ai_reviews = []
 
 
         decisions = generate_decisions(
@@ -1046,7 +1117,7 @@ def main():
 
     final_portfolio_decisions = generate_final_portfolio_decisions(
         portfolio_summary,
-        decisions,
+        pd.DataFrame(portfolio_decisions),
         portfolio_ai_review,
         portfolio_manager_review,
         portfolio_health
@@ -1081,14 +1152,15 @@ def main():
 
     recommendation_history = get_learning_history()
 
+    recommendation_history = calculate_forward_returns(
+        recommendation_history
+    )
+
+
     recommendation_learning = (
         calculate_recommendation_learning(
             recommendation_history
         )
-    )
-
-    print(
-        "\nRECOMMENDATION LEARNING"
     )
 
     if isinstance(recommendation_learning, dict):
@@ -1104,6 +1176,21 @@ def main():
         print(
             recommendation_learning
         )
+    
+    # =====================================================
+    # ADAPTIVE WEIGHT OPTIMISATION
+    # =====================================================
+
+    weight_learning = run_weight_optimizer()
+
+
+    print(
+        "\nOPTIMISED SCORING WEIGHTS"
+    )
+
+    print(
+        weight_learning["Recommended Weights"]
+    )
 
     signal_performance = (
     recommendation_learning.get(

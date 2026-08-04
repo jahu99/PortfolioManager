@@ -6,7 +6,7 @@ Portfolio Manager Configuration
 # CASH CONTRIBUTIONS
 # ==========================================
 
-AVAILABLE_CASH = 15
+
 
 MIN_TRADE_VALUE = 5
 
@@ -47,7 +47,16 @@ MIN_BUY_SCORE = 75
 
 MIN_QUALITY_SCORE = 40
 
+# ==========================================
+# CAPITAL ALLOCATION
+# ==========================================
 
+# Maximum new investment added each cycle
+# Used by capital allocator
+DISCRETIONARY_SPEND_LIMIT = 15
+
+# Legacy compatibility
+AVAILABLE_CASH = DISCRETIONARY_SPEND_LIMIT
 
 # ==========================================
 # PORTFOLIO RISK

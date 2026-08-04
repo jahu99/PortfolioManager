@@ -1,77 +1,121 @@
 import pandas as pd
+import numpy as np
 
 
-# -------------------------------------------------
-# Reliability classification
-# -------------------------------------------------
+# =====================================================
+# Helpers
+# =====================================================
 
-def get_reliability(count):
+def safe_correlation(df, x, y):
 
-    if count < 20:
-        return "INSUFFICIENT DATA"
+    if x not in df.columns:
+        return 0
 
-    elif count < 50:
-        return "LOW CONFIDENCE"
-
-    else:
-        return "VALID"
+    if y not in df.columns:
+        return 0
 
 
+    data = df[[x, y]].copy()
 
-def calculate_recommendation_learning(
-    recommendation_history
-):
+
+    data[x] = pd.to_numeric(
+        data[x],
+        errors="coerce"
+    )
+
+    data[y] = pd.to_numeric(
+        data[y],
+        errors="coerce"
+    )
+
+
+    data = data.dropna()
+
+
+    if len(data) < 5:
+        return 0
+
+
+    if data[x].nunique() <= 1:
+        return 0
+
+
+    if data[y].nunique() <= 1:
+        return 0
+
+
+    corr = data[x].corr(
+        data[y]
+    )
+
+
+    if pd.isna(corr):
+        return 0
+
+
+    return round(
+        corr,
+        3
+    )
+
+
+
+def calculate_win_rate(series):
+
+    if len(series) == 0:
+        return 0
+
+
+    return round(
+        (
+            (series > 0)
+            .sum()
+            /
+            len(series)
+        )
+        *
+        100,
+        2
+    )
+
+
+
+# =====================================================
+# Main Recommendation Learning Engine
+# =====================================================
+
+def calculate_recommendation_learning(history):
+
 
     print(
         "RECOMMENDATION LEARNING ENGINE START"
     )
 
 
-    empty_result = {
+    if history is None:
 
-        "Overall": {},
-
-        "Horizon Learning": {},
-
-        "Signal Performance": pd.DataFrame(),
-
-        "Score Bucket Performance": pd.DataFrame(),
-
-        "Component Score Performance": pd.DataFrame()
-
-    }
-
-
-    if (
-        recommendation_history is None
-        or recommendation_history.empty
-    ):
-
-        return empty_result
+        history = pd.DataFrame()
 
 
 
-    df = recommendation_history.copy()
+    if history.empty:
+
+
+        return {
+
+            "Overall":
+            {
+
+                "Reliability":
+                    "NO DATA"
+
+            }
+
+        }
 
 
 
-    # ---------------------------------
-    # Normalise columns
-    # ---------------------------------
-
-    df.rename(
-        columns={
-
-            "Days After":
-                "days_after",
-
-            "Return %":
-                "return_percent"
-
-        },
-
-        inplace=True
-    )
+    df = history.copy()
 
 
 
@@ -82,255 +126,163 @@ def calculate_recommendation_learning(
 
 
 
-    required_columns = [
+    # -------------------------------------------------
+    # Normalise returns
+    # -------------------------------------------------
 
-        "Signal",
+    for col in [
 
-        "Investment Score",
+        "Return %",
+        "Forward Return 5D",
+        "Forward Return 10D"
 
-        "return_percent",
-
-        "Outcome",
-
-        "days_after"
-
-    ]
+    ]:
 
 
+        if col in df.columns:
 
-    for col in required_columns:
-
-        if col not in df.columns:
-
-            print(
-                f"MISSING COLUMN: {col}"
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
             )
 
-            return empty_result
+
+
+    # -------------------------------------------------
+    # Horizon performance
+    # -------------------------------------------------
+
+    horizons = {}
+
+
+    for days, column in [
+
+        (5, "Forward Return 5D"),
+
+        (10, "Forward Return 10D")
+
+    ]:
+
+
+        if column not in df.columns:
+
+            horizons[days] = {
+
+                "Recommendations":0,
+                "Average Return %":0,
+                "Win Rate %":0,
+                "Reliability":"NO DATA"
+
+            }
+
+            continue
 
 
 
-    # ---------------------------------
-    # Overall performance
-    # ---------------------------------
-
-    total = len(df)
-
-
-    successful = len(
-        df[
-            df["Outcome"] == "SUCCESS"
-        ]
-    )
+        returns = (
+            df[column]
+            .dropna()
+        )
 
 
-    failed = len(
-        df[
-            df["Outcome"] == "FAILED"
-        ]
-    )
+        horizons[days] = {
 
 
-    overall = {
+            "Recommendations":
+                len(returns),
 
-        "Total Recommendations":
-            total,
 
-        "Successful Recommendations":
-            successful,
+            "Average Return %":
+                round(
+                    returns.mean(),
+                    2
+                ),
 
-        "Failed Recommendations":
-            failed,
 
-        "Win Rate %":
-            round(
-                successful / total * 100,
-                2
-            )
-            if total
-            else 0,
+            "Win Rate %":
+                calculate_win_rate(
+                    returns
+                ),
 
-        "Reliability":
-            get_reliability(
-                total
-            )
 
-    }
+            "Reliability":
+
+                (
+                    "VALID"
+                    if len(returns) >= 20
+                    else
+                    "INSUFFICIENT DATA"
+                )
+
+        }
 
 
 
-    # ---------------------------------
+    # -------------------------------------------------
     # Signal performance
-    # ---------------------------------
+    # -------------------------------------------------
 
-    signal_performance = (
+    signal_rows = []
 
-        df
 
-        .groupby("Signal")
+    if "Signal" in df.columns:
 
-        .agg(
 
-            Recommendations=
-            (
-                "Signal",
-                "count"
-            ),
+        for signal, group in df.groupby(
+            "Signal"
+        ):
 
-            Average_Return=
-            (
-                "return_percent",
-                "mean"
-            ),
 
-            Wins=
-            (
-                "Outcome",
-                lambda x:
-                (
-                    x == "SUCCESS"
-                ).sum()
+            returns = (
+
+                group
+                .get(
+                    "Forward Return 5D",
+                    pd.Series()
+                )
+                .dropna()
+
             )
 
-        )
 
-        .reset_index()
+            signal_rows.append(
 
-    )
+                {
 
-
-    signal_performance["Win Rate %"] = (
-
-        signal_performance["Wins"]
-
-        /
-
-        signal_performance["Recommendations"]
-
-        *
-
-        100
-
-    ).round(2)
+                "Signal":
+                    signal,
 
 
-
-    signal_performance["Reliability"] = (
-
-        signal_performance["Recommendations"]
-
-        .apply(
-            get_reliability
-        )
-
-    )
+                "Recommendations":
+                    len(returns),
 
 
-
-    # ---------------------------------
-    # Score bucket performance
-    # ---------------------------------
-
-    df["Score Bucket"] = pd.cut(
-
-        df["Investment Score"],
-
-        bins=[
-
-            0,
-            50,
-            70,
-            85,
-            100
-
-        ],
-
-        labels=[
-
-            "Low",
-            "Medium",
-            "Good",
-            "High"
-
-        ],
-
-        include_lowest=True
-
-    )
+                "Average Return %":
+                    round(
+                        returns.mean()
+                        if len(returns)
+                        else 0,
+                        2
+                    ),
 
 
+                "Win Rate %":
+                    calculate_win_rate(
+                        returns
+                    )
 
-    score_bucket_performance = (
+                }
 
-        df
-
-        .groupby(
-            "Score Bucket",
-            observed=False
-        )
-
-        .agg(
-
-            Recommendations=
-            (
-                "Investment Score",
-                "count"
-            ),
-
-            Average_Return=
-            (
-                "return_percent",
-                "mean"
-            ),
-
-            Wins=
-            (
-                "Outcome",
-                lambda x:
-                (
-                    x == "SUCCESS"
-                ).sum()
             )
 
-        )
-
-        .reset_index()
-
-    )
 
 
-
-    score_bucket_performance["Win Rate %"] = (
-
-        score_bucket_performance["Wins"]
-
-        /
-
-        score_bucket_performance["Recommendations"]
-
-        *
-
-        100
-
-    ).round(2)
-
-
-
-    score_bucket_performance["Reliability"] = (
-
-        score_bucket_performance["Recommendations"]
-
-        .apply(
-            get_reliability
-        )
-
-    )
-
-
-
-    # ---------------------------------
-    # Component performance
-    # ---------------------------------
+    # -------------------------------------------------
+    # Component analysis
+    # NOTE:
+    # Reporting only.
+    # Weight changes handled by weight_optimizer.py
+    # -------------------------------------------------
 
     component_rows = []
 
@@ -343,126 +295,115 @@ def calculate_recommendation_learning(
 
         "Quality Score",
 
-        "Growth Score"
+        "Growth Score",
+
+        "Confidence Score"
 
     ]:
 
 
-        if component in df.columns:
+        component_rows.append(
+
+            {
+
+            "Component":
+                component,
 
 
-            correlation = None
+            "Correlation":
+                safe_correlation(
 
+                    df,
 
-            if len(df) >= 20:
+                    component,
 
-                correlation = round(
-
-                    df[component]
-
-                    .corr(
-                        df["return_percent"]
-                    ),
-
-                    3
+                    "Forward Return 5D"
 
                 )
 
+            }
 
-            component_rows.append(
-
-                {
-
-                    "Component":
-                        component,
-
-                    "Correlation":
-                        correlation,
-
-                    "Reliability":
-                        get_reliability(
-                            len(df)
-                        )
-
-                }
-
-            )
-
-
-
-    component_score_performance = pd.DataFrame(
-        component_rows
-    )
-
-
-
-    # ---------------------------------
-    # Horizon learning
-    # ---------------------------------
-
-    horizon_learning = {}
-
-
-
-    for horizon in sorted(
-
-        df["days_after"]
-
-        .dropna()
-
-        .astype(int)
-
-        .unique()
-
-    ):
-
-
-        print(
-            "ANALYSING HORIZON:",
-            horizon
         )
 
 
-        hdf = df[
-            df["days_after"] == horizon
-        ]
+
+    # -------------------------------------------------
+    # Overall
+    # -------------------------------------------------
+
+    returns = (
+
+        df
+        .get(
+            "Forward Return 5D",
+            pd.Series()
+        )
+        .dropna()
+
+    )
 
 
-
-        horizon_learning[horizon] = {
-
-            "Recommendations":
-                len(hdf),
+    overall = {
 
 
-            "Average Return %":
-                round(
-                    hdf["return_percent"].mean(),
-                    2
-                ),
+        "Total Recommendations":
+
+            len(returns),
 
 
-            "Reliability":
-                get_reliability(
-                    len(hdf)
+        "Successful Recommendations":
+
+            int(
+                (
+                    returns > 0
                 )
+                .sum()
+            ),
 
-        }
+
+        "Failed Recommendations":
+
+            int(
+                (
+                    returns <= 0
+                )
+                .sum()
+            ),
+
+
+        "Win Rate %":
+
+            calculate_win_rate(
+                returns
+            ),
+
+
+        "Average Return %":
+
+            round(
+                returns.mean()
+                if len(returns)
+                else 0,
+                2
+            ),
+
+
+        "Reliability":
+
+            (
+                "VALID"
+                if len(returns) >= 20
+                else
+                "NO DATA"
+            )
+
+    }
 
 
 
     print(
         "RECOMMENDATION LEARNING COMPLETE"
     )
-
-
-    print(
-        "HORIZONS:",
-        list(
-            horizon_learning.keys()
-        )
-    )
-
 
 
     return {
@@ -473,18 +414,18 @@ def calculate_recommendation_learning(
 
 
         "Horizon Learning":
-            horizon_learning,
+            horizons,
 
 
         "Signal Performance":
-            signal_performance,
-
-
-        "Score Bucket Performance":
-            score_bucket_performance,
+            pd.DataFrame(
+                signal_rows
+            ),
 
 
         "Component Score Performance":
-            component_score_performance
+            pd.DataFrame(
+                component_rows
+            )
 
     }

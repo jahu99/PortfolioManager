@@ -4,34 +4,119 @@ from analysis.confidence import calculate_confidence
 
 
 
+# =====================================================
+# Helpers
+# =====================================================
+
+def safe_float(value):
+
+    try:
+        return float(value)
+
+    except Exception:
+
+        return 0.0
+
+
+
+def get_score_bucket(score):
+
+    score = safe_float(score)
+
+
+    if score >= 85:
+
+        return "High"
+
+
+    elif score >= 70:
+
+        return "Good"
+
+
+    elif score >= 50:
+
+        return "Medium"
+
+
+    else:
+
+        return "Low"
+
+
+
+# =====================================================
+# Recommendation Engine
+# =====================================================
+
 def generate_recommendation(
+
     ticker,
+
     signal,
+
     investment_score,
+
     technical_score,
+
     quality_score,
+
     growth_score,
+
     technical_reasons,
+
     quality_reasons,
+
+    sector="Unknown",
+
     signal_performance=None,
+
     score_bucket_performance=None
+
 ):
 
 
     explanation = []
+
     risks = []
 
 
 
+    investment_score = safe_float(
+        investment_score
+    )
+
+
+    technical_score = safe_float(
+        technical_score
+    )
+
+
+    quality_score = safe_float(
+        quality_score
+    )
+
+
+    growth_score = safe_float(
+        growth_score
+    )
+
+
+
     # ---------------------------------
-    # Collect positive factors
+    # Collect evidence
     # ---------------------------------
 
     for reason in (
-        technical_reasons
+
+        (technical_reasons or [])
+
         +
-        quality_reasons
+
+        (quality_reasons or [])
+
     ):
+
 
         if reason not in explanation:
 
@@ -40,66 +125,197 @@ def generate_recommendation(
 
 
     # ---------------------------------
-    # Identify risks
+    # Risk detection
     # ---------------------------------
 
     risk_keywords = [
 
         "Below 200 DMA",
+
         "Below 50 DMA",
+
         "Weak RSI",
+
         "MACD bearish",
+
         "Overbought",
+
         "High debt",
+
         "Negative revenue growth",
+
         "Negative earnings growth",
+
         "Weak volume"
 
     ]
 
 
-    for reason in explanation:
 
-        if reason in risk_keywords:
+    for item in explanation:
 
-            risks.append(reason)
+
+        for keyword in risk_keywords:
+
+            if keyword.lower() in item.lower():
+
+                risks.append(item)
 
 
 
     # ---------------------------------
-    # Quality-adjusted recommendation
+    # Historical signal adjustment
+    # ---------------------------------
+
+    historical_penalty = 0
+
+
+    if isinstance(
+
+        signal_performance,
+
+        pd.DataFrame
+
+    ):
+
+
+        try:
+
+
+            row = signal_performance[
+
+                signal_performance["Signal"]
+
+                ==
+                signal
+
+            ]
+
+
+
+            if not row.empty:
+
+
+                avg_return = float(
+
+                    row.iloc[0][
+
+                        "Average_Return"
+
+                    ]
+
+                )
+
+
+                if avg_return < 0:
+
+                    historical_penalty = -5
+
+
+                    risks.append(
+
+                        "Historical signal performance weak"
+
+                    )
+
+
+
+        except Exception:
+
+            pass
+
+
+
+    adjusted_score = (
+
+        investment_score
+
+        +
+
+        historical_penalty
+
+    )
+
+
+
+    adjusted_score = max(
+
+        min(
+
+            adjusted_score,
+
+            100
+
+        ),
+
+        0
+
+    )
+
+
+
+    # ---------------------------------
+    # Recommendation rules
     # ---------------------------------
 
     if (
-        investment_score >= 85
-        and quality_score >= 75
+
+        adjusted_score >= 90
+
+        and
+
+        quality_score >= 75
+
+        and
+
+        len(risks) <= 1
+
     ):
+
 
         recommendation = "STRONG BUY"
 
 
+
     elif (
-        investment_score >= 75
-        and quality_score >= 65
+
+        adjusted_score >= 80
+
+        and
+
+        quality_score >= 65
+
+        and
+
+        len(risks) <= 2
+
     ):
+
 
         recommendation = "BUY"
 
 
-    elif investment_score >= 65:
+
+    elif adjusted_score >= 65:
+
 
         recommendation = "WATCH"
 
 
+
     else:
 
-        recommendation = "HOLD" 
+
+        recommendation = "HOLD"
+
+
 
     # ---------------------------------
-    # Internal conviction score
+    # Conviction calculation
     # ---------------------------------
 
     conviction = 0
+
 
 
     if technical_score >= 80:
@@ -120,11 +336,17 @@ def generate_recommendation(
 
         conviction += 1
 
+
+
     if growth_score >= 80:
+
         conviction += 2
 
     elif growth_score >= 65:
+
         conviction += 1
+
+
 
     if len(risks) == 0:
 
@@ -133,90 +355,143 @@ def generate_recommendation(
 
 
     # ---------------------------------
-    # Historical confidence engine
+    # Confidence engine
     # ---------------------------------
 
     historical_confidence = calculate_confidence(
 
-        investment_score,
+        adjusted_score,
+
         technical_score,
+
         quality_score,
+
         growth_score,
+
         risks,
-        signal_performance, 
+
+        signal_performance,
+
         score_bucket_performance
 
     )
 
 
+
     confidence_score = historical_confidence.get(
+
         "Confidence",
+
         50
+
     )
 
 
     confidence_reasons = historical_confidence.get(
+
         "Confidence Reasons",
+
         []
+
     )
 
 
 
-    # ---------------------------------
-    # Combine conviction + evidence
-    # ---------------------------------
-
     if (
+
         confidence_score >= 80
-        and conviction >= 4
+
+        and
+
+        conviction >= 4
+
     ):
+
 
         confidence = "High"
 
 
+
     elif (
+
         confidence_score >= 60
-        and conviction >= 2
+
+        and
+
+        conviction >= 2
+
     ):
+
 
         confidence = "Medium"
 
 
+
     else:
+
 
         confidence = "Low"
 
 
 
     # ---------------------------------
-    # Return recommendation object
+    # Return
     # ---------------------------------
 
     return {
 
 
-        "Ticker": ticker,
+        "Ticker":
+            ticker,
 
 
-        "Signal": signal,
+        "Signal":
+            signal,
 
 
-        "Recommendation": recommendation,
+        "Recommendation":
+            recommendation,
 
 
-        "Investment Score": investment_score,
+        "Investment Score":
+            round(
+                adjusted_score,
+                1
+            ),
 
 
-        "Technical Score": technical_score,
+        "Original Investment Score":
+            investment_score,
 
 
-        "Quality Score": quality_score,
+        "Technical Score":
+            technical_score,
 
 
-        "Confidence": confidence,
+        "Quality Score":
+            quality_score,
 
 
-        "Confidence Score": confidence_score,
+        "Growth Score":
+            growth_score,
+
+
+        "Score Bucket":
+            get_score_bucket(
+                adjusted_score
+            ),
+
+
+        "Sector":
+            sector,
+
+
+        "Confidence":
+            confidence,
+
+
+        "Confidence Score":
+            confidence_score,
 
 
         "Confidence Reasons":
@@ -228,6 +503,10 @@ def generate_recommendation(
 
 
         "Risks":
-            risks[:5]
+            list(
+                set(
+                    risks[:5]
+                )
+            )
 
     }

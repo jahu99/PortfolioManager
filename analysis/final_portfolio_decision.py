@@ -1,433 +1,374 @@
 import pandas as pd
 
 
+# ---------------------------------
+# Helpers
+# ---------------------------------
+
+def safe_float(value):
+
+    try:
+        return float(value)
+
+    except:
+
+        return 0.0
+
+
+
+def safe_dataframe(data):
+
+    if data is None:
+        return pd.DataFrame()
+
+
+    if isinstance(data, pd.DataFrame):
+
+        return data.copy()
+
+
+    try:
+
+        return pd.DataFrame(data)
+
+    except:
+
+        return pd.DataFrame()
+
+
+
+def normalise_tickers(df):
+
+    if (
+        not df.empty
+        and
+        "Ticker" in df.columns
+    ):
+
+        df["Ticker"] = (
+            df["Ticker"]
+            .astype(str)
+            .str.upper()
+        )
+
+    return df
+
+
+
+# ---------------------------------
+# Action priority
+# ---------------------------------
+
+ACTION_PRIORITY = {
+
+    "SELL": 1,
+    "REDUCE": 2,
+    "BUY MORE": 3,
+    "BUY": 4,
+    "REVIEW": 5,
+    "HOLD": 6
+
+}
+
+
+
+# ---------------------------------
+# Main engine
+# ---------------------------------
+
 def generate_final_portfolio_decisions(
     portfolio_summary,
-    decisions,
+    portfolio_decisions,
     portfolio_ai_review,
     portfolio_manager_review,
     portfolio_health
 ):
-    """
-    Consolidates all portfolio intelligence layers into a final
-    portfolio manager recommendation.
-
-    Returns:
-        DataFrame containing final portfolio actions
-    """
-
-    print("FINAL PORTFOLIO DECISION ENGINE START")
 
 
-    # ---------------------------------
-    # Safety defaults
-    # ---------------------------------
-
-    if portfolio_summary is None:
-        portfolio_summary = pd.DataFrame()
+    portfolio_summary = normalise_tickers(
+        safe_dataframe(portfolio_summary)
+    )
 
 
-    if decisions is None:
-        decisions = pd.DataFrame()
+    portfolio_decisions = normalise_tickers(
+        safe_dataframe(portfolio_decisions)
+    )
 
 
-    if portfolio_ai_review is None:
-        portfolio_ai_review = []
-
-
-    output_columns = [
-
-        "Ticker",
-        "Position Type",
-        "Final Action",
-        "Conviction",
-        "Capital Decision",
-        "Investment Score",
-        "Reason",
-        "AI Actions",
-        "Portfolio Health Score",
-        "Portfolio Health Rating",
-        "Manager Summary"
-
-    ]
-
-
-    final_decisions = []
-
-
-    # ---------------------------------
-    # AI review lookup
-    # ---------------------------------
-
-    ai_lookup = {}
-
-
-    for review in portfolio_ai_review:
-
-        if isinstance(review, dict):
-
-            ticker = review.get(
-                "Ticker"
-            )
-
-            if ticker:
-
-                ai_lookup[ticker] = review
+    portfolio_ai_review = normalise_tickers(
+        safe_dataframe(portfolio_ai_review)
+    )
 
 
 
-    # ---------------------------------
-    # Portfolio health context
-    # ---------------------------------
-
-    health_score = None
-    health_rating = None
-    health_risks = []
-
-
-    if isinstance(
-        portfolio_health,
-        dict
-    ):
-
-        health_score = portfolio_health.get(
-            "Health Score"
+    portfolio_health = (
+        portfolio_health
+        if isinstance(
+            portfolio_health,
+            dict
         )
-
-        health_rating = portfolio_health.get(
-            "Rating"
-        )
-
-        health_risks = portfolio_health.get(
-            "Risks",
-            []
-        )
+        else {}
+    )
 
 
-    if isinstance(
-        health_risks,
-        str
-    ):
 
-        health_risks = [
-            health_risks
+    # ---------------------------------
+    # Portfolio risk
+    # ---------------------------------
+
+    portfolio_risk = portfolio_health.get(
+        "Risk Level",
+        "NORMAL"
+    )
+
+
+
+    # ---------------------------------
+    # Start from holdings
+    # ---------------------------------
+
+    final = portfolio_summary.copy()
+
+
+
+    # ---------------------------------
+    # Add decisions
+    # ---------------------------------
+
+    if not portfolio_decisions.empty:
+
+
+        cols = [
+
+            c for c in [
+
+                "Ticker",
+                "Action",
+                "Reason",
+                "Investment Score",
+                "AI Decision",
+                "AI Conviction",
+                "Signal"
+
+            ]
+
+            if c in portfolio_decisions.columns
+
         ]
 
 
+        final = final.merge(
+
+            portfolio_decisions[
+                cols
+            ],
+
+            on="Ticker",
+
+            how="left"
+
+        )
+
+
 
     # ---------------------------------
-    # Manager context
+    # Add AI review
     # ---------------------------------
 
-    manager_summary = ""
+    if not portfolio_ai_review.empty:
 
 
-    if isinstance(
-        portfolio_manager_review,
-        dict
-    ):
+        cols = [
 
-        manager_summary = portfolio_manager_review.get(
-            "AI Summary",
+            c for c in [
+
+                "Ticker",
+                "AI Holding Decision",
+                "AI Holding Conviction"
+
+            ]
+
+            if c in portfolio_ai_review.columns
+
+        ]
+
+
+        if len(cols) > 1:
+
+
+            final = final.merge(
+
+                portfolio_ai_review[
+                    cols
+                ],
+
+                on="Ticker",
+
+                how="left"
+
+            )
+
+
+
+    decisions = []
+
+
+
+    # ---------------------------------
+    # Existing holdings decisions
+    # ---------------------------------
+
+    for _, row in final.iterrows():
+
+
+        ticker = row.get(
+            "Ticker",
+            ""
+        )
+
+
+        score = safe_float(
+            row.get(
+                "Investment Score",
+                0
+            )
+        )
+
+
+        action = row.get(
+            "Action",
+            ""
+        )
+
+
+        reason = row.get(
+            "Reason",
+            ""
+        )
+
+
+        ai = row.get(
+            "AI Decision",
+            ""
+        )
+
+
+        conviction = row.get(
+            "AI Conviction",
             ""
         )
 
 
 
-    # ---------------------------------
-    # Process decisions
-    # ---------------------------------
-
-    if not decisions.empty:
+        if not action:
 
 
-        for _, decision in decisions.iterrows():
+            if score < 45:
 
+                action = "REDUCE"
 
-            ticker = decision.get(
-                "Ticker",
-                ""
-            )
-
-
-            if not ticker:
-
-                continue
-
-
-
-            ai_review = ai_lookup.get(
-                ticker,
-                {}
-            )
-
-
-            action = decision.get(
-                "Action",
-                "REVIEW"
-            )
-
-
-            conviction = ai_review.get(
-                "AI Holding Conviction",
-                "Medium"
-            )
-
-
-            risks = ai_review.get(
-                "AI Holding Risks",
-                []
-            )
-
-
-            reasons = ai_review.get(
-                "AI Holding Reasons",
-                []
-            )
-
-
-            ai_action = ai_review.get(
-                "AI Holding Actions",
-                []
-            )
-
-
-
-            # Normalise lists
-
-            if isinstance(
-                risks,
-                str
-            ):
-
-                risks = [
-                    risks
-                ]
-
-
-            if isinstance(
-                reasons,
-                str
-            ):
-
-                reasons = [
-                    reasons
-                ]
-
-
-            if isinstance(
-                ai_action,
-                str
-            ):
-
-                ai_action = [
-                    ai_action
-                ]
-
-
-
-            # ---------------------------------
-            # Capital decision
-            # ---------------------------------
-
-            if action in [
-                "REDUCE",
-                "SELL"
-            ]:
-
-                capital_action = (
-                    "Free capital for stronger opportunities"
-                )
-
-
-            elif action in [
-                "ADD",
-                "BUY"
-            ]:
-
-                capital_action = (
-                    "Consider increasing allocation"
-                )
-
-
-            elif action in [
-                "HOLD / ADD",
-                "HOLD"
-            ]:
-
-                capital_action = (
-                    "Maintain position size"
+                reason = (
+                    "Investment score deterioration"
                 )
 
 
             else:
 
-                capital_action = (
-                    "Review allocation"
+                action = "HOLD"
+
+                reason = (
+                    "Holding remains appropriate"
                 )
 
 
 
-            # ---------------------------------
-            # Reason aggregation
-            # ---------------------------------
+        decisions.append(
 
-            final_reason = []
+            {
 
+                "Ticker": ticker,
 
-            final_reason.extend(
-                reasons
-            )
+                "Final Action": action,
 
+                "Final Reason": reason,
 
-            final_reason.extend(
-                risks
-            )
+                "Investment Score": score,
 
+                "Signal":
+                    row.get(
+                        "Signal",
+                        ""
+                    ),
 
-            if health_risks:
+                "AI Decision": ai,
 
-                final_reason.append(
-                    "Portfolio health requires monitoring"
-                )
+                "AI Conviction":
+                    conviction,
 
+                "Sector":
+                    row.get(
+                        "Sector",
+                        "Unknown"
+                    )
 
+            }
 
-            # ---------------------------------
-            # Append decision
-            # ---------------------------------
-
-            final_decisions.append(
-
-                {
-
-                    "Ticker":
-                        ticker,
-
-
-                    "Position Type":
-                        (
-                            "CURRENT HOLDING"
-                            if (
-                                not portfolio_summary.empty
-                                and "Ticker" in portfolio_summary.columns
-                                and ticker in portfolio_summary["Ticker"].values
-                            )
-                            else
-                            "REBALANCE CANDIDATE"
-                        ),
-
-
-                    "Final Action":
-                        action,
-
-
-                    "Conviction":
-                        conviction,
-
-
-                    "Capital Decision":
-                        capital_action,
-
-
-                    "Investment Score":
-                        decision.get(
-                            "Investment Score",
-                            None
-                        ),
-
-
-                    "Reason":
-                        "; ".join(
-                            final_reason
-                        ),
-
-
-                    "AI Actions":
-                        "; ".join(
-                            ai_action
-                        ),
-
-
-                    "Portfolio Health Score":
-                        health_score,
-
-
-                    "Portfolio Health Rating":
-                        health_rating,
-
-
-                    "Manager Summary":
-                        manager_summary
-
-                }
-
-            )
-
-
-
-    # ---------------------------------
-    # Create dataframe safely
-    # ---------------------------------
-
-    if not final_decisions:
-
-
-        print(
-            "NO FINAL PORTFOLIO DECISIONS GENERATED"
-        )
-
-
-        return pd.DataFrame(
-            columns=output_columns
         )
 
 
 
     result = pd.DataFrame(
-        final_decisions
+        decisions
     )
 
 
-    result["Sort Order"] = (
-        result["Position Type"]
-        .map(
-            {
-                "CURRENT HOLDING": 1,
-                "REBALANCE CANDIDATE": 2
-            }
-        )
-    )
+
+    # ---------------------------------
+    # Deduplicate
+    # ---------------------------------
+
+    if not result.empty:
 
 
-    result = (
-
-        result
-
-        .sort_values(
-            [
-                "Sort Order",
-                "Final Action"
-            ]
+        result["Priority"] = (
+            result["Final Action"]
+            .map(ACTION_PRIORITY)
+            .fillna(99)
         )
 
-        .drop(
+
+        result = (
+
+            result
+            .sort_values(
+                [
+                    "Ticker",
+                    "Priority"
+                ]
+            )
+            .drop_duplicates(
+                "Ticker",
+                keep="first"
+            )
+
+        )
+
+
+
+        result = result.drop(
             columns=[
-                "Sort Order"
+                "Priority"
             ]
         )
 
-        .reset_index(
-            drop=True
-        )
-
-    )
 
 
     print(
-        "FINAL PORTFOLIO DECISION SIZE:",
+        "FINAL PORTFOLIO DECISIONS CREATED:",
         result.shape
     )
 
 
-    return result
+    return result.reset_index(
+        drop=True
+    )

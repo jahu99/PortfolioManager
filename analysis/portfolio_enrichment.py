@@ -1,195 +1,210 @@
-# analysis/portfolio_enrichment.py
-
 import pandas as pd
 
 
 def enrich_portfolio_holdings(
     portfolio_summary,
-    stock_results
+    results
 ):
     """
-    Enrich portfolio holdings with latest scanner intelligence.
+    Enrich portfolio holdings with stock intelligence
+    from the market scanner results.
+
+    Inputs:
+        portfolio_summary:
+            DataFrame created by analyse_portfolio()
+
+        results:
+            List of analysed stocks
+
+    Returns:
+        enriched portfolio_summary DataFrame
     """
 
-    if portfolio_summary is None:
-        return pd.DataFrame()
+    try:
 
-    if stock_results is None:
-        stock_results = []
+        if portfolio_summary is None:
+            return pd.DataFrame()
 
-    enriched = portfolio_summary.copy()
 
-    results_df = pd.DataFrame(stock_results)
-
-    if results_df.empty:
-
-        if "Signal" in enriched.columns:
-            enriched["Signal"] = (
-                enriched["Signal"]
-                .fillna("PORTFOLIO HOLDING")
+        if not isinstance(
+            portfolio_summary,
+            pd.DataFrame
+        ):
+            portfolio_summary = pd.DataFrame(
+                portfolio_summary
             )
 
-        return enriched
 
-    # -----------------------------
-    # Normalise merge keys
-    # -----------------------------
+        if not results:
+            return portfolio_summary
 
-    enriched["Ticker"] = (
-        enriched["Ticker"]
-        .astype(str)
-        .str.upper()
-        .str.strip()
-    )
 
-    results_df["Ticker"] = (
-        results_df["Ticker"]
-        .astype(str)
-        .str.upper()
-        .str.strip()
-    )
+        results_df = pd.DataFrame(results)
 
-    lookup_columns = [
-        "Ticker",
-        "Signal",
-        "Investment Score",
-        "Technical Score",
-        "Quality Score",
-        "Growth Score",
-        "Confidence",
-        "Confidence Score",
-        "Sector",
-        "Industry"
-    ]
 
-    available_columns = [
-        c for c in lookup_columns
-        if c in results_df.columns
-    ]
+        if results_df.empty:
+            return portfolio_summary
 
-    intelligence = (
-        results_df[available_columns]
-        .drop_duplicates(subset=["Ticker"])
-    )
 
-    enriched = enriched.merge(
-        intelligence,
-        on="Ticker",
-        how="left",
-        suffixes=("", "_Scanner")
-    )
+        # Ensure ticker matching works
+        portfolio_summary["Ticker"] = (
+            portfolio_summary["Ticker"]
+            .astype(str)
+            .str.upper()
+        )
 
-    # ------------------------------------------------
-    # Replace placeholders with scanner values
-    # ------------------------------------------------
 
-    replace_map = {
-        "Sector": "Sector_Scanner",
-        "Industry": "Industry_Scanner",
-        "Signal": "Signal_Scanner",
-        "Investment Score": "Investment Score_Scanner",
-        "Technical Score": "Technical Score_Scanner",
-        "Quality Score": "Quality Score_Scanner",
-        "Growth Score": "Growth Score_Scanner",
-        "Confidence": "Confidence_Scanner",
-        "Confidence Score": "Confidence Score_Scanner"
-    }
+        results_df["Ticker"] = (
+            results_df["Ticker"]
+            .astype(str)
+            .str.upper()
+        )
 
-    for target, source in replace_map.items():
 
-        if source not in enriched.columns:
-            continue
+        # Fields to bring into portfolio
+        enrichment_columns = [
 
-        # Convert placeholders into NaN
-        if target in [
-            "Sector",
-            "Industry",
+            "Ticker",
+
             "Signal",
-            "Confidence"
-        ]:
 
-            enriched[target] = (
-                enriched[target]
-                .replace(
-                    [
-                        "Unknown",
-                        "NOT IN UNIVERSE",
-                        "PORTFOLIO HOLDING",
-                        ""
-                    ],
-                    pd.NA
-                )
+            "Technical Score",
+
+            "Quality Score",
+
+            "Growth Score",
+
+            "Investment Score",
+
+            "Confidence",
+
+            "Confidence Score",
+
+            "AI Decision",
+
+            "AI Conviction",
+
+            "AI Conviction Score",
+
+            "AI Action",
+
+            "AI Investment Thesis",
+
+            "AI Decision Thesis",
+
+            "Recommendation Reasons",
+
+            "Recommendation Risks",
+
+            "AI Summary",
+
+            "AI Analysis",
+
+            "Price",
+
+            "RSI",
+
+            "Sector",
+
+            "Industry"
+        ]
+
+
+        # Only use columns that exist
+        available_columns = [
+            c for c in enrichment_columns
+            if c in results_df.columns
+        ]
+
+
+        enrichment = results_df[
+            available_columns
+        ]
+
+
+        # Remove duplicate tickers
+        enrichment = (
+            enrichment
+            .drop_duplicates(
+                subset=["Ticker"],
+                keep="first"
             )
+        )
 
-        else:
 
-            enriched[target] = (
-                pd.to_numeric(
-                    enriched[target],
-                    errors="coerce"
-                )
-                .replace(0, pd.NA)
+        # Merge intelligence
+        portfolio_summary = portfolio_summary.merge(
+            enrichment,
+            on="Ticker",
+            how="left",
+            suffixes=(
+                "",
+                "_Scanner"
             )
-
-        enriched[target] = (
-            enriched[target]
-            .fillna(enriched[source])
         )
 
-    # -----------------------------
-    # Final defaults
-    # -----------------------------
 
-    for field in [
-        "Investment Score",
-        "Technical Score",
-        "Quality Score",
-        "Growth Score",
-        "Confidence Score"
-    ]:
+        # Fill missing values
+        default_values = {
 
-        if field in enriched.columns:
+            "Signal": "HOLD",
 
-            enriched[field] = (
-                pd.to_numeric(
-                    enriched[field],
-                    errors="coerce"
+            "Technical Score": 0,
+
+            "Quality Score": 0,
+
+            "Growth Score": 0,
+
+            "Investment Score": 0,
+
+            "Confidence": "LOW",
+
+            "Confidence Score": 0,
+
+            "AI Decision": "NO REVIEW",
+
+            "AI Conviction": "LOW",
+
+            "AI Conviction Score": 0,
+
+            "AI Action": "MONITOR",
+
+            "Recommendation Reasons": [],
+
+            "Recommendation Risks": []
+
+        }
+
+
+        for column, default in default_values.items():
+
+            if column in portfolio_summary.columns:
+
+                portfolio_summary[column] = (
+                    portfolio_summary[column]
+                    .apply(
+                        lambda x:
+                        default
+                        if pd.isna(x)
+                        else x
+                    )
                 )
-                .fillna(0)
-            )
 
-    if "Signal" in enriched.columns:
 
-        enriched["Signal"] = (
-            enriched["Signal"]
-            .fillna("PORTFOLIO HOLDING")
+        print(
+            "Portfolio enrichment complete:",
+            portfolio_summary.shape
         )
 
-    if "Confidence" in enriched.columns:
 
-        enriched["Confidence"] = (
-            enriched["Confidence"]
-            .fillna("Unknown")
+        return portfolio_summary
+
+
+    except Exception as e:
+
+        print(
+            "Portfolio enrichment failed:",
+            e
         )
 
-    if "Sector" in enriched.columns:
-
-        enriched["Sector"] = (
-            enriched["Sector"]
-            .fillna("Unknown")
-        )
-
-    if "Industry" in enriched.columns:
-
-        enriched["Industry"] = (
-            enriched["Industry"]
-            .fillna("Unknown")
-        )
-
-    print(
-        enriched[
-            ["Ticker", "Sector", "Investment Score"]
-        ].head(20)
-    )
-
-    return enriched
+        return portfolio_summary
