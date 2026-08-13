@@ -14,7 +14,6 @@ def safe_float(value, default=0.0):
         return default
 
 
-
 def normalise_text(value, default="UNKNOWN"):
 
     if value is None:
@@ -26,7 +25,6 @@ def normalise_text(value, default="UNKNOWN"):
         return default
 
     return value.upper()
-
 
 
 # =====================================================
@@ -62,7 +60,6 @@ def approve_buy(
     return True
 
 
-
 # =====================================================
 # PORTFOLIO DECISION ENGINE
 # =====================================================
@@ -72,29 +69,19 @@ def generate_portfolio_decisions(
     opportunities=None
 ):
 
-
     if portfolio_summary is None:
-
         portfolio_summary = pd.DataFrame()
 
-
-
     if opportunities is None:
-
         opportunities = pd.DataFrame()
 
-
-
     decisions = []
-
-
 
     # -------------------------------------------------
     # Create intelligence lookup
     # -------------------------------------------------
 
     intelligence = {}
-
 
     if isinstance(opportunities, pd.DataFrame):
 
@@ -106,14 +93,11 @@ def generate_portfolio_decisions(
                 .str.upper()
             )
 
-
             intelligence = (
                 opportunities
                 .set_index("Ticker")
                 .to_dict("index")
             )
-
-
 
     # -------------------------------------------------
     # Existing holdings
@@ -125,29 +109,21 @@ def generate_portfolio_decisions(
         "Ticker" in portfolio_summary.columns
     ):
 
-
         portfolio_summary["Ticker"] = (
-
             portfolio_summary["Ticker"]
             .astype(str)
             .str.upper()
-
         )
-
 
         for _, row in portfolio_summary.iterrows():
 
-
             ticker = row["Ticker"]
 
-
             # Merge intelligence data if available
-
             stock_info = intelligence.get(
                 ticker,
                 {}
             )
-
 
             investment_score = safe_float(
                 stock_info.get(
@@ -159,7 +135,6 @@ def generate_portfolio_decisions(
                 )
             )
 
-
             quality_score = safe_float(
                 stock_info.get(
                     "Quality Score",
@@ -169,7 +144,6 @@ def generate_portfolio_decisions(
                     )
                 )
             )
-
 
             growth_score = safe_float(
                 stock_info.get(
@@ -181,7 +155,6 @@ def generate_portfolio_decisions(
                 )
             )
 
-
             signal = stock_info.get(
                 "Signal",
                 row.get(
@@ -189,7 +162,6 @@ def generate_portfolio_decisions(
                     "UNKNOWN"
                 )
             )
-
 
             conviction = normalise_text(
                 stock_info.get(
@@ -201,7 +173,6 @@ def generate_portfolio_decisions(
                 )
             )
 
-
             allocation = safe_float(
                 row.get(
                     "Allocation %",
@@ -209,12 +180,10 @@ def generate_portfolio_decisions(
                 )
             )
 
-
             sector = row.get(
                 "Sector",
                 "Unknown"
             )
-
 
             sector_allocation = safe_float(
                 row.get(
@@ -223,7 +192,6 @@ def generate_portfolio_decisions(
                 )
             )
 
-
             portfolio_risk = normalise_text(
                 row.get(
                     "Portfolio Risk",
@@ -231,11 +199,17 @@ def generate_portfolio_decisions(
                 )
             )
 
-
-
-            # -----------------------------
-            # Decision rules
-            # -----------------------------
+            # =================================================
+            # DECISION RULES
+            #
+            # Important principle:
+            #
+            # A stock not being attractive enough to BUY does
+            # NOT automatically mean that we should SELL it.
+            #
+            # HOLD is the default for reasonable existing
+            # holdings unless there is a genuinely weak score.
+            # =================================================
 
             if investment_score >= 85:
 
@@ -246,7 +220,6 @@ def generate_portfolio_decisions(
                     "meeting portfolio criteria"
                 )
 
-
             elif investment_score >= 70:
 
                 action = "REVIEW"
@@ -255,15 +228,27 @@ def generate_portfolio_decisions(
                     "Moderate score - monitor performance"
                 )
 
+            elif investment_score >= 45:
 
-            elif investment_score >= 50:
+                # ---------------------------------------------
+                # IMPORTANT CHANGE
+                #
+                # Previously 50-69 resulted in REDUCE.
+                #
+                # That caused reasonable holdings such as
+                # GOOGL (56) and MSFT (64) to be reduced simply
+                # because they were below the investment
+                # threshold.
+                #
+                # Scores in this range now default to HOLD.
+                # ---------------------------------------------
 
-                action = "REDUCE"
+                action = "HOLD"
 
                 reason = (
-                    "Weakening investment profile"
+                    "Below buy threshold but "
+                    "not weak enough to justify a reduction"
                 )
-
 
             else:
 
@@ -273,41 +258,42 @@ def generate_portfolio_decisions(
                     "Investment score below threshold"
                 )
 
-
-
             decisions.append(
-
                 {
-
                     "Ticker": ticker,
 
                     "Action": action,
 
                     "Reason": reason,
 
-                    "Investment Score": investment_score,
+                    "Investment Score":
+                        investment_score,
 
-                    "Quality Score": quality_score,
+                    "Quality Score":
+                        quality_score,
 
-                    "Growth Score": growth_score,
+                    "Growth Score":
+                        growth_score,
 
-                    "Signal": signal,
+                    "Signal":
+                        signal,
 
-                    "AI Conviction": conviction,
+                    "AI Conviction":
+                        conviction,
 
-                    "Allocation %": allocation,
+                    "Allocation %":
+                        allocation,
 
-                    "Sector": sector,
+                    "Sector":
+                        sector,
 
-                    "Sector Allocation %": sector_allocation,
+                    "Sector Allocation %":
+                        sector_allocation,
 
-                    "Portfolio Risk": portfolio_risk
-
+                    "Portfolio Risk":
+                        portfolio_risk
                 }
-
             )
-
-
 
     # -------------------------------------------------
     # New opportunities
@@ -317,7 +303,6 @@ def generate_portfolio_decisions(
 
         for _, stock in opportunities.iterrows():
 
-
             ticker = str(
                 stock.get(
                     "Ticker",
@@ -325,19 +310,14 @@ def generate_portfolio_decisions(
                 )
             ).upper()
 
-
             if not ticker:
                 continue
-
-
 
             if ticker in [
                 d["Ticker"]
                 for d in decisions
             ]:
                 continue
-
-
 
             investment_score = safe_float(
                 stock.get(
@@ -346,7 +326,6 @@ def generate_portfolio_decisions(
                 )
             )
 
-
             conviction = normalise_text(
                 stock.get(
                     "AI Conviction",
@@ -354,34 +333,26 @@ def generate_portfolio_decisions(
                 )
             )
 
-
             if approve_buy(
-
                 investment_score,
-
                 conviction,
-
                 0,
-
                 "NORMAL",
-
                 safe_float(
                     stock.get(
                         "Sector Allocation %",
                         0
                     )
                 )
-
             ):
 
-
                 decisions.append(
-
                     {
+                        "Ticker":
+                            ticker,
 
-                        "Ticker": ticker,
-
-                        "Action": "BUY",
+                        "Action":
+                            "BUY",
 
                         "Reason":
                             "High conviction opportunity",
@@ -419,27 +390,11 @@ def generate_portfolio_decisions(
                                 "Sector",
                                 "Unknown"
                             )
-
                     }
-
                 )
 
-
-
-    result = pd.DataFrame(decisions)
-
-
-    if not result.empty:
-
-        result = result.drop_duplicates(
-            "Ticker"
-        )
-
-
-    print(
-        "PORTFOLIO DECISIONS CREATED:",
-        result.shape
+    result = pd.DataFrame(
+        decisions
     )
-
 
     return result
