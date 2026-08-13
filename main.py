@@ -721,6 +721,12 @@ def main():
     
     for ticker in portfolio_tickers:
 
+
+        # CASH is a portfolio balance, not an investment candidate.
+        if str(ticker).upper() == "CASH":
+            continue
+
+
         if ticker not in scanned:
 
 
@@ -873,7 +879,8 @@ def main():
 
 
         sector_summary = analyse_sectors(
-            portfolio_summary
+            portfolio_summary,
+            results
         )
 
 

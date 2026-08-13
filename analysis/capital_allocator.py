@@ -1,48 +1,74 @@
 """
 Capital Allocation Engine
 
-Purpose:
+Purpose
+-------
+Manage portfolio capital allocation using:
 
-- Manage portfolio capital allocation
-- Use discretionary spend limit
-- Reinvest released capital
-- Decide:
+    1. Actual portfolio ownership from holdings_raw.csv
+    2. Portfolio reduction decisions
+    3. Scanner investment opportunities
 
-    BUY NEW
-    BUY MORE
-    HOLD
-    REDUCE
-    SELL
-
-Interface preserved for:
-main.py
-excel_report.py
-
+Core principles
+---------------
+- Actual ownership is determined by holdings_raw.csv.
+- Quantity > 0 means the asset is owned.
+- CASH is never an investment candidate.
+- ETFs are valid investment assets.
+- BUY MORE and BUY NEW compete on Investment Score.
+- There is NO artificial BUY MORE-first rule.
+- Capital is allocated to the highest-ranked opportunities.
+- Capital released from reductions is calculated from:
+      Market Value × Reduction %
+- Small/economically insignificant reductions are suppressed.
+- HOLD is preferred unless there is a meaningful reason to act.
 """
 
+import os
 import pandas as pd
-
 
 from config.investment_config import (
     DISCRETIONARY_SPEND_LIMIT,
     MAX_NEW_BUYS,
     MAX_BUY_MORE,
-    MIN_NEW_BUY_SCORE,
-    MIN_BUY_MORE_SCORE,
-    MIN_ALLOCATION_AMOUNT
 )
 
 
+# ============================================================
+# Configuration
+# ============================================================
 
-# =====================================================
+HOLDINGS_FILE = "portfolio/holdings_raw.csv"
+
+# Do not create a trade simply to release a trivial amount.
+MIN_REDUCTION_VALUE = 5.00
+
+# Minimum investment score for a BUY candidate.
+MIN_BUY_SCORE = 75
+
+
+# ============================================================
 # Helpers
-# =====================================================
+# ============================================================
 
 def safe_float(value, default=0.0):
 
     try:
 
         if value is None:
+            return default
+
+        if isinstance(value, (list, tuple)):
+            return default
+
+        if hasattr(value, "iloc"):
+
+            if len(value) == 0:
+                return default
+
+            value = value.iloc[0]
+
+        if pd.isna(value):
             return default
 
         return float(value)
@@ -52,19 +78,231 @@ def safe_float(value, default=0.0):
         return default
 
 
-
-def safe_text(value, default=""):
+def clean_ticker(value):
 
     if value is None:
+        return ""
+
+    return str(value).strip().upper()
+
+
+def normalise_action(value):
+
+    if value is None:
+        return "HOLD"
+
+    return str(value).strip().upper()
+
+
+def get_reduction_percentage(action):
+
+    """
+    Convert reduction action into percentage of existing
+    position to release.
+
+    REDUCE 25% -> 0.25
+    REDUCE 50% -> 0.50
+    REDUCE 75% -> 0.75
+    SELL       -> 1.00
+    """
+
+    action = normalise_action(action)
+
+    if "25" in action:
+        return 0.25
+
+    if "50" in action:
+        return 0.50
+
+    if "75" in action:
+        return 0.75
+
+    if action in (
+        "SELL",
+        "SELL 100%",
+        "REDUCE 100%",
+        "REDUCE / SELL",
+    ):
+        return 1.00
+
+    if action == "REDUCE":
+        return 0.25
+
+    return 0.0
+
+
+def load_actual_holdings():
+
+    """
+    Load actual ownership from holdings_raw.csv.
+
+    Quantity > 0 means owned.
+
+    Returns
+    -------
+    dict
+
+        {
+            "NVDA": {
+                "owned": True,
+                "quantity": ...,
+                "market_value": ...,
+                "name": ...
+            }
+        }
+    """
+
+    if not os.path.exists(HOLDINGS_FILE):
+
+        print(
+            f"WARNING: {HOLDINGS_FILE} not found."
+        )
+
+        return {}
+
+    try:
+
+        holdings = pd.read_csv(
+            HOLDINGS_FILE
+        )
+
+    except Exception as e:
+
+        print(
+            "Unable to read holdings file:",
+            e
+        )
+
+        return {}
+
+    required = [
+        "Ticker",
+        "Quantity",
+        "Market Value",
+    ]
+
+    missing = [
+        c for c in required
+        if c not in holdings.columns
+    ]
+
+    if missing:
+
+        print(
+            "Holdings file missing columns:",
+            missing
+        )
+
+        return {}
+
+    holdings = holdings.copy()
+
+    holdings["Ticker"] = (
+        holdings["Ticker"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    holdings["Quantity"] = pd.to_numeric(
+        holdings["Quantity"],
+        errors="coerce"
+    ).fillna(0)
+
+    holdings["Market Value"] = pd.to_numeric(
+        holdings["Market Value"],
+        errors="coerce"
+    ).fillna(0)
+
+    ownership = {}
+
+    for _, row in holdings.iterrows():
+
+        ticker = clean_ticker(
+            row["Ticker"]
+        )
+
+        if not ticker:
+            continue
+
+        ownership[ticker] = {
+            "owned":
+                safe_float(
+                    row["Quantity"]
+                ) > 0,
+
+            "quantity":
+                safe_float(
+                    row["Quantity"]
+                ),
+
+            "market_value":
+                safe_float(
+                    row["Market Value"]
+                ),
+
+            "name":
+                row.get(
+                    "Name",
+                    ""
+                ),
+        }
+
+    return ownership
+
+
+def get_investment_score(row):
+
+    return safe_float(
+        row.get(
+            "Investment Score",
+            row.get(
+                "investment_score",
+                row.get(
+                    "Score",
+                    0
+                )
+            )
+        )
+    )
+
+
+def get_price(row):
+
+    return safe_float(
+        row.get(
+            "Price",
+            row.get(
+                "Current Price",
+                0
+            )
+        )
+    )
+
+
+def get_reason(row, default):
+
+    reason = row.get(
+        "Reason",
+        default
+    )
+
+    if reason is None:
         return default
 
-    return str(value)
+    if isinstance(reason, list):
+
+        return "; ".join(
+            str(x)
+            for x in reason
+        )
+
+    return str(reason)
 
 
-
-# =====================================================
-# Capital Allocation Engine
-# =====================================================
+# ============================================================
+# Main allocator
+# ============================================================
 
 def generate_capital_allocation(
     portfolio_summary,
@@ -72,809 +310,1124 @@ def generate_capital_allocation(
     portfolio_decisions=None
 ):
 
-
     if portfolio_summary is None:
         portfolio_summary = pd.DataFrame()
-
 
     if opportunities is None:
         opportunities = pd.DataFrame()
 
+    # ========================================================
+    # NORMALISE PORTFOLIO DECISIONS
+    #
+    # generate_portfolio_decisions() returns a DataFrame.
+    # The capital allocator internally expects a list of
+    # dictionaries.
+    # ========================================================
 
     if portfolio_decisions is None:
-        portfolio_decisions = pd.DataFrame()
 
+        portfolio_decisions = []
 
+    elif isinstance(
+        portfolio_decisions,
+        pd.DataFrame
+    ):
+
+        portfolio_decisions = (
+            portfolio_decisions
+            .to_dict("records")
+        )
+
+    elif not isinstance(
+        portfolio_decisions,
+        list
+    ):
+
+        portfolio_decisions = []
+
+    # --------------------------------------------------------
+    # Actual ownership
+    # --------------------------------------------------------
+
+    ownership = load_actual_holdings()
 
     allocations = []
 
+    # ========================================================
+    # REDUCTIONS
+    # ========================================================
 
+    reduction_candidates = []
 
-    # =================================================
-    # Existing portfolio values
-    # =================================================
+    if portfolio_decisions:
 
-    portfolio_values = {}
+        for row in portfolio_decisions:
 
-    existing_tickers = set()
-
-
-
-    if (
-        isinstance(
-            portfolio_summary,
-            pd.DataFrame
-        )
-        and
-        not portfolio_summary.empty
-    ):
-
-
-        if "Ticker" in portfolio_summary.columns:
-
-
-            for _, holding in portfolio_summary.iterrows():
-
-
-                ticker = safe_text(
-                    holding.get(
-                        "Ticker",
-                        ""
-                    )
-                ).upper()
-
-
-                if ticker:
-
-
-                    existing_tickers.add(
-                        ticker
-                    )
-
-
-                    portfolio_values[ticker] = safe_float(
-                        holding.get(
-                            "Current Value",
-                            0
-                        )
-                    )
-
-
-
-    # =================================================
-    # Calculate released capital
-    # =================================================
-
-    released_capital = 0
-
-
-
-    if not portfolio_decisions.empty:
-
-
-        for _, row in portfolio_decisions.iterrows():
-
-
-            ticker = safe_text(
+            ticker = clean_ticker(
                 row.get(
                     "Ticker",
                     ""
                 )
-            ).upper()
+            )
 
-
-
-            # Cash is not a trade
-
-            if ticker == "CASH":
-
+            if not ticker:
                 continue
 
+            # CASH is never reduced by the investment allocator.
+            if ticker == "CASH":
+                continue
 
+            # ETFs are HOLD-only until we have a dedicated
+            # ETF investment model.
+            if is_etf(ticker, row):
+                continue
 
-            action = safe_text(
+            action = normalise_action(
                 row.get(
                     "Action",
                     "HOLD"
                 )
-            ).upper()
-
-
-
-            current_value = portfolio_values.get(
-                ticker,
-                0
             )
 
-
-
-            if action in [
-                "REDUCE",
-                "SELL"
-            ]:
-
-
-                release_amount = round(
-
-                    current_value * 0.25,
-
-                    2
-
-                )
-
-
-                released_capital += release_amount
-
-
-
-                allocations.append(
-
-                    {
-
-                        "Ticker":
-                            ticker,
-
-                        "Action":
-                            action,
-
-                        "Existing Holding":
-                            "Yes",
-
-                        "Amount":
-                            -release_amount,
-
-                        "Funding Source":
-                            "Released Capital",
-
-                        "Reason":
-                            row.get(
-                                "Reason",
-                                "Weak holding reduced"
-                            )
-
-                    }
-
-                )
-
-
-
-    # =================================================
-    # Available capital
-    # =================================================
-
-    total_available_capital = round(
-
-        DISCRETIONARY_SPEND_LIMIT
-
-        +
-
-        released_capital,
-
-        2
-
-    )
-
-
-
-    # =================================================
-    # BUY MORE candidates
-    # =================================================
-
-    buy_more_candidates = []
-
-
-
-    if not portfolio_decisions.empty:
-
-
-        for _, row in portfolio_decisions.iterrows():
-
-
-            ticker = safe_text(
-                row.get(
-                    "Ticker",
-                    ""
-                )
-            ).upper()
-
-
-
-            action = safe_text(
-                row.get(
-                    "Action",
-                    ""
-                )
-            ).upper()
-
-
-
-            score = safe_float(
-                row.get(
-                    "Investment Score",
-                    0
+            reduction_percentage = (
+                get_reduction_percentage(
+                    action
                 )
             )
 
+            if reduction_percentage <= 0:
+                continue
 
+            # ------------------------------------------------
+            # Verify actual ownership
+            # ------------------------------------------------
+
+            holding = ownership.get(
+                ticker
+            )
+
+            if not holding:
+                continue
+
+            if not holding["owned"]:
+                continue
+
+            quantity = safe_float(
+                holding["quantity"]
+            )
+
+            market_value = safe_float(
+                holding["market_value"]
+            )
+
+            if quantity <= 0:
+                continue
+
+            # ------------------------------------------------
+            # Calculate actual released capital
+            # ------------------------------------------------
+
+            release_amount = round(
+                market_value
+                *
+                reduction_percentage,
+                2
+            )
+
+            # ------------------------------------------------
+            # Ignore economically insignificant reductions
+            # ------------------------------------------------
 
             if (
-
-                ticker
-
-                and
-
-                action in [
-                    "BUY",
-                    "BUY MORE",
-                    "ADD"
-                ]
-
-                and
-
-                score >= MIN_BUY_MORE_SCORE
-
-                and
-
-                ticker in existing_tickers
-
+                release_amount
+                <
+                MIN_REDUCTION_VALUE
             ):
 
+                continue
 
-                buy_more_candidates.append(
+            reduction_candidates.append(
+                {
+                    "Ticker":
+                        ticker,
 
-                    {
+                    "Action":
+                        (
+                            "SELL"
+                            if reduction_percentage >= 1
+                            else
+                            f"REDUCE "
+                            f"{int(reduction_percentage * 100)}%"
+                        ),
 
-                        "Ticker":
-                            ticker,
+                    "Existing Holding":
+                        "Yes",
 
-                        "Score":
-                            score,
+                    "Asset Type":
+                        "ETF"
+                        if (
+                            ticker in {
+                                "IWDA",
+                                "VUAA",
+                                "SEC0",
+                            }
+                        )
+                        else "STOCK",
 
-                        "Existing Holding":
-                            "Yes",
+                    "Price":
+                        get_price(row)
+                        if get_price(row) > 0
+                        else (
+                            round(
+                                market_value / quantity,
+                                2
+                            )
+                            if quantity > 0 and market_value > 0
+                            else 0
+                        ),
 
-                        "Reason":
-                            "Increase existing high conviction holding"
+                    "Quantity":
+                        quantity,
 
-                    }
+                    "Reduction %":
+                        round(
+                            reduction_percentage * 100,
+                            2
+                        ),
 
-                )
+                    "Reduction Quantity":
+                        round(
+                            quantity
+                            *
+                            reduction_percentage,
+                            6
+                        ),
 
+                    "Market Value":
+                        round(
+                            market_value,
+                            2
+                        ),
 
+                    "Released Capital":
+                        release_amount,
 
-    buy_more_candidates = sorted(
+                    "Buy Quantity":
+                        0,
 
-        buy_more_candidates,
+                    "Buy Value":
+                        0,
 
-        key=lambda x:
-            x["Score"],
+                    "Amount":
+                        -release_amount,
 
-        reverse=True
+                    "Funding Source":
+                        "Released Capital",
 
-    )[:MAX_BUY_MORE]
+                    "Reason":
+                        get_reason(
+                            row,
+                            "Portfolio reduction"
+                        ),
 
-        # =================================================
-    # BUY NEW candidates
-    # =================================================
+                    "Investment Score":
+                        get_investment_score(
+                            row
+                        ),
+                }
+            )
 
-    buy_new_candidates = []
+    # --------------------------------------------------------
+    # Rank reductions by weakest investment score first.
+    # --------------------------------------------------------
 
+    reduction_candidates = sorted(
+        reduction_candidates,
+        key=lambda x: (
+            x["Investment Score"],
+            -x["Market Value"]
+        )
+    )
+
+    for rank, item in enumerate(
+        reduction_candidates,
+        start=1
+    ):
+
+        item["Reduction Rank"] = rank
+        item["Investment Rank"] = 0
+
+        allocations.append(
+            item
+        )
+
+    # ========================================================
+    # CAPITAL RELEASE
+    # ========================================================
+
+    released_capital = round(
+        sum(
+            x["Released Capital"]
+            for x in reduction_candidates
+        ),
+        2
+    )
+
+    # Explicit numeric conversion preserves the existing
+    # configuration interface while avoiding unexpected
+    # zero/default behaviour.
+    discretionary_capital = round(
+        safe_float(
+            DISCRETIONARY_SPEND_LIMIT
+        ),
+        2
+    )
+
+    total_available_capital = round(
+        discretionary_capital
+        +
+        released_capital,
+        2
+    )
+
+    # ========================================================
+    # BUY CANDIDATES
+    #
+    # IMPORTANT:
+    # BUY MORE and BUY NEW are deliberately combined.
+    #
+    # Ownership is determined from holdings_raw.csv.
+    # Investment Score determines priority.
+    # ========================================================
+
+    buy_candidates = {}
 
     if not opportunities.empty:
 
-
         for _, row in opportunities.iterrows():
 
-
-            ticker = safe_text(
+            ticker = clean_ticker(
                 row.get(
                     "Ticker",
                     ""
                 )
-            ).upper()
-
-
-
-            score = safe_float(
-                row.get(
-                    "Investment Score",
-                    0
-                )
             )
 
+            if not ticker:
+                continue
 
+            # CASH cannot be bought.
+            if ticker == "CASH":
+                continue
 
-            # IMPORTANT:
-            # Do not buy new stocks already held
+            score = get_investment_score(
+                row
+            )
 
-            if (
+            if score < MIN_BUY_SCORE:
+                continue
 
+            holding = ownership.get(
                 ticker
+            )
 
+            owned = bool(
+                holding
                 and
-
-                ticker not in existing_tickers
-
+                holding["owned"]
                 and
+                holding["quantity"] > 0
+            )
 
-                score >= MIN_NEW_BUY_SCORE
+            if owned:
 
-            ):
+                action = "BUY MORE"
+                existing_holding = "Yes"
 
-
-                buy_new_candidates.append(
-
-                    {
-
-                        "Ticker":
-                            ticker,
-
-                        "Score":
-                            score,
-
-                        "Existing Holding":
-                            "No",
-
-                        "Reason":
-                            "High conviction opportunity"
-
-                    }
-
+                quantity = safe_float(
+                    holding["quantity"]
                 )
 
+                market_value = safe_float(
+                    holding["market_value"]
+                )
 
+            else:
 
-    buy_new_candidates = sorted(
+                action = "BUY NEW"
+                existing_holding = "No"
 
-        buy_new_candidates,
+                quantity = 0.0
+                market_value = 0.0
 
-        key=lambda x:
-            x["Score"],
+            # ------------------------------------------------
+            # Keep highest-scoring occurrence of each ticker.
+            # ------------------------------------------------
 
-        reverse=True
-
-    )[:MAX_NEW_BUYS]
-
-
-
-    # =================================================
-    # Allocate capital
-    #
-    # Split equally across:
-    #
-    # BUY MORE
-    # BUY NEW
-    #
-    # =================================================
-
-    buy_candidates = (
-
-        buy_more_candidates
-
-        +
-
-        buy_new_candidates
-
-    )
-
-
-    if buy_candidates:
-
-
-        allocation_amount = round(
-
-            total_available_capital
-
-            /
-
-            len(
-                buy_candidates
-            ),
-
-            2
-
-        )
-
-
-    else:
-
-        allocation_amount = 0
-
-
-
-    capital_allocated = 0
-
-
-
-    for candidate in buy_candidates:
-
-
-        amount = min(
-
-            allocation_amount,
-
-            total_available_capital - capital_allocated
-
-        )
-
-
-        if amount < MIN_ALLOCATION_AMOUNT:
-
-            continue
-
-
-
-        action = (
-
-            "BUY MORE"
-
-            if candidate["Existing Holding"] == "Yes"
-
-            else
-
-            "BUY NEW"
-
-        )
-
-
-        allocations.append(
-
-            {
+            candidate = {
 
                 "Ticker":
-                    candidate["Ticker"],
+                    ticker,
 
                 "Action":
                     action,
 
                 "Existing Holding":
-                    candidate["Existing Holding"],
+                    existing_holding,
+
+                "Asset Type":
+                    "ETF"
+                    if (
+                        ticker in {
+                            "IWDA",
+                            "VUAA",
+                            "SEC0",
+                        }
+                    )
+                    else "STOCK",
+
+                "Price":
+                    get_price(row),
+
+                "Quantity":
+                    quantity,
+
+                "Reduction %":
+                    0,
+
+                "Reduction Quantity":
+                    0,
+
+                "Market Value":
+                    market_value,
+
+                "Released Capital":
+                    0,
+
+                "Buy Quantity":
+                    0,
+
+                "Buy Value":
+                    0,
 
                 "Amount":
-                    round(
-                        amount,
-                        2
-                    ),
+                    0,
 
                 "Funding Source":
-                    "Discretionary Spend + Released Capital",
+                    "Available Capital",
 
                 "Reason":
-                    candidate["Reason"]
+                    get_reason(
+                        row,
+                        "High conviction opportunity"
+                    ),
 
+                "Reduction Rank":
+                    0,
+
+                "Investment Rank":
+                    0,
+
+                "Investment Score":
+                    score,
             }
 
-        )
-
-
-        capital_allocated += amount
-
-
-
-    # =================================================
-    # HOLD positions
-    # =================================================
-
-    if not portfolio_decisions.empty:
-
-
-        for _, row in portfolio_decisions.iterrows():
-
-
-            ticker = safe_text(
-                row.get(
-                    "Ticker",
-                    ""
-                )
-            ).upper()
-
-
-
-            action = safe_text(
-                row.get(
-                    "Action",
-                    ""
-                )
-            ).upper()
-
-
-
             if (
-
-                action == "HOLD"
-
-                and
-
-                ticker != "CASH"
-
+                ticker not in buy_candidates
+                or
+                score
+                >
+                buy_candidates[ticker][
+                    "Investment Score"
+                ]
             ):
 
+                buy_candidates[ticker] = candidate
 
-                allocations.append(
+    # ========================================================
+    # Remove BUY candidates that are simultaneously being
+    # completely sold.
+    # ========================================================
 
-                    {
+    sold_tickers = {
+        x["Ticker"]
+        for x in reduction_candidates
+        if x["Reduction %"] >= 100
+    }
 
-                        "Ticker":
-                            ticker,
+    buy_candidates = {
+        ticker: candidate
+        for ticker, candidate
+        in buy_candidates.items()
+        if ticker not in sold_tickers
+    }
 
-                        "Action":
-                            "HOLD",
+    # ========================================================
+    # RANK ALL BUY OPPORTUNITIES TOGETHER
+    # ========================================================
 
-                        "Existing Holding":
-                            "Yes",
+    buy_candidates = sorted(
+        buy_candidates.values(),
+        key=lambda x: (
+            -x["Investment Score"],
+            x["Ticker"]
+        )
+    )
 
-                        "Amount":
-                            0,
+    # --------------------------------------------------------
+    # Apply maximum counts by category.
+    #
+    # We first rank ALL opportunities.
+    # We then permit the configured maximum number of
+    # BUY MORE and BUY NEW positions.
+    #
+    # There is still NO category priority.
+    # --------------------------------------------------------
 
-                        "Funding Source":
-                            "",
+    selected_candidates = []
 
-                        "Reason":
-                            row.get(
-                                "Reason",
-                                "Maintain position"
-                            )
+    buy_more_count = 0
+    buy_new_count = 0
 
-                    }
+    for candidate in buy_candidates:
 
-                )
+        if (
+            candidate["Action"]
+            ==
+            "BUY MORE"
+        ):
 
+            if buy_more_count >= MAX_BUY_MORE:
+                continue
 
+            buy_more_count += 1
 
-    # =================================================
-    # AVOID non-held opportunities
-    # =================================================
+        else:
 
-    if not opportunities.empty:
+            if buy_new_count >= MAX_NEW_BUYS:
+                continue
 
+            buy_new_count += 1
 
-        for _, row in opportunities.iterrows():
+        selected_candidates.append(
+            candidate
+        )
 
+    # ========================================================
+    # Re-rank after configured limits
+    # ========================================================
 
-            ticker = safe_text(
+    selected_candidates = sorted(
+        selected_candidates,
+        key=lambda x: (
+            -x["Investment Score"],
+            x["Ticker"]
+        )
+    )
+
+    # ========================================================
+    # ALLOCATE CAPITAL
+    # ========================================================
+
+    remaining = round(
+        total_available_capital,
+        2
+    )
+
+    capital_allocated = 0.0
+
+    for rank, candidate in enumerate(
+        selected_candidates,
+        start=1
+    ):
+
+        if remaining <= 0:
+            break
+
+        # ----------------------------------------------------
+        # Equal allocation among selected candidates for now.
+        #
+        # The ranking determines who gets capital.
+        # We can later introduce conviction-weighted
+        # allocation without changing ownership logic.
+        # ----------------------------------------------------
+
+        positions_remaining = (
+            len(selected_candidates)
+            -
+            rank
+            +
+            1
+        )
+
+        allocation = round(
+            remaining
+            /
+            positions_remaining,
+            2
+        )
+
+        if allocation <= 0:
+            continue
+
+        price = safe_float(
+            candidate["Price"]
+        )
+
+        if price <= 0:
+            continue
+
+        buy_quantity = round(
+            allocation / price,
+            6
+        )
+
+        buy_value = round(
+            buy_quantity * price,
+            2
+        )
+
+        # Protect against rounding causing us to overspend.
+        buy_value = min(
+            buy_value,
+            remaining
+        )
+
+        allocation = buy_value
+
+        candidate["Buy Quantity"] = (
+            buy_quantity
+        )
+
+        candidate["Buy Value"] = (
+            buy_value
+        )
+
+        candidate["Amount"] = (
+            buy_value
+        )
+
+        candidate["Investment Rank"] = (
+            rank
+        )
+
+        allocations.append(
+            candidate
+        )
+
+        remaining = round(
+            remaining
+            -
+            buy_value,
+            2
+        )
+
+        capital_allocated = round(
+            capital_allocated
+            +
+            buy_value,
+            2
+        )
+
+    # ========================================================
+    # HOLD POSITIONS
+    # ========================================================
+
+    if (
+        portfolio_summary is not None
+        and
+        not portfolio_summary.empty
+    ):
+
+        for _, row in portfolio_summary.iterrows():
+
+            ticker = clean_ticker(
                 row.get(
                     "Ticker",
                     ""
-                )
-            ).upper()
-
-
-
-            score = safe_float(
-                row.get(
-                    "Investment Score",
-                    0
                 )
             )
 
+            if not ticker:
+                continue
 
+            if ticker == "CASH":
+                continue
 
-            if (
-
-                ticker
-
-                and
-
-                ticker not in existing_tickers
-
-                and
-
-                score < MIN_NEW_BUY_SCORE
-
+            # Don't duplicate a holding already represented
+            # by a reduction or buy.
+            if any(
+                x["Ticker"] == ticker
+                for x in allocations
             ):
+                continue
 
+            allocations.append(
+                {
+                    "Ticker":
+                        ticker,
 
-                allocations.append(
+                    "Action":
+                        "HOLD",
 
-                    {
+                    "Existing Holding":
+                        "Yes",
 
-                        "Ticker":
-                            ticker,
+                    "Asset Type":
+                        row.get(
+                            "Type",
+                            "STOCK"
+                        ),
 
-                        "Action":
-                            "AVOID",
+                    "Price":
+                        safe_float(
+                            row.get(
+                                "Current Price",
+                                row.get(
+                                    "Price",
+                                    0
+                                )
+                            )
+                        ),
 
-                        "Existing Holding":
-                            "No",
+                    "Quantity":
+                        safe_float(
+                            row.get(
+                                "Shares",
+                                row.get(
+                                    "Quantity",
+                                    0
+                                )
+                            )
+                        ),
 
-                        "Amount":
-                            0,
+                    "Reduction %":
+                        0,
 
-                        "Funding Source":
-                            "",
+                    "Reduction Quantity":
+                        0,
 
-                        "Reason":
-                            "Low conviction"
+                    "Market Value":
+                        safe_float(
+                            row.get(
+                                "Current Value",
+                                0
+                            )
+                        ),
 
-                    }
+                    "Released Capital":
+                        0,
 
-                )
+                    "Buy Quantity":
+                        0,
 
+                    "Buy Value":
+                        0,
 
+                    "Amount":
+                        0,
 
-    # =================================================
-    # Create allocation dataframe
-    # =================================================
+                    "Funding Source":
+                        "",
+
+                    "Reason":
+                        "Maintain existing position",
+
+                    "Reduction Rank":
+                        0,
+
+                    "Investment Rank":
+                        0,
+
+                    "Investment Score":
+                        safe_float(
+                            row.get(
+                                "Investment Score",
+                                0
+                            )
+                        ),
+                }
+            )
+
+    # ========================================================
+    # DATAFRAME
+    # ========================================================
 
     allocation_df = pd.DataFrame(
         allocations
     )
 
+    columns = [
+        "Ticker",
+        "Action",
+        "Existing Holding",
+        "Asset Type",
+        "Price",
+        "Quantity",
+        "Reduction %",
+        "Reduction Quantity",
+        "Market Value",
+        "Released Capital",
+        "Buy Quantity",
+        "Buy Value",
+        "Amount",
+        "Funding Source",
+        "Reason",
+        "Reduction Rank",
+        "Investment Rank",
+        "Investment Score",
+    ]
 
+    if allocation_df.empty:
 
-    if not allocation_df.empty:
+        allocation_df = pd.DataFrame(
+            columns=columns
+        )
 
+    else:
+
+        for column in columns:
+
+            if column not in allocation_df.columns:
+                allocation_df[column] = 0
 
         allocation_df = allocation_df[
-
-            [
-                "Ticker",
-                "Action",
-                "Existing Holding",
-                "Amount",
-                "Funding Source",
-                "Reason"
-            ]
-
+            columns
         ]
 
+        # Numeric fields
+        numeric_columns = [
+            "Price",
+            "Quantity",
+            "Reduction %",
+            "Reduction Quantity",
+            "Market Value",
+            "Released Capital",
+            "Buy Quantity",
+            "Buy Value",
+            "Amount",
+            "Reduction Rank",
+            "Investment Rank",
+            "Investment Score",
+        ]
 
+        for column in numeric_columns:
 
-    # =================================================
-    # Capital Summary
-    # =================================================
+            allocation_df[column] = pd.to_numeric(
+                allocation_df[column],
+                errors="coerce"
+            ).fillna(0)
+
+    # ========================================================
+    # SUMMARY
+    #
+    # IMPORTANT:
+    # The summary is deliberately calculated from the FINAL
+    # allocation dataframe.
+    #
+    # This keeps the summary and the Capital Allocation
+    # worksheet completely consistent.
+    # ========================================================
+
+    # --------------------------------------------------------
+    # Discretionary capital
+    # --------------------------------------------------------
+
+    discretionary_capital = round(
+        safe_float(
+            DISCRETIONARY_SPEND_LIMIT
+        ),
+        2
+    )
+
+    # --------------------------------------------------------
+    # Capital released from actual reduction/sell actions
+    # --------------------------------------------------------
+
+    reduction_mask = (
+        allocation_df["Action"]
+        .astype(str)
+        .str.startswith("REDUCE")
+        |
+        allocation_df["Action"].isin(
+            ["SELL"]
+        )
+    )
+
+    released_capital = round(
+        pd.to_numeric(
+            allocation_df.loc[
+                reduction_mask,
+                "Released Capital"
+            ],
+            errors="coerce"
+        )
+        .fillna(0)
+        .sum(),
+        2
+    )
+
+    # --------------------------------------------------------
+    # Total available capital
+    # --------------------------------------------------------
+
+    total_available_capital = round(
+        discretionary_capital
+        +
+        released_capital,
+        2
+    )
+
+    # --------------------------------------------------------
+    # Capital actually allocated to BUY NEW / BUY MORE
+    # --------------------------------------------------------
+
+    buy_mask = allocation_df["Action"].isin(
+        [
+            "BUY NEW",
+            "BUY MORE"
+        ]
+    )
+
+    capital_allocated = round(
+        pd.to_numeric(
+            allocation_df.loc[
+                buy_mask,
+                "Buy Value"
+            ],
+            errors="coerce"
+        )
+        .fillna(0)
+        .sum(),
+        2
+    )
+
+    # --------------------------------------------------------
+    # Remaining capital
+    # --------------------------------------------------------
+
+    remaining = round(
+        total_available_capital
+        -
+        capital_allocated,
+        2
+    )
+
+    # Protect against tiny floating-point residuals.
+    if abs(remaining) < 0.01:
+        remaining = 0.00
+
+    # Never report negative remaining capital.
+    remaining = max(
+        0.00,
+        remaining
+    )
+
+    # ========================================================
+    # COUNTS
+    # ========================================================
+
+    buy_new_count = int(
+        (
+            allocation_df["Action"]
+            ==
+            "BUY NEW"
+        ).sum()
+    )
+
+    buy_more_count = int(
+        (
+            allocation_df["Action"]
+            ==
+            "BUY MORE"
+        ).sum()
+    )
+
+    reduce_sell_count = int(
+        allocation_df["Action"].isin(
+            [
+                "SELL",
+                "REDUCE",
+                "REDUCE 25%",
+                "REDUCE 50%",
+                "REDUCE 75%",
+                "REDUCE 100%",
+            ]
+        ).sum()
+    )
+
+    hold_count = int(
+        (
+            allocation_df["Action"]
+            ==
+            "HOLD"
+        ).sum()
+    )
+
+    reduction_count = reduce_sell_count
+
+    total_buy_opportunities = (
+        buy_new_count
+        +
+        buy_more_count
+    )
+
+    # ========================================================
+    # CAPITAL SUMMARY DATAFRAME
+    # ========================================================
 
     summary = pd.DataFrame(
-
         [
-
             {
-
                 "Metric":
                     "Discretionary Spend Limit",
 
                 "Amount":
-                    DISCRETIONARY_SPEND_LIMIT
-
+                    discretionary_capital,
             },
 
             {
-
                 "Metric":
                     "Capital Released From Sales",
 
                 "Amount":
-                    round(
-                        released_capital,
-                        2
-                    )
-
+                    released_capital,
             },
 
             {
-
                 "Metric":
                     "Total Available Capital",
 
                 "Amount":
-                    round(
-                        total_available_capital,
-                        2
-                    )
-
+                    total_available_capital,
             },
 
             {
-
                 "Metric":
                     "Capital Allocated",
 
                 "Amount":
-                    round(
-                        capital_allocated,
-                        2
-                    )
-
+                    capital_allocated,
             },
 
             {
-
                 "Metric":
                     "Remaining Capital",
 
                 "Amount":
-                    round(
-                        total_available_capital
-                        -
-                        capital_allocated,
-
-                        2
-
-                    )
-
+                    remaining,
             },
 
             {
-
                 "Metric":
                     "BUY NEW Count",
 
                 "Amount":
-                    len(
-
-                        allocation_df[
-
-                            allocation_df["Action"]
-
-                            ==
-
-                            "BUY NEW"
-
-                        ]
-
-                    )
-
+                    buy_new_count,
             },
 
             {
-
                 "Metric":
                     "BUY MORE Count",
 
                 "Amount":
-                    len(
-
-                        allocation_df[
-
-                            allocation_df["Action"]
-
-                            ==
-
-                            "BUY MORE"
-
-                        ]
-
-                    )
-
+                    buy_more_count,
             },
 
             {
-
                 "Metric":
                     "REDUCE / SELL Count",
 
                 "Amount":
-                    len(
+                    reduce_sell_count,
+            },
 
-                        allocation_df[
+            {
+                "Metric":
+                    "HOLD Count",
 
-                            allocation_df["Action"]
+                "Amount":
+                    hold_count,
+            },
 
-                            .isin(
-                                [
-                                    "REDUCE",
-                                    "SELL"
-                                ]
-                            )
+            {
+                "Metric":
+                    "Reduction Actions",
 
-                        ]
+                "Amount":
+                    reduction_count,
+            },
 
-                    )
+            {
+                "Metric":
+                    "Total BUY Opportunities",
 
-            }
-
+                "Amount":
+                    total_buy_opportunities,
+            },
         ]
-
     )
 
-
+    # ========================================================
+    # RETURN
+    #
+    # IMPORTANT:
+    # Keep these exact dictionary keys because downstream
+    # reports/excel_report.py expects them.
+    # ========================================================
 
     return {
-
         "Capital Allocation":
             allocation_df,
 
         "Capital Summary":
-            summary
-
+            summary,
     }
+
+def is_etf(ticker, row=None):
+    """
+    Determine whether an asset is an ETF.
+
+    This is deliberately conservative. We only classify assets
+    as ETFs when we have explicit evidence.
+
+    Known portfolio ETFs:
+        IWDA
+        VUAA
+        SEC0
+
+    We also recognise explicit ETF/Exchange Traded Fund asset
+    type information when supplied by the upstream data.
+    """
+
+    ticker = clean_ticker(ticker)
+
+    known_etfs = {
+        "IWDA",
+        "VUAA",
+        "SEC0",
+    }
+
+    if ticker in known_etfs:
+        return True
+
+    if row is not None:
+
+        asset_type = str(
+            row.get(
+                "Asset Type",
+                row.get(
+                    "Type",
+                    ""
+                )
+            )
+        ).strip().upper()
+
+        if asset_type in {
+            "ETF",
+            "EXCHANGE TRADED FUND",
+            "EXCHANGE-TRADED FUND",
+        }:
+            return True
+
+    return False

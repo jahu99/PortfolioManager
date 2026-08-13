@@ -2,362 +2,267 @@ import pandas as pd
 import os
 from datetime import datetime
 
-
 def create_capital_allocation_sheet(
     writer,
     capital_allocation
 ):
     """
-    Create Capital Allocation worksheet.
+    Create the Capital Allocation worksheet.
 
-    Shows:
-    - Available cash
-    - Buy recommendations
-    - Reduce/sell recommendations
-    - Avoid sectors
-    - Risks and alerts
+    Expected structure from generate_capital_allocation():
+
+        {
+            "Capital Summary": DataFrame,
+            "Capital Allocation": DataFrame
+        }
+
+    The allocation DataFrame contains:
+        BUY NEW
+        BUY MORE
+        REDUCE %
+        SELL
+        HOLD
     """
 
-    print(
-        "Creating Capital Allocation"
-    )
-
+    print("Creating Capital Allocation")
 
     if capital_allocation is None:
-
-        print(
-            "No capital allocation data available"
-        )
-
+        print("No capital allocation data available")
         return
 
-
+    if not isinstance(capital_allocation, dict):
+        print(
+            "Capital allocation has unexpected type:",
+            type(capital_allocation)
+        )
+        return
 
     sheet = "Capital Allocation"
-
-
-
     row = 0
 
+    # =========================================================
+    # GET DATA FROM CURRENT CAPITAL ALLOCATOR STRUCTURE
+    # =========================================================
 
-
-    # =====================================
-    # Summary
-    # =====================================
-
-    summary = pd.DataFrame(
-        {
-            "Metric": [
-                "Available Cash",
-                "Cash Remaining"
-            ],
-
-            "Value": [
-                capital_allocation.get(
-                    "Available Cash",
-                    0
-                ),
-
-                capital_allocation.get(
-                    "Cash Remaining",
-                    0
-                )
-            ]
-        }
+    summary_df = capital_allocation.get(
+        "Capital Summary",
+        pd.DataFrame()
     )
 
-
-    summary.to_excel(
-        writer,
-        sheet_name=sheet,
-        startrow=row,
-        index=False
+    allocation_df = capital_allocation.get(
+        "Capital Allocation",
+        pd.DataFrame()
     )
 
+    if summary_df is None:
+        summary_df = pd.DataFrame()
 
-    row += len(summary) + 3
+    if allocation_df is None:
+        allocation_df = pd.DataFrame()
 
+    if not isinstance(summary_df, pd.DataFrame):
+        summary_df = pd.DataFrame(summary_df)
 
+    if not isinstance(allocation_df, pd.DataFrame):
+        allocation_df = pd.DataFrame(allocation_df)
 
-    # =====================================
-    # BUY
-    # =====================================
+    # =========================================================
+    # HELPER
+    # =========================================================
 
-    pd.DataFrame(
-        {
-            "Section":
-            [
-                "BUY RECOMMENDATIONS"
-            ]
-        }
-    ).to_excel(
-        writer,
-        sheet_name=sheet,
-        startrow=row,
-        index=False
-    )
+    def write_section(
+        title,
+        dataframe,
+        current_row
+    ):
 
-
-    row += 2
-
-
-
-    row += 2
-
-
-    # ==========================================
-    # CAPITAL SUMMARY
-    # ==========================================
-
-    summary = pd.DataFrame(
-        capital_allocation.get(
-            "Capital Summary",
-            []
-        )
-    )
-
-
-    if not summary.empty:
-
-        summary.to_excel(
+        pd.DataFrame(
+            {
+                "Section": [title]
+            }
+        ).to_excel(
             writer,
             sheet_name=sheet,
-            startrow=row,
+            startrow=current_row,
             index=False
         )
 
-        row += len(summary) + 3
+        current_row += 2
 
+        if (
+            dataframe is not None
+            and not dataframe.empty
+        ):
 
-
-        # ==========================================
-        # CAPITAL ALLOCATION ACTIONS
-        # ==========================================
-
-        allocation = pd.DataFrame(
-            capital_allocation.get(
-                "Capital Allocation",
-                []
-            )
-        )
-
-
-        if not allocation.empty:
-
-            allocation.to_excel(
+            dataframe.to_excel(
                 writer,
                 sheet_name=sheet,
-                startrow=row,
+                startrow=current_row,
                 index=False
             )
 
-            row += len(allocation) + 3
+            current_row += len(dataframe) + 3
 
+        else:
 
-
-    # =====================================
-    # REDUCE
-    # =====================================
-
-    pd.DataFrame(
-        {
-            "Section":
-            [
-                "REDUCE / SELL RECOMMENDATIONS"
-            ]
-        }
-    ).to_excel(
-        writer,
-        sheet_name=sheet,
-        startrow=row,
-        index=False
-    )
-
-
-    row += 2
-
-
-
-    reductions = []
-
-
-    for sector in capital_allocation.get(
-        "REDUCE",
-        []
-    ):
-
-
-        for sell in sector.get(
-            "Sell Candidates",
-            []
-        ):
-
-            reductions.append(
+            pd.DataFrame(
                 {
-                    "Sector":
-                        sector.get(
-                            "Sector"
-                    ),
-
-                    "Current Allocation %":
-                        sector.get(
-                            "Current Allocation %"
-                        ),
-
-                    "Target Allocation %":
-                        sector.get(
-                            "Target Allocation %"
-                        ),
-
-                    "Reduction Required":
-                        sector.get(
-                            "Reduction Required",
-                            0
-                        ),
-
-                    "Reduction Achieved":
-                        sector.get(
-                            "Reduction Achieved",
-                            0
-                        ),
-
-                    "Reduction Remaining":
-                        sector.get(
-                            "Reduction Remaining",
-                            0
-                        ),
-
-                    "Rebalance Status":
-                        sector.get(
-                            "Rebalance Status",
-                            ""
-                        ),
-
-                    "Ticker":
-                        sell.get(
-                            "Ticker"
-                        ),
-
-                    "Sell Amount":
-                        sell.get(
-                            "Sell Amount",
-                            sell.get(
-                                "Sell Value",
-                                0
-                            )
-                        ),
-
-                    "Reason":
-                        sell.get(
-                            "Reason"
-                        )
+                    "Information": ["None"]
                 }
+            ).to_excel(
+                writer,
+                sheet_name=sheet,
+                startrow=current_row,
+                index=False
             )
 
+            current_row += 4
 
+        return current_row
 
-    reduce_df = pd.DataFrame(
-        reductions
+    # =========================================================
+    # CAPITAL SUMMARY
+    # =========================================================
+
+    row = write_section(
+        "CAPITAL SUMMARY",
+        summary_df,
+        row
     )
 
+    # =========================================================
+    # SAFELY FILTER ALLOCATIONS
+    # =========================================================
 
-    if not reduce_df.empty:
+    if (
+        not allocation_df.empty
+        and
+        "Action" in allocation_df.columns
+    ):
 
-        reduce_df.to_excel(
-            writer,
-            sheet_name=sheet,
-            startrow=row,
-            index=False
-        )
+        buy_new_df = allocation_df[
+            allocation_df["Action"] == "BUY NEW"
+        ].copy()
 
-        row += len(reduce_df) + 3
+        buy_more_df = allocation_df[
+            allocation_df["Action"] == "BUY MORE"
+        ].copy()
 
+        reduce_df = allocation_df[
+            allocation_df["Action"].astype(str).str.startswith(
+                "REDUCE"
+            )
+            |
+            allocation_df["Action"].isin(
+                ["SELL"]
+            )
+        ].copy()
 
+        hold_df = allocation_df[
+            allocation_df["Action"] == "HOLD"
+        ].copy()
 
-    # =====================================
-    # AVOID
-    # =====================================
+    else:
 
-    pd.DataFrame(
-        {
-            "Section":
-            [
-                "AVOID"
-            ]
-        }
-    ).to_excel(
-        writer,
-        sheet_name=sheet,
-        startrow=row,
-        index=False
+        buy_new_df = pd.DataFrame()
+        buy_more_df = pd.DataFrame()
+        reduce_df = pd.DataFrame()
+        hold_df = pd.DataFrame()
+
+    # =========================================================
+    # BUY NEW
+    # =========================================================
+
+    row = write_section(
+        "BUY NEW RECOMMENDATIONS",
+        buy_new_df,
+        row
     )
 
+    # =========================================================
+    # BUY MORE
+    # =========================================================
 
-    row += 2
-
-
-
-    avoid_df = pd.DataFrame(
-        capital_allocation.get(
-            "AVOID",
-            []
-        )
+    row = write_section(
+        "BUY MORE RECOMMENDATIONS",
+        buy_more_df,
+        row
     )
 
+    # =========================================================
+    # REDUCE / SELL
+    # =========================================================
 
-    if not avoid_df.empty:
-
-        avoid_df.to_excel(
-            writer,
-            sheet_name=sheet,
-            startrow=row,
-            index=False
-        )
-
-        row += len(avoid_df) + 3
-
-
-
-    # =====================================
-    # RISKS
-    # =====================================
-
-    pd.DataFrame(
-        {
-            "Section":
-            [
-                "RISKS / ALERTS"
-            ]
-        }
-    ).to_excel(
-        writer,
-        sheet_name=sheet,
-        startrow=row,
-        index=False
+    row = write_section(
+        "REDUCE / SELL RECOMMENDATIONS",
+        reduce_df,
+        row
     )
 
+    # =========================================================
+    # HOLD
+    # =========================================================
 
-    row += 2
-
-
-
-    risks_df = pd.DataFrame(
-        capital_allocation.get(
-            "RISKS",
-            []
-        )
+    row = write_section(
+        "HOLD POSITIONS",
+        hold_df,
+        row
     )
 
+    # =========================================================
+    # ALL ACTIONS
+    # =========================================================
 
-    if not risks_df.empty:
+    row = write_section(
+        "ALL CAPITAL ALLOCATION ACTIONS",
+        allocation_df,
+        row
+    )
 
-        risks_df.to_excel(
-            writer,
-            sheet_name=sheet,
-            startrow=row,
-            index=False
+    # =========================================================
+    # BASIC FORMATTING
+    # =========================================================
+
+    try:
+
+        workbook = writer.book
+        worksheet = writer.sheets[sheet]
+
+        # Works with openpyxl
+        if hasattr(worksheet, "column_dimensions"):
+
+            widths = {
+                "A": 18,
+                "B": 16,
+                "C": 18,
+                "D": 14,
+                "E": 14,
+                "F": 14,
+                "G": 14,
+                "H": 18,
+                "I": 16,
+                "J": 18,
+                "K": 14,
+                "L": 14,
+                "M": 14,
+                "N": 20,
+                "O": 42,
+                "P": 16,
+                "Q": 16,
+                "R": 16,
+            }
+
+            for column, width in widths.items():
+                worksheet.column_dimensions[column].width = width
+
+    except Exception as e:
+
+        print(
+            f"Capital Allocation formatting warning: {e}"
         )
 
+    print("Capital Allocation sheet created")
+    
 def create_report(
     results,
     portfolio_summary,
