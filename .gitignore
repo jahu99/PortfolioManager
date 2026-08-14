@@ -22,3 +22,7 @@ reports/*.xlsx
 .vscode/
 __pycache__/
 *.pyc
+
+# Generated market/fundamental caches
+cache/
+data/cache/

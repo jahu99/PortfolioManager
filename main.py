@@ -130,7 +130,6 @@ from analysis.capital_allocator import (
 
 from analysis.stock_analyser import analyse_stock
 
-from analysis.forward_returns import calculate_forward_returns
 from analysis.weight_optimizer import run_weight_optimizer
 
 
@@ -520,16 +519,17 @@ def main():
 
 
             recommendation = generate_recommendation(
-                ticker,
-                signal,
-                investment_score,
-                technical_score,
-                quality_score,
-                growth_score,
-                technical_reasons,
-                quality_reasons,
-                signal_performance,
-                score_bucket_performance
+                ticker=ticker,
+                signal=signal,
+                investment_score=investment_score,
+                technical_score=technical_score,
+                quality_score=quality_score,
+                growth_score=growth_score,
+                technical_reasons=technical_reasons,
+                quality_reasons=quality_reasons,
+                signal_performance=signal_performance,
+                score_bucket_performance=score_bucket_performance,
+                security_type="STOCK"
             )
 
             print("Passed recommendation")
@@ -1122,28 +1122,18 @@ def main():
             "No portfolio decisions generated"
         )
 
+
     final_portfolio_decisions = generate_final_portfolio_decisions(
         portfolio_summary,
         pd.DataFrame(portfolio_decisions),
         portfolio_ai_review,
         portfolio_manager_review,
-        portfolio_health
+        portfolio_health,
+        capital_allocation
     )
 
-    final_portfolio_decisions = apply_portfolio_manager_rules(
-        final_portfolio_decisions,
-        portfolio_health
-    )
-
-
-    print(
-        "\nFINAL PORTFOLIO DECISIONS"
-    )
-
-    print(
-        final_portfolio_decisions
-    )
-    
+    print("\nFINAL PORTFOLIO DECISIONS")
+    print(final_portfolio_decisions)
     # ---------------------------------
     # Alerts
     # ---------------------------------
@@ -1158,10 +1148,6 @@ def main():
 
 
     recommendation_history = get_learning_history()
-
-    recommendation_history = calculate_forward_returns(
-        recommendation_history
-    )
 
 
     recommendation_learning = (

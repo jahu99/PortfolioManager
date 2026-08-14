@@ -6,8 +6,9 @@ Purpose
 Manage portfolio capital allocation using:
 
     1. Actual portfolio ownership from holdings_raw.csv
-    2. Portfolio reduction decisions
-    3. Scanner investment opportunities
+    2. Explicit portfolio reduction decisions
+    3. Stock investment opportunities
+    4. ETF opportunities using ETF Score
 
 Core principles
 ---------------
@@ -15,13 +16,57 @@ Core principles
 - Quantity > 0 means the asset is owned.
 - CASH is never an investment candidate.
 - ETFs are valid investment assets.
-- BUY MORE and BUY NEW compete on Investment Score.
+- BUY MORE and BUY NEW compete on allocation conviction.
 - There is NO artificial BUY MORE-first rule.
-- Capital is allocated to the highest-ranked opportunities.
+- Stocks are ranked using Investment Score.
+- ETFs are ranked using ETF Score.
+- Stock Investment Score and ETF Score remain analytically separate.
+- Higher conviction opportunities receive proportionally more capital.
 - Capital released from reductions is calculated from:
       Market Value × Reduction %
 - Small/economically insignificant reductions are suppressed.
 - HOLD is preferred unless there is a meaningful reason to act.
+- Existing holdings are protected unless an explicit reduction
+  decision has been generated.
+- Released capital can be recycled into higher-ranked opportunities.
+- The allocator does not create trades simply to use available cash.
+
+Important ETF design
+--------------------
+ETFs deliberately do NOT receive:
+
+    - Stock Momentum Score
+    - Stock Quality Score
+    - Stock Investment Score
+    - Stock RSI scoring
+    - Stock fundamental analysis
+
+Instead, ETF opportunities use:
+
+    ETF Score
+
+as their allocation-ranking score.
+
+Internally this is called:
+
+    Allocation Score
+
+because the allocator needs one common ranking mechanism while
+preserving the distinction between stock and ETF analytical models.
+
+Reporting compatibility
+------------------------
+The existing Capital Allocation worksheet structure is preserved.
+
+The existing:
+
+    Investment Score
+
+column remains in the output for compatibility with the report.
+
+For ETFs, that column contains the ETF Score used for allocation.
+The separate analytical ETF fields remain available upstream and
+in the wider portfolio analysis.
 """
 
 import os
@@ -43,8 +88,32 @@ HOLDINGS_FILE = "portfolio/holdings_raw.csv"
 # Do not create a trade simply to release a trivial amount.
 MIN_REDUCTION_VALUE = 5.00
 
-# Minimum investment score for a BUY candidate.
+# Minimum score required to become a buy candidate.
+#
+# For STOCKS:
+#     Investment Score >= MIN_BUY_SCORE
+#
+# For ETFs:
+#     ETF Score >= MIN_BUY_SCORE
+#
+# The score scales are both 0-100, but they remain separate
+# analytical measures.
 MIN_BUY_SCORE = 75
+
+# Minimum conviction weight for a selected candidate.
+MIN_CONVICTION_WEIGHT = 1.0
+
+# Known ETFs.
+#
+# These are valid investment assets but are not automatically
+# reduced by the allocator. ETF reductions require an explicit
+# upstream decision.
+KNOWN_ETFS = {
+    "IWDA",
+    "VUAA",
+    "SEC0",
+    "AEMD",
+}
 
 
 # ============================================================
@@ -52,6 +121,16 @@ MIN_BUY_SCORE = 75
 # ============================================================
 
 def safe_float(value, default=0.0):
+    """
+    Safely convert a value to float.
+
+    Handles:
+        - None
+        - NaN
+        - pandas Series
+        - lists / tuples
+        - invalid strings
+    """
 
     try:
 
@@ -79,6 +158,9 @@ def safe_float(value, default=0.0):
 
 
 def clean_ticker(value):
+    """
+    Normalise a ticker symbol.
+    """
 
     if value is None:
         return ""
@@ -87,6 +169,9 @@ def clean_ticker(value):
 
 
 def normalise_action(value):
+    """
+    Normalise an action such as BUY MORE, REDUCE 25%, etc.
+    """
 
     if value is None:
         return "HOLD"
@@ -95,15 +180,18 @@ def normalise_action(value):
 
 
 def get_reduction_percentage(action):
-
     """
     Convert reduction action into percentage of existing
     position to release.
 
+    Examples
+    --------
     REDUCE 25% -> 0.25
     REDUCE 50% -> 0.50
     REDUCE 75% -> 0.75
     SELL       -> 1.00
+
+    A bare REDUCE defaults to 25%.
     """
 
     action = normalise_action(action)
@@ -131,8 +219,11 @@ def get_reduction_percentage(action):
     return 0.0
 
 
-def load_actual_holdings():
+# ============================================================
+# ACTUAL HOLDINGS
+# ============================================================
 
+def load_actual_holdings():
     """
     Load actual ownership from holdings_raw.csv.
 
@@ -145,9 +236,9 @@ def load_actual_holdings():
         {
             "NVDA": {
                 "owned": True,
-                "quantity": ...,
-                "market_value": ...,
-                "name": ...
+                "quantity": 50,
+                "market_value": 10000,
+                "name": "NVIDIA"
             }
         }
     """
@@ -182,8 +273,9 @@ def load_actual_holdings():
     ]
 
     missing = [
-        c for c in required
-        if c not in holdings.columns
+        column
+        for column in required
+        if column not in holdings.columns
     ]
 
     if missing:
@@ -225,21 +317,24 @@ def load_actual_holdings():
         if not ticker:
             continue
 
+        quantity = safe_float(
+            row["Quantity"]
+        )
+
+        market_value = safe_float(
+            row["Market Value"]
+        )
+
         ownership[ticker] = {
+
             "owned":
-                safe_float(
-                    row["Quantity"]
-                ) > 0,
+                quantity > 0,
 
             "quantity":
-                safe_float(
-                    row["Quantity"]
-                ),
+                quantity,
 
             "market_value":
-                safe_float(
-                    row["Market Value"]
-                ),
+                market_value,
 
             "name":
                 row.get(
@@ -251,7 +346,94 @@ def load_actual_holdings():
     return ownership
 
 
+# ============================================================
+# ASSET TYPE
+# ============================================================
+
+def is_etf(ticker, row=None):
+    """
+    Determine whether an asset is an ETF.
+
+    Explicit Asset Type information takes precedence.
+
+    Known ETF tickers are also recognised.
+
+    This function is intentionally independent of the stock
+    scoring model.
+    """
+
+    ticker = clean_ticker(
+        ticker
+    )
+
+    # --------------------------------------------------------
+    # Explicit row-level classification takes precedence.
+    # --------------------------------------------------------
+
+    if row is not None:
+
+        asset_type = str(
+            row.get(
+                "Asset Type",
+                row.get(
+                    "Type",
+                    ""
+                )
+            )
+        ).strip().upper()
+
+        if asset_type in {
+            "ETF",
+            "EXCHANGE TRADED FUND",
+            "EXCHANGE-TRADED FUND",
+        }:
+
+            return True
+
+        if asset_type in {
+            "STOCK",
+            "EQUITY",
+        }:
+
+            return False
+
+    # --------------------------------------------------------
+    # Known ETF fallback.
+    # --------------------------------------------------------
+
+    if ticker in KNOWN_ETFS:
+        return True
+
+    return False
+
+
+def get_asset_type(ticker, row=None):
+    """
+    Return STOCK or ETF.
+    """
+
+    if is_etf(
+        ticker,
+        row
+    ):
+        return "ETF"
+
+    return "STOCK"
+
+
+# ============================================================
+# SCORE HELPERS
+# ============================================================
+
 def get_investment_score(row):
+    """
+    Return the STOCK Investment Score.
+
+    This function deliberately does NOT fall back to ETF Score.
+
+    It exists for stock-specific scoring and for backwards
+    compatibility with existing callers.
+    """
 
     return safe_float(
         row.get(
@@ -267,7 +449,68 @@ def get_investment_score(row):
     )
 
 
+def get_etf_score(row):
+    """
+    Return the ETF-specific score.
+
+    ETF Score is intentionally kept separate from stock
+    Investment Score.
+    """
+
+    return safe_float(
+        row.get(
+            "ETF Score",
+            row.get(
+                "etf_score",
+                0
+            )
+        )
+    )
+
+
+def get_allocation_score(row, ticker=None):
+    """
+    Return the score used by the capital allocator.
+
+    STOCK
+        Allocation Score = Investment Score
+
+    ETF
+        Allocation Score = ETF Score
+
+    This is the key separation between analytical models.
+
+    The allocator can therefore rank stocks and ETFs together
+    without pretending they were scored using the same model.
+    """
+
+    if ticker is None:
+
+        ticker = row.get(
+            "Ticker",
+            ""
+        )
+
+    asset_type = get_asset_type(
+        ticker,
+        row
+    )
+
+    if asset_type == "ETF":
+
+        return get_etf_score(
+            row
+        )
+
+    return get_investment_score(
+        row
+    )
+
+
 def get_price(row):
+    """
+    Extract a usable price from an opportunity/decision row.
+    """
 
     return safe_float(
         row.get(
@@ -281,6 +524,9 @@ def get_price(row):
 
 
 def get_reason(row, default):
+    """
+    Extract a human-readable reason.
+    """
 
     reason = row.get(
         "Reason",
@@ -300,8 +546,78 @@ def get_reason(row, default):
     return str(reason)
 
 
+def get_conviction_weight(score):
+    """
+    Convert allocation score into capital-allocation weight.
+
+    Scores at the BUY threshold receive the minimum weight.
+
+    Example:
+
+        Score 76 -> weight 1
+        Score 78 -> weight 3
+        Score 85 -> weight 10
+        Score 90 -> weight 15
+        Score 94 -> weight 19
+
+    Higher score therefore produces a larger allocation.
+
+    The same weighting mechanism is used for:
+
+        STOCK Investment Score
+        ETF Score
+
+    but the underlying scores remain analytically separate.
+    """
+
+    score = safe_float(
+        score
+    )
+
+    excess_score = (
+        score
+        -
+        MIN_BUY_SCORE
+    )
+
+    return max(
+        MIN_CONVICTION_WEIGHT,
+        excess_score
+    )
+
+
+def is_owned(
+    ticker,
+    ownership
+):
+    """
+    Determine whether the portfolio actually owns the asset.
+    """
+
+    holding = ownership.get(
+        clean_ticker(ticker)
+    )
+
+    if not holding:
+        return False
+
+    return bool(
+        holding.get(
+            "owned",
+            False
+        )
+        and
+        safe_float(
+            holding.get(
+                "quantity",
+                0
+            )
+        ) > 0
+    )
+
+
 # ============================================================
-# Main allocator
+# MAIN ALLOCATOR
 # ============================================================
 
 def generate_capital_allocation(
@@ -309,6 +625,35 @@ def generate_capital_allocation(
     opportunities=None,
     portfolio_decisions=None
 ):
+    """
+    Generate portfolio capital allocation.
+
+    Parameters
+    ----------
+    portfolio_summary : pandas.DataFrame
+        Existing portfolio positions.
+
+    opportunities : pandas.DataFrame
+        Potential BUY NEW / BUY MORE opportunities.
+
+        STOCK opportunities should contain:
+            Investment Score
+
+        ETF opportunities should contain:
+            ETF Score
+
+    portfolio_decisions : list or pandas.DataFrame
+        Explicit REDUCE / SELL / HOLD decisions.
+
+    Returns
+    -------
+    dict
+
+        {
+            "Capital Allocation": allocation_df,
+            "Capital Summary": summary
+        }
+    """
 
     if portfolio_summary is None:
         portfolio_summary = pd.DataFrame()
@@ -318,10 +663,6 @@ def generate_capital_allocation(
 
     # ========================================================
     # NORMALISE PORTFOLIO DECISIONS
-    #
-    # generate_portfolio_decisions() returns a DataFrame.
-    # The capital allocator internally expects a list of
-    # dictionaries.
     # ========================================================
 
     if portfolio_decisions is None:
@@ -345,9 +686,9 @@ def generate_capital_allocation(
 
         portfolio_decisions = []
 
-    # --------------------------------------------------------
-    # Actual ownership
-    # --------------------------------------------------------
+    # ========================================================
+    # ACTUAL OWNERSHIP
+    # ========================================================
 
     ownership = load_actual_holdings()
 
@@ -359,193 +700,225 @@ def generate_capital_allocation(
 
     reduction_candidates = []
 
-    if portfolio_decisions:
+    for row in portfolio_decisions:
 
-        for row in portfolio_decisions:
+        if not isinstance(
+            row,
+            dict
+        ):
+            continue
 
-            ticker = clean_ticker(
-                row.get(
-                    "Ticker",
-                    ""
-                )
+        ticker = clean_ticker(
+            row.get(
+                "Ticker",
+                ""
             )
+        )
 
-            if not ticker:
-                continue
+        if not ticker:
+            continue
 
-            # CASH is never reduced by the investment allocator.
-            if ticker == "CASH":
-                continue
+        # CASH is never managed as an investment.
+        if ticker == "CASH":
+            continue
 
-            # ETFs are HOLD-only until we have a dedicated
-            # ETF investment model.
-            if is_etf(ticker, row):
-                continue
-
-            action = normalise_action(
-                row.get(
-                    "Action",
-                    "HOLD"
-                )
+        action = normalise_action(
+            row.get(
+                "Action",
+                "HOLD"
             )
+        )
 
-            reduction_percentage = (
-                get_reduction_percentage(
-                    action
-                )
+        reduction_percentage = (
+            get_reduction_percentage(
+                action
             )
+        )
 
-            if reduction_percentage <= 0:
-                continue
+        if reduction_percentage <= 0:
+            continue
 
-            # ------------------------------------------------
-            # Verify actual ownership
-            # ------------------------------------------------
+        # ----------------------------------------------------
+        # Verify actual ownership.
+        #
+        # A reduction decision against something that is not
+        # actually owned must never create a trade.
+        # ----------------------------------------------------
 
-            holding = ownership.get(
-                ticker
+        holding = ownership.get(
+            ticker
+        )
+
+        if not holding:
+            continue
+
+        if not holding.get(
+            "owned",
+            False
+        ):
+            continue
+
+        quantity = safe_float(
+            holding.get(
+                "quantity",
+                0
             )
+        )
 
-            if not holding:
-                continue
-
-            if not holding["owned"]:
-                continue
-
-            quantity = safe_float(
-                holding["quantity"]
+        market_value = safe_float(
+            holding.get(
+                "market_value",
+                0
             )
+        )
 
-            market_value = safe_float(
-                holding["market_value"]
-            )
+        if quantity <= 0:
+            continue
 
-            if quantity <= 0:
-                continue
+        # ----------------------------------------------------
+        # ETF reductions are allowed ONLY when explicitly
+        # instructed by the upstream decision engine.
+        # ----------------------------------------------------
 
-            # ------------------------------------------------
-            # Calculate actual released capital
-            # ------------------------------------------------
+        release_amount = round(
+            market_value
+            *
+            reduction_percentage,
+            2
+        )
 
-            release_amount = round(
-                market_value
-                *
-                reduction_percentage,
-                2
-            )
+        # Ignore economically insignificant reductions.
+        if release_amount < MIN_REDUCTION_VALUE:
+            continue
 
-            # ------------------------------------------------
-            # Ignore economically insignificant reductions
-            # ------------------------------------------------
+        price = get_price(
+            row
+        )
+
+        if price <= 0:
 
             if (
-                release_amount
-                <
-                MIN_REDUCTION_VALUE
+                quantity > 0
+                and
+                market_value > 0
             ):
 
-                continue
+                price = round(
+                    market_value / quantity,
+                    2
+                )
 
-            reduction_candidates.append(
-                {
-                    "Ticker":
+        if price <= 0:
+            continue
+
+        reduction_action = (
+            "SELL"
+            if reduction_percentage >= 1
+            else
+            f"REDUCE "
+            f"{int(reduction_percentage * 100)}%"
+        )
+
+        allocation_score = get_allocation_score(
+            row,
+            ticker
+        )
+
+        reduction_candidates.append(
+            {
+
+                "Ticker":
+                    ticker,
+
+                "Action":
+                    reduction_action,
+
+                "Existing Holding":
+                    "Yes",
+
+                "Asset Type":
+                    get_asset_type(
                         ticker,
+                        row
+                    ),
 
-                    "Action":
-                        (
-                            "SELL"
-                            if reduction_percentage >= 1
-                            else
-                            f"REDUCE "
-                            f"{int(reduction_percentage * 100)}%"
-                        ),
+                "Price":
+                    price,
 
-                    "Existing Holding":
-                        "Yes",
+                "Quantity":
+                    quantity,
 
-                    "Asset Type":
-                        "ETF"
-                        if (
-                            ticker in {
-                                "IWDA",
-                                "VUAA",
-                                "SEC0",
-                            }
-                        )
-                        else "STOCK",
+                "Reduction %":
+                    round(
+                        reduction_percentage * 100,
+                        2
+                    ),
 
-                    "Price":
-                        get_price(row)
-                        if get_price(row) > 0
-                        else (
-                            round(
-                                market_value / quantity,
-                                2
-                            )
-                            if quantity > 0 and market_value > 0
-                            else 0
-                        ),
+                "Reduction Quantity":
+                    round(
+                        quantity
+                        *
+                        reduction_percentage,
+                        6
+                    ),
 
-                    "Quantity":
-                        quantity,
+                "Market Value":
+                    round(
+                        market_value,
+                        2
+                    ),
 
-                    "Reduction %":
-                        round(
-                            reduction_percentage * 100,
-                            2
-                        ),
+                "Released Capital":
+                    release_amount,
 
-                    "Reduction Quantity":
-                        round(
-                            quantity
-                            *
-                            reduction_percentage,
-                            6
-                        ),
+                "Buy Quantity":
+                    0,
 
-                    "Market Value":
-                        round(
-                            market_value,
-                            2
-                        ),
+                "Buy Value":
+                    0,
 
-                    "Released Capital":
-                        release_amount,
+                "Amount":
+                    -release_amount,
 
-                    "Buy Quantity":
-                        0,
+                "Funding Source":
+                    "Released Capital",
 
-                    "Buy Value":
-                        0,
+                "Reason":
+                    get_reason(
+                        row,
+                        "Portfolio reduction"
+                    ),
 
-                    "Amount":
-                        -release_amount,
+                # ------------------------------------------------
+                # Keep the existing report column.
+                #
+                # For ETFs this represents ETF Score for
+                # allocation purposes.
+                # ------------------------------------------------
+                "Investment Score":
+                    allocation_score,
 
-                    "Funding Source":
-                        "Released Capital",
+                "Reduction Rank":
+                    0,
 
-                    "Reason":
-                        get_reason(
-                            row,
-                            "Portfolio reduction"
-                        ),
+                "Investment Rank":
+                    0,
 
-                    "Investment Score":
-                        get_investment_score(
-                            row
-                        ),
-                }
-            )
+            }
+        )
 
-    # --------------------------------------------------------
-    # Rank reductions by weakest investment score first.
-    # --------------------------------------------------------
+    # ========================================================
+    # RANK REDUCTIONS
+    #
+    # Weakest allocation score first.
+    # ========================================================
 
     reduction_candidates = sorted(
         reduction_candidates,
         key=lambda x: (
             x["Investment Score"],
-            -x["Market Value"]
+            -x["Market Value"],
+            x["Ticker"]
         )
     )
 
@@ -555,7 +928,6 @@ def generate_capital_allocation(
     ):
 
         item["Reduction Rank"] = rank
-        item["Investment Rank"] = 0
 
         allocations.append(
             item
@@ -567,15 +939,12 @@ def generate_capital_allocation(
 
     released_capital = round(
         sum(
-            x["Released Capital"]
-            for x in reduction_candidates
+            item["Released Capital"]
+            for item in reduction_candidates
         ),
         2
     )
 
-    # Explicit numeric conversion preserves the existing
-    # configuration interface while avoiding unexpected
-    # zero/default behaviour.
     discretionary_capital = round(
         safe_float(
             DISCRETIONARY_SPEND_LIMIT
@@ -593,16 +962,26 @@ def generate_capital_allocation(
     # ========================================================
     # BUY CANDIDATES
     #
-    # IMPORTANT:
-    # BUY MORE and BUY NEW are deliberately combined.
+    # BUY NEW and BUY MORE are deliberately placed into the
+    # same candidate pool.
     #
-    # Ownership is determined from holdings_raw.csv.
-    # Investment Score determines priority.
+    # Ownership determines the action.
+    #
+    # Asset type determines which analytical score is used.
+    #
+    # Allocation Score determines priority.
     # ========================================================
 
     buy_candidates = {}
 
-    if not opportunities.empty:
+    if (
+        isinstance(
+            opportunities,
+            pd.DataFrame
+        )
+        and
+        not opportunities.empty
+    ):
 
         for _, row in opportunities.iterrows():
 
@@ -616,27 +995,43 @@ def generate_capital_allocation(
             if not ticker:
                 continue
 
-            # CASH cannot be bought.
+            # CASH is never an investment candidate.
             if ticker == "CASH":
                 continue
 
-            score = get_investment_score(
+            # ------------------------------------------------
+            # Determine asset class.
+            # ------------------------------------------------
+
+            asset_type = get_asset_type(
+                ticker,
                 row
             )
 
-            if score < MIN_BUY_SCORE:
-                continue
+            # ------------------------------------------------
+            # Determine allocation score.
+            #
+            # STOCK -> Investment Score
+            # ETF   -> ETF Score
+            # ------------------------------------------------
 
-            holding = ownership.get(
-                ticker
+            allocation_score = (
+                get_allocation_score(
+                    row,
+                    ticker
+                )
             )
 
-            owned = bool(
-                holding
-                and
-                holding["owned"]
-                and
-                holding["quantity"] > 0
+            # ------------------------------------------------
+            # Candidate must meet the relevant score threshold.
+            # ------------------------------------------------
+
+            if allocation_score < MIN_BUY_SCORE:
+                continue
+
+            owned = is_owned(
+                ticker,
+                ownership
             )
 
             if owned:
@@ -644,12 +1039,23 @@ def generate_capital_allocation(
                 action = "BUY MORE"
                 existing_holding = "Yes"
 
+                holding = ownership.get(
+                    ticker,
+                    {}
+                )
+
                 quantity = safe_float(
-                    holding["quantity"]
+                    holding.get(
+                        "quantity",
+                        0
+                    )
                 )
 
                 market_value = safe_float(
-                    holding["market_value"]
+                    holding.get(
+                        "market_value",
+                        0
+                    )
                 )
 
             else:
@@ -660,9 +1066,14 @@ def generate_capital_allocation(
                 quantity = 0.0
                 market_value = 0.0
 
-            # ------------------------------------------------
-            # Keep highest-scoring occurrence of each ticker.
-            # ------------------------------------------------
+            price = get_price(
+                row
+            )
+
+            # A candidate without a valid price cannot receive
+            # an allocation.
+            if price <= 0:
+                continue
 
             candidate = {
 
@@ -676,18 +1087,10 @@ def generate_capital_allocation(
                     existing_holding,
 
                 "Asset Type":
-                    "ETF"
-                    if (
-                        ticker in {
-                            "IWDA",
-                            "VUAA",
-                            "SEC0",
-                        }
-                    )
-                    else "STOCK",
+                    asset_type,
 
                 "Price":
-                    get_price(row),
+                    price,
 
                 "Quantity":
                     quantity,
@@ -728,31 +1131,58 @@ def generate_capital_allocation(
                 "Investment Rank":
                     0,
 
+                # ------------------------------------------------
+                # Existing worksheet field.
+                #
+                # For stocks:
+                #     Investment Score
+                #
+                # For ETFs:
+                #     ETF Score
+                #
+                # The allocator uses this field as the common
+                # allocation-ranking value while Asset Type
+                # tells us which analytical model produced it.
+                # ------------------------------------------------
                 "Investment Score":
-                    score,
+                    allocation_score,
+
+                # Internal field used only before final output.
+                "_Allocation Score":
+                    allocation_score,
             }
 
+            # ------------------------------------------------
+            # Keep only the highest-scoring occurrence of each
+            # ticker.
+            # ------------------------------------------------
+
+            existing_candidate = (
+                buy_candidates.get(
+                    ticker
+                )
+            )
+
             if (
-                ticker not in buy_candidates
+                existing_candidate is None
                 or
-                score
+                allocation_score
                 >
-                buy_candidates[ticker][
-                    "Investment Score"
+                existing_candidate[
+                    "_Allocation Score"
                 ]
             ):
 
                 buy_candidates[ticker] = candidate
 
     # ========================================================
-    # Remove BUY candidates that are simultaneously being
-    # completely sold.
+    # DO NOT REBUY A FULLY SOLD POSITION
     # ========================================================
 
     sold_tickers = {
-        x["Ticker"]
-        for x in reduction_candidates
-        if x["Reduction %"] >= 100
+        item["Ticker"]
+        for item in reduction_candidates
+        if item["Reduction %"] >= 100
     }
 
     buy_candidates = {
@@ -764,25 +1194,34 @@ def generate_capital_allocation(
 
     # ========================================================
     # RANK ALL BUY OPPORTUNITIES TOGETHER
+    #
+    # Stocks and ETFs compete on Allocation Score.
+    #
+    # Stock:
+    #     Allocation Score = Investment Score
+    #
+    # ETF:
+    #     Allocation Score = ETF Score
     # ========================================================
 
     buy_candidates = sorted(
         buy_candidates.values(),
         key=lambda x: (
-            -x["Investment Score"],
+            -x["_Allocation Score"],
             x["Ticker"]
         )
     )
 
-    # --------------------------------------------------------
-    # Apply maximum counts by category.
+    # ========================================================
+    # SELECT CANDIDATES
     #
-    # We first rank ALL opportunities.
-    # We then permit the configured maximum number of
-    # BUY MORE and BUY NEW positions.
+    # There is NO BUY MORE-first rule.
     #
-    # There is still NO category priority.
-    # --------------------------------------------------------
+    # A BUY NEW with a higher allocation score can therefore
+    # beat a BUY MORE.
+    #
+    # MAX_NEW_BUYS and MAX_BUY_MORE remain category safeguards.
+    # ========================================================
 
     selected_candidates = []
 
@@ -791,42 +1230,70 @@ def generate_capital_allocation(
 
     for candidate in buy_candidates:
 
-        if (
-            candidate["Action"]
-            ==
-            "BUY MORE"
-        ):
+        action = candidate[
+            "Action"
+        ]
+
+        if action == "BUY MORE":
 
             if buy_more_count >= MAX_BUY_MORE:
                 continue
 
-            buy_more_count += 1
-
-        else:
+        elif action == "BUY NEW":
 
             if buy_new_count >= MAX_NEW_BUYS:
                 continue
 
-            buy_new_count += 1
+        else:
+
+            continue
 
         selected_candidates.append(
             candidate
         )
 
+        if action == "BUY MORE":
+
+            buy_more_count += 1
+
+        else:
+
+            buy_new_count += 1
+
     # ========================================================
-    # Re-rank after configured limits
+    # FINAL RANKING
     # ========================================================
 
     selected_candidates = sorted(
         selected_candidates,
         key=lambda x: (
-            -x["Investment Score"],
+            -x["_Allocation Score"],
             x["Ticker"]
         )
     )
 
     # ========================================================
-    # ALLOCATE CAPITAL
+    # CONVICTION WEIGHTS
+    # ========================================================
+
+    total_conviction_weight = 0.0
+
+    for candidate in selected_candidates:
+
+        weight = get_conviction_weight(
+            candidate[
+                "_Allocation Score"
+            ]
+        )
+
+        candidate[
+            "_Conviction Weight"
+        ] = weight
+
+        total_conviction_weight += weight
+
+    # ========================================================
+    # CAPITAL ALLOCATION
     # ========================================================
 
     remaining = round(
@@ -844,34 +1311,34 @@ def generate_capital_allocation(
         if remaining <= 0:
             break
 
-        # ----------------------------------------------------
-        # Equal allocation among selected candidates for now.
-        #
-        # The ranking determines who gets capital.
-        # We can later introduce conviction-weighted
-        # allocation without changing ownership logic.
-        # ----------------------------------------------------
-
-        positions_remaining = (
-            len(selected_candidates)
-            -
-            rank
-            +
-            1
-        )
+        if total_conviction_weight <= 0:
+            continue
 
         allocation = round(
-            remaining
-            /
-            positions_remaining,
+            total_available_capital
+            *
+            (
+                candidate[
+                    "_Conviction Weight"
+                ]
+                /
+                total_conviction_weight
+            ),
             2
+        )
+
+        allocation = min(
+            allocation,
+            remaining
         )
 
         if allocation <= 0:
             continue
 
         price = safe_float(
-            candidate["Price"]
+            candidate[
+                "Price"
+            ]
         )
 
         if price <= 0:
@@ -887,29 +1354,29 @@ def generate_capital_allocation(
             2
         )
 
-        # Protect against rounding causing us to overspend.
         buy_value = min(
             buy_value,
             remaining
         )
 
-        allocation = buy_value
+        if buy_value <= 0:
+            continue
 
-        candidate["Buy Quantity"] = (
-            buy_quantity
-        )
+        candidate[
+            "Buy Quantity"
+        ] = buy_quantity
 
-        candidate["Buy Value"] = (
-            buy_value
-        )
+        candidate[
+            "Buy Value"
+        ] = buy_value
 
-        candidate["Amount"] = (
-            buy_value
-        )
+        candidate[
+            "Amount"
+        ] = buy_value
 
-        candidate["Investment Rank"] = (
-            rank
-        )
+        candidate[
+            "Investment Rank"
+        ] = rank
 
         allocations.append(
             candidate
@@ -930,11 +1397,159 @@ def generate_capital_allocation(
         )
 
     # ========================================================
-    # HOLD POSITIONS
+    # RESIDUAL CAPITAL
+    #
+    # Do not create another position simply to consume the
+    # remaining cash.
+    #
+    # If a residual remains and there is already a selected BUY,
+    # add the residual to the highest-conviction selected BUY.
     # ========================================================
 
     if (
-        portfolio_summary is not None
+        selected_candidates
+        and
+        remaining > 0
+    ):
+
+        valid_buy_allocations = [
+            item
+            for item in allocations
+            if item["Action"]
+            in (
+                "BUY NEW",
+                "BUY MORE"
+            )
+            and
+            safe_float(
+                item["Price"]
+            ) > 0
+        ]
+
+        if valid_buy_allocations:
+
+            top_candidate = sorted(
+                valid_buy_allocations,
+                key=lambda x: (
+                    -x["_Allocation Score"],
+                    x["Ticker"]
+                )
+            )[0]
+
+            residual = round(
+                remaining,
+                2
+            )
+
+            price = safe_float(
+                top_candidate[
+                    "Price"
+                ]
+            )
+
+            if price > 0:
+
+                additional_quantity = round(
+                    residual / price,
+                    6
+                )
+
+                additional_value = round(
+                    additional_quantity * price,
+                    2
+                )
+
+                additional_value = min(
+                    additional_value,
+                    remaining
+                )
+
+                if additional_value > 0:
+
+                    top_candidate[
+                        "Buy Quantity"
+                    ] = round(
+                        safe_float(
+                            top_candidate[
+                                "Buy Quantity"
+                            ]
+                        )
+                        +
+                        additional_quantity,
+                        6
+                    )
+
+                    top_candidate[
+                        "Buy Value"
+                    ] = round(
+                        safe_float(
+                            top_candidate[
+                                "Buy Value"
+                            ]
+                        )
+                        +
+                        additional_value,
+                        2
+                    )
+
+                    top_candidate[
+                        "Amount"
+                    ] = round(
+                        safe_float(
+                            top_candidate[
+                                "Amount"
+                            ]
+                        )
+                        +
+                        additional_value,
+                        2
+                    )
+
+                    capital_allocated = round(
+                        capital_allocated
+                        +
+                        additional_value,
+                        2
+                    )
+
+                    remaining = round(
+                        remaining
+                        -
+                        additional_value,
+                        2
+                    )
+
+    # ========================================================
+    # REMOVE INTERNAL FIELDS
+    # ========================================================
+
+    for candidate in allocations:
+
+        candidate.pop(
+            "_Conviction Weight",
+            None
+        )
+
+        candidate.pop(
+            "_Allocation Score",
+            None
+        )
+
+    # ========================================================
+    # HOLD POSITIONS
+    #
+    # Every genuine holding not already represented by a
+    # REDUCE, SELL, BUY MORE or BUY NEW action is retained as
+    # HOLD.
+    #
+    # This protects existing positions from unnecessary turnover.
+    # ========================================================
+
+    if (
+        isinstance(
+            portfolio_summary,
+            pd.DataFrame
+        )
         and
         not portfolio_summary.empty
     ):
@@ -954,16 +1569,33 @@ def generate_capital_allocation(
             if ticker == "CASH":
                 continue
 
-            # Don't duplicate a holding already represented
-            # by a reduction or buy.
+            # ------------------------------------------------
+            # Do not duplicate positions already represented
+            # by a trade action.
+            # ------------------------------------------------
+
             if any(
-                x["Ticker"] == ticker
-                for x in allocations
+                item["Ticker"] == ticker
+                for item in allocations
             ):
+
                 continue
+
+            asset_type = get_asset_type(
+                ticker,
+                row
+            )
+
+            allocation_score = (
+                get_allocation_score(
+                    row,
+                    ticker
+                )
+            )
 
             allocations.append(
                 {
+
                     "Ticker":
                         ticker,
 
@@ -974,10 +1606,7 @@ def generate_capital_allocation(
                         "Yes",
 
                     "Asset Type":
-                        row.get(
-                            "Type",
-                            "STOCK"
-                        ),
+                        asset_type,
 
                     "Price":
                         safe_float(
@@ -1011,7 +1640,10 @@ def generate_capital_allocation(
                         safe_float(
                             row.get(
                                 "Current Value",
-                                0
+                                row.get(
+                                    "Market Value",
+                                    0
+                                )
                             )
                         ),
 
@@ -1039,13 +1671,17 @@ def generate_capital_allocation(
                     "Investment Rank":
                         0,
 
+                    # ------------------------------------------------
+                    # Compatibility field.
+                    #
+                    # STOCK:
+                    #     Investment Score
+                    #
+                    # ETF:
+                    #     ETF Score
+                    # ------------------------------------------------
                     "Investment Score":
-                        safe_float(
-                            row.get(
-                                "Investment Score",
-                                0
-                            )
-                        ),
+                        allocation_score,
                 }
             )
 
@@ -1057,7 +1693,14 @@ def generate_capital_allocation(
         allocations
     )
 
+    # ========================================================
+    # EXISTING CAPITAL ALLOCATION STRUCTURE
+    #
+    # DO NOT CHANGE THIS STRUCTURE.
+    # ========================================================
+
     columns = [
+
         "Ticker",
         "Action",
         "Existing Holding",
@@ -1076,6 +1719,7 @@ def generate_capital_allocation(
         "Reduction Rank",
         "Investment Rank",
         "Investment Score",
+
     ]
 
     if allocation_df.empty:
@@ -1089,14 +1733,17 @@ def generate_capital_allocation(
         for column in columns:
 
             if column not in allocation_df.columns:
-                allocation_df[column] = 0
+
+                allocation_df[
+                    column
+                ] = 0
 
         allocation_df = allocation_df[
             columns
         ]
 
-        # Numeric fields
         numeric_columns = [
+
             "Price",
             "Quantity",
             "Reduction %",
@@ -1109,29 +1756,27 @@ def generate_capital_allocation(
             "Reduction Rank",
             "Investment Rank",
             "Investment Score",
+
         ]
 
         for column in numeric_columns:
 
-            allocation_df[column] = pd.to_numeric(
-                allocation_df[column],
+            allocation_df[
+                column
+            ] = pd.to_numeric(
+                allocation_df[
+                    column
+                ],
                 errors="coerce"
             ).fillna(0)
 
     # ========================================================
-    # SUMMARY
+    # CAPITAL SUMMARY
     #
-    # IMPORTANT:
-    # The summary is deliberately calculated from the FINAL
-    # allocation dataframe.
+    # Calculate everything from the final allocation dataframe.
     #
-    # This keeps the summary and the Capital Allocation
-    # worksheet completely consistent.
+    # This ensures the summary and worksheet cannot disagree.
     # ========================================================
-
-    # --------------------------------------------------------
-    # Discretionary capital
-    # --------------------------------------------------------
 
     discretionary_capital = round(
         safe_float(
@@ -1140,17 +1785,25 @@ def generate_capital_allocation(
         2
     )
 
-    # --------------------------------------------------------
-    # Capital released from actual reduction/sell actions
-    # --------------------------------------------------------
+    # ========================================================
+    # RELEASED CAPITAL
+    # ========================================================
 
     reduction_mask = (
-        allocation_df["Action"]
+        allocation_df[
+            "Action"
+        ]
         .astype(str)
-        .str.startswith("REDUCE")
+        .str.startswith(
+            "REDUCE"
+        )
         |
-        allocation_df["Action"].isin(
-            ["SELL"]
+        allocation_df[
+            "Action"
+        ].isin(
+            [
+                "SELL"
+            ]
         )
     )
 
@@ -1167,9 +1820,9 @@ def generate_capital_allocation(
         2
     )
 
-    # --------------------------------------------------------
-    # Total available capital
-    # --------------------------------------------------------
+    # ========================================================
+    # TOTAL CAPITAL AVAILABLE
+    # ========================================================
 
     total_available_capital = round(
         discretionary_capital
@@ -1178,11 +1831,13 @@ def generate_capital_allocation(
         2
     )
 
-    # --------------------------------------------------------
-    # Capital actually allocated to BUY NEW / BUY MORE
-    # --------------------------------------------------------
+    # ========================================================
+    # ACTUAL CAPITAL ALLOCATED
+    # ========================================================
 
-    buy_mask = allocation_df["Action"].isin(
+    buy_mask = allocation_df[
+        "Action"
+    ].isin(
         [
             "BUY NEW",
             "BUY MORE"
@@ -1202,9 +1857,9 @@ def generate_capital_allocation(
         2
     )
 
-    # --------------------------------------------------------
-    # Remaining capital
-    # --------------------------------------------------------
+    # ========================================================
+    # REMAINING CAPITAL
+    # ========================================================
 
     remaining = round(
         total_available_capital
@@ -1213,11 +1868,9 @@ def generate_capital_allocation(
         2
     )
 
-    # Protect against tiny floating-point residuals.
     if abs(remaining) < 0.01:
         remaining = 0.00
 
-    # Never report negative remaining capital.
     remaining = max(
         0.00,
         remaining
@@ -1229,7 +1882,9 @@ def generate_capital_allocation(
 
     buy_new_count = int(
         (
-            allocation_df["Action"]
+            allocation_df[
+                "Action"
+            ]
             ==
             "BUY NEW"
         ).sum()
@@ -1237,14 +1892,18 @@ def generate_capital_allocation(
 
     buy_more_count = int(
         (
-            allocation_df["Action"]
+            allocation_df[
+                "Action"
+            ]
             ==
             "BUY MORE"
         ).sum()
     )
 
     reduce_sell_count = int(
-        allocation_df["Action"].isin(
+        allocation_df[
+            "Action"
+        ].isin(
             [
                 "SELL",
                 "REDUCE",
@@ -1258,13 +1917,13 @@ def generate_capital_allocation(
 
     hold_count = int(
         (
-            allocation_df["Action"]
+            allocation_df[
+                "Action"
+            ]
             ==
             "HOLD"
         ).sum()
     )
-
-    reduction_count = reduce_sell_count
 
     total_buy_opportunities = (
         buy_new_count
@@ -1278,6 +1937,7 @@ def generate_capital_allocation(
 
     summary = pd.DataFrame(
         [
+
             {
                 "Metric":
                     "Discretionary Spend Limit",
@@ -1352,82 +2012,27 @@ def generate_capital_allocation(
 
             {
                 "Metric":
-                    "Reduction Actions",
-
-                "Amount":
-                    reduction_count,
-            },
-
-            {
-                "Metric":
                     "Total BUY Opportunities",
 
                 "Amount":
                     total_buy_opportunities,
             },
+
         ]
     )
 
     # ========================================================
     # RETURN
     #
-    # IMPORTANT:
-    # Keep these exact dictionary keys because downstream
-    # reports/excel_report.py expects them.
+    # These exact keys are required by the existing report.
     # ========================================================
 
     return {
+
         "Capital Allocation":
             allocation_df,
 
         "Capital Summary":
             summary,
+
     }
-
-def is_etf(ticker, row=None):
-    """
-    Determine whether an asset is an ETF.
-
-    This is deliberately conservative. We only classify assets
-    as ETFs when we have explicit evidence.
-
-    Known portfolio ETFs:
-        IWDA
-        VUAA
-        SEC0
-
-    We also recognise explicit ETF/Exchange Traded Fund asset
-    type information when supplied by the upstream data.
-    """
-
-    ticker = clean_ticker(ticker)
-
-    known_etfs = {
-        "IWDA",
-        "VUAA",
-        "SEC0",
-    }
-
-    if ticker in known_etfs:
-        return True
-
-    if row is not None:
-
-        asset_type = str(
-            row.get(
-                "Asset Type",
-                row.get(
-                    "Type",
-                    ""
-                )
-            )
-        ).strip().upper()
-
-        if asset_type in {
-            "ETF",
-            "EXCHANGE TRADED FUND",
-            "EXCHANGE-TRADED FUND",
-        }:
-            return True
-
-    return False
