@@ -1150,7 +1150,23 @@ def generate_capital_allocation(
                 # Internal field used only before final output.
                 "_Allocation Score":
                     allocation_score,
-            }
+
+                "Allocation Reason":
+                    (
+                        "High conviction existing holding"
+                        if owned
+                        else
+                        "High conviction new opportunity"
+                    ),
+
+                "Allocation Confidence":
+                    (
+                        "High"
+                        if allocation_score >= 85
+                        else
+                        "Medium"
+                    ),
+             }
 
             # ------------------------------------------------
             # Keep only the highest-scoring occurrence of each
@@ -1682,6 +1698,15 @@ def generate_capital_allocation(
                     # ------------------------------------------------
                     "Investment Score":
                         allocation_score,
+
+                    "Allocation Score":
+                        allocation_score,
+
+                    "Allocation Reason":
+                        "Maintain existing position",
+
+                    "Allocation Confidence":
+                        "High",
                 }
             )
 
@@ -1719,6 +1744,8 @@ def generate_capital_allocation(
         "Reduction Rank",
         "Investment Rank",
         "Investment Score",
+        "Allocation Reason",
+        "Allocation Confidence",
 
     ]
 
