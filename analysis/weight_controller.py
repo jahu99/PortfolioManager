@@ -1,15 +1,93 @@
-# analysis/weight_controller.py
+
+"""
+Weight Controller
+=================
+
+Purpose
+-------
+Provides the governed production scoring weights used by the
+Investment Score engine and adaptive weight optimiser.
+
+Architecture
+------------
+The scoring model has three strategic components:
+
+    Technical Score
+    Quality Score
+    Growth Score
+
+These weights:
+
+    - must total 100%
+    - are constrained by minimum and maximum governance limits
+    - may be adjusted by the adaptive weight optimiser
+    - are persisted to data/scoring_weights.json
+
+The Investment Score itself is NOT a weighted component.
+
+Governance
+----------
+The controller is deliberately conservative.
+
+Optimiser output is never written directly to production.
+
+Instead:
+
+    Optimiser Proposal
+            ↓
+       Normalisation
+            ↓
+      Governance Bounds
+            ↓
+      Exact 100% Total
+            ↓
+         Validation
+            ↓
+       Persisted Weights
+
+This ensures that the adaptive optimiser cannot introduce
+invalid or excessively aggressive scoring weights.
+
+Current production defaults:
+
+    Technical = 50%
+    Quality   = 20%
+    Growth    = 30%
+
+Governance boundaries:
+
+    Technical = 35% - 60%
+    Quality   = 15% - 30%
+    Growth    = 10% - 35%
+"""
 
 import json
 import os
 
 
-WEIGHT_FILE = "data/optimised_weights.json"
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+WEIGHT_FILE = (
+    "data/scoring_weights.json"
+)
 
 
-# =====================================================
-# Default strategic weights
-# =====================================================
+# ------------------------------------------------------------
+# Valid scoring components
+# ------------------------------------------------------------
+
+VALID_KEYS = {
+    "technical_score",
+    "quality_score",
+    "growth_score",
+}
+
+
+# ------------------------------------------------------------
+# Default production weights
+# ------------------------------------------------------------
 
 DEFAULT_WEIGHTS = {
 
@@ -17,17 +95,13 @@ DEFAULT_WEIGHTS = {
 
     "quality_score": 20.0,
 
-    "growth_score": 10.0,
-
-    "investment_score": 20.0
-
+    "growth_score": 30.0,
 }
 
 
-
-# =====================================================
-# Governance rules
-# =====================================================
+# ------------------------------------------------------------
+# Governance boundaries
+# ------------------------------------------------------------
 
 MIN_WEIGHTS = {
 
@@ -36,110 +110,101 @@ MIN_WEIGHTS = {
     "quality_score": 15.0,
 
     "growth_score": 10.0,
-
-    "investment_score": 15.0
-
 }
-
 
 
 MAX_WEIGHTS = {
 
-    "technical_score": 55.0,
+    "technical_score": 60.0,
 
     "quality_score": 30.0,
 
-    "growth_score": 25.0,
-
-    "investment_score": 30.0
-
+    "growth_score": 35.0,
 }
 
 
+# ============================================================
+# HELPERS
+# ============================================================
 
-VALID_KEYS = set(
+def safe_float(
+    value,
+    default=0.0,
+):
+    """
+    Safely convert a value to float.
 
-    DEFAULT_WEIGHTS.keys()
-
-)
-
-
-
-# =====================================================
-# Load weights
-# =====================================================
-
-def get_weights():
-
-
-    if not os.path.exists(
-        WEIGHT_FILE
-    ):
-
-        return DEFAULT_WEIGHTS.copy()
-
-
+    Invalid values return the supplied default.
+    """
 
     try:
 
-        with open(
-            WEIGHT_FILE,
-            "r"
-        ) as f:
-
-            weights = json.load(f)
-
-
-
-        if validate_weights(weights):
-
-            return weights
-
-
+        return float(value)
 
     except Exception:
 
-        pass
+        return default
 
 
-
-    return DEFAULT_WEIGHTS.copy()
-
-
-
-# =====================================================
-# Validate weights
-# =====================================================
+# ============================================================
+# VALIDATION
+# ============================================================
 
 def validate_weights(weights):
+    """
+    Validate a complete set of production scoring weights.
 
+    Validation requirements
+    -----------------------
+    1. Input must be a dictionary.
+    2. Exactly the three expected scoring components must exist.
+    3. All values must be numeric.
+    4. Total must equal 100%.
+    5. Every component must remain within governance limits.
+
+    Returns
+    -------
+    bool
+        True when the weights are valid.
+    """
 
     if not isinstance(
         weights,
-        dict
+        dict,
     ):
 
-        return False
-
-
-
-    # Check keys
-
-    if set(weights.keys()) != VALID_KEYS:
-
         print(
-            "Invalid weight keys:",
-            weights.keys()
+            "Invalid weights object:",
+            type(weights),
         )
 
         return False
 
 
+    # --------------------------------------------------------
+    # Check keys
+    # --------------------------------------------------------
 
-    # Check numeric
+    if set(weights.keys()) != VALID_KEYS:
+
+        print(
+            "Invalid weight keys:",
+            weights.keys(),
+        )
+
+        print(
+            "Expected keys:",
+            VALID_KEYS,
+        )
+
+        return False
+
+
+    # --------------------------------------------------------
+    # Check numeric values
+    # --------------------------------------------------------
 
     for key, value in weights.items():
-
 
         try:
 
@@ -150,165 +215,640 @@ def validate_weights(weights):
             print(
                 "Invalid weight value:",
                 key,
-                value
+                value,
             )
 
             return False
 
 
-
+    # --------------------------------------------------------
     # Check total
+    # --------------------------------------------------------
 
     total = round(
-
         sum(
-
-            float(v)
-
-            for v in weights.values()
-
+            float(value)
+            for value in weights.values()
         ),
-
-        2
-
+        2,
     )
-
-
 
     if total != 100.0:
 
-
         print(
-
             "Weights do not equal 100:",
-            total
-
+            total,
         )
-
 
         return False
 
 
-
-    # Check boundaries
+    # --------------------------------------------------------
+    # Check governance boundaries
+    # --------------------------------------------------------
 
     for key, value in weights.items():
 
-
         value = float(value)
-
 
 
         if value < MIN_WEIGHTS[key]:
 
             print(
-
-                f"{key} below minimum: {value}"
-
+                f"{key} below minimum: "
+                f"{value} < {MIN_WEIGHTS[key]}"
             )
 
             return False
-
 
 
         if value > MAX_WEIGHTS[key]:
 
             print(
-
-                f"{key} above maximum: {value}"
-
+                f"{key} above maximum: "
+                f"{value} > {MAX_WEIGHTS[key]}"
             )
 
             return False
 
 
-
     return True
 
 
-
-
-# =====================================================
-# Normalise weights
-# =====================================================
+# ============================================================
+# NORMALISE WEIGHTS
+# ============================================================
 
 def normalise_weights(weights):
+    """
+    Normalise arbitrary weight values so that they total 100%.
 
+    Missing components receive zero before normalisation.
+
+    This function does not apply governance limits.
+    """
 
     cleaned = {}
 
 
-
     for key in VALID_KEYS:
 
-
-        cleaned[key] = float(
-
+        cleaned[key] = safe_float(
             weights.get(
-
                 key,
-
-                DEFAULT_WEIGHTS[key]
-
+                0.0,
             )
-
         )
 
 
-
     total = sum(
-
         cleaned.values()
-
     )
 
 
-
-    if total == 0:
+    if total <= 0:
 
         return DEFAULT_WEIGHTS.copy()
 
 
-
     for key in cleaned:
 
-
-        cleaned[key] = round(
-
+        cleaned[key] = (
             cleaned[key]
-
             /
-
             total
-
             *
-
-            100,
-
-            1
-
+            100.0
         )
-
 
 
     return cleaned
 
 
+# ============================================================
+# GOVERNANCE ENGINE
+# ============================================================
+
+def govern_weights(weights):
+    """
+    Convert optimiser output into valid governed weights.
+
+    The algorithm guarantees:
+
+        MIN <= weight <= MAX
+
+    and:
+
+        Technical + Quality + Growth = 100
+
+    The optimiser cannot therefore push any individual component
+    outside its approved governance boundary.
+
+    Strategy
+    --------
+    1. Normalise the optimiser proposal.
+    2. Clamp each component to its governance boundaries.
+    3. Redistribute any remaining difference across components
+       that still have available capacity.
+    4. Round to one decimal place.
+    5. Correct any rounding drift while respecting boundaries.
+    6. Fall back to defaults if a valid solution cannot be created.
+    """
+
+    # --------------------------------------------------------
+    # Validate input type
+    # --------------------------------------------------------
+
+    if not isinstance(
+        weights,
+        dict,
+    ):
+
+        print(
+            "Invalid optimiser weights. "
+            "Using defaults."
+        )
+
+        return DEFAULT_WEIGHTS.copy()
 
 
-# =====================================================
-# Save weights
-# =====================================================
+    # --------------------------------------------------------
+    # Normalise optimiser output
+    # --------------------------------------------------------
+
+    proposed = normalise_weights(
+        weights
+    )
+
+
+    # --------------------------------------------------------
+    # Initial governance clamp
+    # --------------------------------------------------------
+
+    governed = {}
+
+
+    for key in VALID_KEYS:
+
+        value = proposed.get(
+            key,
+            DEFAULT_WEIGHTS[key],
+        )
+
+        value = max(
+            MIN_WEIGHTS[key],
+            min(
+                value,
+                MAX_WEIGHTS[key],
+            ),
+        )
+
+        governed[key] = value
+
+
+    # --------------------------------------------------------
+    # Redistribute difference
+    # --------------------------------------------------------
+
+    def redistribute_difference(
+        values,
+        difference,
+    ):
+        """
+        Redistribute a weight difference without violating
+        governance boundaries.
+
+        Positive difference:
+            Increase components with available headroom.
+
+        Negative difference:
+            Decrease components with available room above minimum.
+        """
+
+        remaining = difference
+
+
+        # ----------------------------------------------------
+        # Positive difference
+        # ----------------------------------------------------
+
+        if remaining > 0:
+
+            while remaining > 0.00001:
+
+                candidates = [
+                    key
+                    for key in VALID_KEYS
+                    if values[key]
+                    <
+                    MAX_WEIGHTS[key]
+                    - 0.00001
+                ]
+
+
+                if not candidates:
+
+                    break
+
+
+                capacity = {
+                    key:
+                        MAX_WEIGHTS[key]
+                        -
+                        values[key]
+                    for key in candidates
+                }
+
+
+                total_capacity = sum(
+                    capacity.values()
+                )
+
+
+                if total_capacity <= 0:
+
+                    break
+
+
+                for key in candidates:
+
+                    share = (
+                        remaining
+                        *
+                        capacity[key]
+                        /
+                        total_capacity
+                    )
+
+                    addition = min(
+                        share,
+                        capacity[key],
+                    )
+
+                    values[key] += addition
+
+                new_total = sum(
+                    values.values()
+                )
+
+                remaining = (
+                    100.0
+                    -
+                    new_total
+                )
+
+
+        # ----------------------------------------------------
+        # Negative difference
+        # ----------------------------------------------------
+
+        elif remaining < 0:
+
+            while remaining < -0.00001:
+
+                candidates = [
+                    key
+                    for key in VALID_KEYS
+                    if values[key]
+                    >
+                    MIN_WEIGHTS[key]
+                    + 0.00001
+                ]
+
+
+                if not candidates:
+
+                    break
+
+
+                capacity = {
+                    key:
+                        values[key]
+                        -
+                        MIN_WEIGHTS[key]
+                    for key in candidates
+                }
+
+
+                total_capacity = sum(
+                    capacity.values()
+                )
+
+
+                if total_capacity <= 0:
+
+                    break
+
+
+                reduction_needed = (
+                    -remaining
+                )
+
+
+                for key in candidates:
+
+                    share = (
+                        reduction_needed
+                        *
+                        capacity[key]
+                        /
+                        total_capacity
+                    )
+
+                    reduction = min(
+                        share,
+                        capacity[key],
+                    )
+
+                    values[key] -= reduction
+
+
+                new_total = sum(
+                    values.values()
+                )
+
+                remaining = (
+                    100.0
+                    -
+                    new_total
+                )
+
+
+        return values
+
+
+    # --------------------------------------------------------
+    # First redistribution
+    # --------------------------------------------------------
+
+    difference = (
+        100.0
+        -
+        sum(
+            governed.values()
+        )
+    )
+
+
+    governed = redistribute_difference(
+        governed,
+        difference,
+    )
+
+
+    # --------------------------------------------------------
+    # Round to one decimal place
+    # --------------------------------------------------------
+
+    for key in governed:
+
+        governed[key] = round(
+            governed[key],
+            1,
+        )
+
+
+    # --------------------------------------------------------
+    # Correct rounding drift
+    # --------------------------------------------------------
+
+    total = round(
+        sum(
+            governed.values()
+        ),
+        1,
+    )
+
+
+    difference = round(
+        100.0
+        -
+        total,
+        1,
+    )
+
+
+    if difference != 0:
+
+        # ----------------------------------------------------
+        # Try to apply rounding correction to a component
+        # that can safely absorb it.
+        # ----------------------------------------------------
+
+        correction_applied = False
+
+
+        for key in (
+            "technical_score",
+            "quality_score",
+            "growth_score",
+        ):
+
+            proposed_value = round(
+                governed[key]
+                +
+                difference,
+                1,
+            )
+
+
+            if (
+                proposed_value
+                >= MIN_WEIGHTS[key]
+                and
+                proposed_value
+                <= MAX_WEIGHTS[key]
+            ):
+
+                governed[key] = (
+                    proposed_value
+                )
+
+                correction_applied = True
+
+                break
+
+
+        # ----------------------------------------------------
+        # If no single component can absorb the rounding
+        # difference, use the redistribution engine again.
+        # ----------------------------------------------------
+
+        if not correction_applied:
+
+            governed = redistribute_difference(
+                governed,
+                difference,
+            )
+
+
+            for key in governed:
+
+                governed[key] = round(
+                    governed[key],
+                    1,
+                )
+
+
+    # --------------------------------------------------------
+    # Final total correction
+    # --------------------------------------------------------
+
+    total = round(
+        sum(
+            governed.values()
+        ),
+        2,
+    )
+
+
+    if total != 100.0:
+
+        difference = round(
+            100.0
+            -
+            total,
+            2,
+        )
+
+
+        # Find a component with enough room.
+        for key in VALID_KEYS:
+
+            candidate = round(
+                governed[key]
+                +
+                difference,
+                1,
+            )
+
+
+            if (
+                candidate
+                >= MIN_WEIGHTS[key]
+                and
+                candidate
+                <= MAX_WEIGHTS[key]
+            ):
+
+                governed[key] = (
+                    candidate
+                )
+
+                break
+
+
+    # --------------------------------------------------------
+    # Final validation
+    # --------------------------------------------------------
+
+    if not validate_weights(
+        governed
+    ):
+
+        print(
+            "\nWARNING: Optimiser proposal could not "
+            "be converted into a valid governed weight set."
+        )
+
+        print(
+            "Proposed:",
+            proposed,
+        )
+
+        print(
+            "Governed:",
+            governed,
+        )
+
+        print(
+            "Minimums:",
+            MIN_WEIGHTS,
+        )
+
+        print(
+            "Maximums:",
+            MAX_WEIGHTS,
+        )
+
+        print(
+            "Total:",
+            sum(
+                governed.values()
+            ),
+        )
+
+        print(
+            "Falling back to DEFAULT_WEIGHTS."
+        )
+
+        return DEFAULT_WEIGHTS.copy()
+
+
+    return governed
+
+
+# ============================================================
+# LOAD CURRENT WEIGHTS
+# ============================================================
+
+def get_weights():
+    """
+    Load the current governed production weights.
+
+    If the persisted file is missing or invalid, return the
+    governed default weights.
+    """
+
+    try:
+
+        if os.path.exists(
+            WEIGHT_FILE
+        ):
+
+            with open(
+                WEIGHT_FILE,
+                "r",
+            ) as f:
+
+                weights = json.load(
+                    f
+                )
+
+
+            if validate_weights(
+                weights
+            ):
+
+                return weights
+
+
+    except Exception as e:
+
+        print(
+            "Unable to load scoring weights:",
+            e,
+        )
+
+
+    return DEFAULT_WEIGHTS.copy()
+
+
+# ============================================================
+# SAVE WEIGHTS
+# ============================================================
 
 def save_weights(weights):
+    """
+    Govern, validate and persist optimiser weights.
 
+    Invalid optimiser proposals are never written directly
+    to production.
+    """
 
     os.makedirs(
-
         "data",
-
-        exist_ok=True
-
+        exist_ok=True,
     )
 
 
@@ -316,271 +856,157 @@ def save_weights(weights):
         "\nRAW WEIGHTS RECEIVED:"
     )
 
-    print(weights)
-
-
-
-    # -------------------------------------------------
-    # Ensure only valid keys
-    # -------------------------------------------------
-
-    cleaned = {}
-
-
-    for key in VALID_KEYS:
-
-        cleaned[key] = float(
-
-            weights.get(
-
-                key,
-
-                DEFAULT_WEIGHTS[key]
-
-            )
-
-        )
-
-
-
-    # -------------------------------------------------
-    # Apply minimum constraints
-    # -------------------------------------------------
-
-    for key in cleaned:
-
-
-        if cleaned[key] < MIN_WEIGHTS[key]:
-
-            cleaned[key] = MIN_WEIGHTS[key]
-
-
-
-    # -------------------------------------------------
-    # Apply maximum constraints
-    # -------------------------------------------------
-
-    for key in cleaned:
-
-
-        if cleaned[key] > MAX_WEIGHTS[key]:
-
-            cleaned[key] = MAX_WEIGHTS[key]
-
-
-
-    # -------------------------------------------------
-    # Normalise to 100%
-    # -------------------------------------------------
-
-    total = sum(
-
-        cleaned.values()
-
+    print(
+        weights
     )
 
 
+    # --------------------------------------------------------
+    # Govern optimiser output
+    # --------------------------------------------------------
 
-    for key in cleaned:
-
-
-        cleaned[key] = round(
-
-            cleaned[key]
-
-            /
-
-            total
-
-            *
-
-            100,
-
-            1
-
-        )
-
+    cleaned = govern_weights(
+        weights
+    )
 
 
     print(
-
         "\nGOVERNED WEIGHTS:"
     )
 
-    print(cleaned)
+    print(
+        cleaned
+    )
 
 
-
-    # -------------------------------------------------
+    # --------------------------------------------------------
     # Final safety check
-    # -------------------------------------------------
+    # --------------------------------------------------------
 
-    if round(sum(cleaned.values()),1) != 100.0:
+    if not validate_weights(
+        cleaned
+    ):
+
+        print(
+            "\n!!! GOVERNED WEIGHTS FAILED VALIDATION !!!"
+        )
+
+        print(
+            "RAW WEIGHTS:",
+            weights,
+        )
+
+        print(
+            "GOVERNED WEIGHTS:",
+            cleaned,
+        )
+
+        print(
+            "MIN WEIGHTS:",
+            MIN_WEIGHTS,
+        )
+
+        print(
+            "MAX WEIGHTS:",
+            MAX_WEIGHTS,
+        )
+
+        print(
+            "TOTAL WEIGHT:",
+            sum(
+                float(value)
+                for value in cleaned.values()
+            ),
+        )
 
         raise ValueError(
-
-            "Weight normalisation failed"
-
+            "Governed weights failed validation"
         )
 
 
+    # --------------------------------------------------------
+    # Persist
+    # --------------------------------------------------------
 
     with open(
-
         WEIGHT_FILE,
-
-        "w"
-
+        "w",
     ) as f:
 
-
         json.dump(
-
             cleaned,
-
             f,
-
-            indent=4
-
+            indent=4,
         )
-
 
 
     print(
-
         "\nWEIGHTS SAVED:",
-        WEIGHT_FILE
-
+        WEIGHT_FILE,
     )
 
 
     return cleaned
 
-# =====================================================
-# Weight summary
-# =====================================================
+
+# ============================================================
+# WEIGHT SUMMARY
+# ============================================================
 
 def get_weight_summary():
-
+    """
+    Return the current production weights plus governance
+    boundaries for reporting/debugging.
+    """
 
     weights = get_weights()
 
 
-
     return {
 
+        "Technical Weight":
+            weights[
+                "technical_score"
+            ],
 
-        "Weights":
+        "Quality Weight":
+            weights[
+                "quality_score"
+            ],
 
-            weights,
+        "Growth Weight":
+            weights[
+                "growth_score"
+            ],
 
+        "Technical Minimum":
+            MIN_WEIGHTS[
+                "technical_score"
+            ],
 
-        "Total":
+        "Technical Maximum":
+            MAX_WEIGHTS[
+                "technical_score"
+            ],
 
-            round(
+        "Quality Minimum":
+            MIN_WEIGHTS[
+                "quality_score"
+            ],
 
-                sum(
+        "Quality Maximum":
+            MAX_WEIGHTS[
+                "quality_score"
+            ],
 
-                    weights.values()
+        "Growth Minimum":
+            MIN_WEIGHTS[
+                "growth_score"
+            ],
 
-                ),
-
-                1
-
-            )
-
-    }
-
-def govern_weights(weights):
-    """
-    Applies portfolio governance rules to optimiser output.
-
-    Ensures:
-    - all required components exist
-    - weights total 100%
-    - minimum diversification
-    - technical score cannot dominate
-    """
-
-    MIN_WEIGHTS = {
-
-        "technical_score": 40,
-        "quality_score": 15,
-        "growth_score": 10,
-        "investment_score": 15
-
-    }
-
-
-    MAX_WEIGHTS = {
-
-        "technical_score": 60,
-        "quality_score": 30,
-        "growth_score": 30,
-        "investment_score": 30
+        "Growth Maximum":
+            MAX_WEIGHTS[
+                "growth_score"
+            ],
 
     }
-
-
-    governed = {}
-
-
-    for component, value in weights.items():
-
-        value = float(value)
-
-        value = max(
-            value,
-            MIN_WEIGHTS.get(
-                component,
-                5
-            )
-        )
-
-        value = min(
-            value,
-            MAX_WEIGHTS.get(
-                component,
-                50
-            )
-        )
-
-        governed[component] = value
-
-
-
-    # ensure missing components exist
-
-    for component, value in MIN_WEIGHTS.items():
-
-        if component not in governed:
-
-            governed[component] = value
-
-
-
-    # normalise to 100
-
-    total = sum(
-        governed.values()
-    )
-
-
-    for component in governed:
-
-        governed[component] = round(
-
-            (
-                governed[component]
-                /
-                total
-            )
-            *
-            100,
-
-            1
-
-        )
-
-
-    return governed

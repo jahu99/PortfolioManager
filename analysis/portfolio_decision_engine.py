@@ -1,3 +1,4 @@
+
 """
 portfolio_decision_engine.py
 
@@ -13,7 +14,8 @@ STOCK:
     Momentum Signal.
 
 ETF:
-    Uses ETF Score and ETF Signal from etf_analysis.py.
+    Uses the authoritative ETF decision engine in
+    etf_decisions.py.
 
 CASH:
     No investment decision.
@@ -25,10 +27,21 @@ Existing positions are protected by default.
 The engine should HOLD unless there is a sufficiently strong
 reason to BUY, BUY MORE or REDUCE.
 
+ETF decisions are NOT recreated here.
+
+ETF decision logic is owned exclusively by:
+
+    analysis/etf_decisions.py
+
+This module only wires the authoritative ETF decision into the
+portfolio-level decision pipeline.
+
 Capital allocation is handled separately by capital_allocator.py.
 """
 
 import pandas as pd
+
+from analysis.etf_decisions import decide_etf
 
 
 # ============================================================
@@ -342,120 +355,6 @@ def evaluate_existing_holding(
         "reducing the existing position"
     )
 
-# ============================================================
-# ETF BUY APPROVAL
-# ============================================================
-
-def approve_etf_buy(
-    etf_score,
-    etf_signal,
-    allocation,
-    portfolio_risk
-):
-    """
-    Determine whether a NEW ETF position should be approved.
-
-    ETF decisions use ETF analysis only.
-
-    Requirements:
-
-        ETF Score >= 75
-        ETF Signal = BUY
-        Allocation < 15%
-        Portfolio risk != HIGH
-    """
-
-    etf_score = safe_float(
-        etf_score
-    )
-
-    etf_signal = normalise_text(
-        etf_signal
-    )
-
-    allocation = safe_float(
-        allocation
-    )
-
-    portfolio_risk = normalise_text(
-        portfolio_risk
-    )
-
-    if etf_score < 75:
-        return False
-
-    if etf_signal != "BUY":
-        return False
-
-    if allocation >= 15:
-        return False
-
-    if portfolio_risk == "HIGH":
-        return False
-
-    return True
-
-
-# ============================================================
-# EXISTING ETF DECISION
-# ============================================================
-
-def evaluate_existing_etf(
-    etf_score,
-    etf_signal,
-    etf_reasons=None,
-    etf_risks=None
-):
-    """
-    Evaluate an existing ETF.
-
-    Existing ETFs are protected from unnecessary turnover.
-
-    ETF REDUCE requires:
-
-        ETF Score < 50
-        AND
-        ETF Signal = SELL
-
-    Otherwise HOLD.
-    """
-
-    etf_score = safe_float(
-        etf_score
-    )
-
-    etf_signal = normalise_text(
-        etf_signal
-    )
-
-    if etf_score >= 75:
-
-        return (
-            "HOLD",
-            "ETF trend and momentum remain supportive"
-        )
-
-    if etf_score >= 50:
-
-        return (
-            "HOLD",
-            "ETF score is moderate; insufficient evidence "
-            "to reduce an existing ETF position"
-        )
-
-    if etf_signal == "SELL":
-
-        return (
-            "REDUCE",
-            "ETF score is below 50 and ETF signal is bearish"
-        )
-
-    return (
-        "HOLD",
-        "Weak ETF score but insufficient evidence to "
-        "justify reducing the existing position"
-    )
-
 
 # ============================================================
 # PORTFOLIO DECISION ENGINE
@@ -622,6 +521,11 @@ def generate_portfolio_decisions(
 
             # =================================================
             # ETF
+            #
+            # ETF decisioning is delegated entirely to
+            # analysis.etf_decisions.decide_etf().
+            #
+            # No ETF rules are duplicated here.
             # =================================================
 
             if asset_type == "ETF":
@@ -656,13 +560,41 @@ def generate_portfolio_decisions(
                     default=""
                 )
 
-                action, reason = (
-                    evaluate_existing_etf(
-                        etf_score=etf_score,
-                        etf_signal=etf_signal,
-                        etf_reasons=etf_reasons,
-                        etf_risks=etf_risks
+                quantity = safe_float(
+                    get_value(
+                        row,
+                        "Shares",
+                        "Quantity",
+                        default=0
                     )
+                )
+
+                market_value = safe_float(
+                    get_value(
+                        row,
+                        "Current Value",
+                        "Market Value",
+                        default=0
+                    )
+                )
+
+                etf_decision = decide_etf(
+                    etf_analysis={
+                        "ETF Score":
+                            etf_score,
+
+                        "ETF Signal":
+                            etf_signal,
+
+                        "ETF Reasons":
+                            etf_reasons,
+
+                        "ETF Risks":
+                            etf_risks
+                    },
+                    quantity=quantity,
+                    market_value=market_value,
+                    portfolio_weight=allocation
                 )
 
                 decisions.append({
@@ -671,19 +603,44 @@ def generate_portfolio_decisions(
                         ticker,
 
                     "Action":
-                        action,
+                        etf_decision.get(
+                            "ETF Decision",
+                            "HOLD"
+                        ),
 
                     "Reason":
-                        reason,
+                        etf_decision.get(
+                            "ETF Decision Reason",
+                            "ETF decision unavailable; "
+                            "HOLD retained."
+                        ),
 
                     "Investment Score":
                         None,
 
                     "ETF Score":
-                        etf_score,
+                        etf_decision.get(
+                            "ETF Score",
+                            etf_score
+                        ),
 
                     "ETF Signal":
-                        etf_signal,
+                        etf_decision.get(
+                            "ETF Signal",
+                            etf_signal
+                        ),
+
+                    "ETF Decision Confidence":
+                        etf_decision.get(
+                            "ETF Decision Confidence",
+                            "LOW"
+                        ),
+
+                    "ETF Reduction %":
+                        etf_decision.get(
+                            "ETF Reduction %",
+                            0
+                        ),
 
                     "Quality Score":
                         None,
@@ -749,6 +706,12 @@ def generate_portfolio_decisions(
 
                     "ETF Signal":
                         "N/A",
+
+                    "ETF Decision Confidence":
+                        "N/A",
+
+                    "ETF Reduction %":
+                        0,
 
                     "Quality Score":
                         None,
@@ -915,6 +878,12 @@ def generate_portfolio_decisions(
                 "ETF Signal":
                     "N/A",
 
+                "ETF Decision Confidence":
+                    "N/A",
+
+                "ETF Reduction %":
+                    0,
+
                 "Quality Score":
                     quality_score,
 
@@ -948,6 +917,14 @@ def generate_portfolio_decisions(
 
     # ========================================================
     # NEW OPPORTUNITIES
+    #
+    # ETF opportunities are deliberately NOT processed here.
+    #
+    # The current ETF requirement is to assess existing ETF
+    # holdings only: BUY MORE / HOLD / REDUCE / SELL.
+    #
+    # Stock opportunities continue to use the existing stock
+    # BUY NEW logic.
     # ========================================================
 
     if not opportunities.empty:
@@ -976,6 +953,17 @@ def generate_portfolio_decisions(
                 )
             )
 
+            # =================================================
+            # ETF OPPORTUNITIES
+            #
+            # Do not create BUY NEW ETF decisions here.
+            # ETF decisioning is currently limited to existing
+            # ETF holdings.
+            # =================================================
+
+            if asset_type == "ETF":
+                continue
+
             allocation = safe_float(
                 get_value(
                     row,
@@ -993,131 +981,6 @@ def generate_portfolio_decisions(
                     default="NORMAL"
                 )
             )
-
-            # =================================================
-            # NEW ETF
-            # =================================================
-
-            if asset_type == "ETF":
-
-                etf_score = safe_float(
-                    get_value(
-                        row,
-                        "ETF Score",
-                        "etf_score",
-                        default=0
-                    )
-                )
-
-                etf_signal = normalise_text(
-                    get_value(
-                        row,
-                        "ETF Signal",
-                        "etf_signal",
-                        default="UNKNOWN"
-                    )
-                )
-
-                approved = approve_etf_buy(
-                    etf_score=etf_score,
-                    etf_signal=etf_signal,
-                    allocation=allocation,
-                    portfolio_risk=portfolio_risk
-                )
-
-                if approved:
-
-                    action = "BUY NEW"
-
-                    reason = (
-                        "ETF has a strong technical score "
-                        "and bullish signal"
-                    )
-
-                elif etf_score >= 50:
-
-                    action = "WATCH"
-
-                    reason = (
-                        "ETF is technically acceptable but "
-                        "does not currently meet BUY criteria"
-                    )
-
-                else:
-
-                    action = "HOLD"
-
-                    reason = (
-                        "ETF does not currently meet the "
-                        "required investment threshold"
-                    )
-
-                decisions.append({
-
-                    "Ticker":
-                        ticker,
-
-                    "Action":
-                        action,
-
-                    "Reason":
-                        reason,
-
-                    "Investment Score":
-                        None,
-
-                    "ETF Score":
-                        etf_score,
-
-                    "ETF Signal":
-                        etf_signal,
-
-                    "Quality Score":
-                        None,
-
-                    "Growth Score":
-                        None,
-
-                    "Signal":
-                        "N/A",
-
-                    "AI Conviction":
-                        "N/A",
-
-                    "Allocation %":
-                        allocation,
-
-                    "Sector":
-                        "ETF",
-
-                    "Sector Allocation %":
-                        0,
-
-                    "Portfolio Risk":
-                        portfolio_risk,
-
-                    "Existing Holding":
-                        "No",
-
-                    "Asset Type":
-                        "ETF",
-
-                    "ETF Reasons":
-                        get_value(
-                            row,
-                            "ETF Reasons",
-                            default=""
-                        ),
-
-                    "ETF Risks":
-                        get_value(
-                            row,
-                            "ETF Risks",
-                            default=""
-                        )
-                })
-
-                continue
 
             # =================================================
             # NEW STOCK
@@ -1246,6 +1109,12 @@ def generate_portfolio_decisions(
                 "ETF Signal":
                     "N/A",
 
+                "ETF Decision Confidence":
+                    "N/A",
+
+                "ETF Reduction %":
+                    0,
+
                 "Quality Score":
                     quality_score,
 
@@ -1309,10 +1178,10 @@ def generate_portfolio_decisions(
 
             "REDUCE": 1,
             "SELL": 1,
-            "BUY NEW": 2,
             "BUY MORE": 2,
-            "WATCH": 3,
-            "HOLD": 4
+            "BUY NEW": 3,
+            "WATCH": 4,
+            "HOLD": 5
         }
 
         result["_Decision Priority"] = (
@@ -1348,10 +1217,10 @@ def generate_portfolio_decisions(
 
         "REDUCE": 1,
         "SELL": 1,
-        "BUY NEW": 2,
         "BUY MORE": 2,
-        "WATCH": 3,
-        "HOLD": 4
+        "BUY NEW": 3,
+        "WATCH": 4,
+        "HOLD": 5
     }
 
     if not result.empty:
@@ -1359,7 +1228,7 @@ def generate_portfolio_decisions(
         result["_Priority"] = (
             result["Action"]
             .map(action_order)
-            .fillna(5)
+            .fillna(6)
         )
 
         result = (
@@ -1381,3 +1250,4 @@ def generate_portfolio_decisions(
         )
 
     return result
+

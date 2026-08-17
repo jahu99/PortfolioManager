@@ -103,17 +103,7 @@ MIN_BUY_SCORE = 75
 # Minimum conviction weight for a selected candidate.
 MIN_CONVICTION_WEIGHT = 1.0
 
-# Known ETFs.
-#
-# These are valid investment assets but are not automatically
-# reduced by the allocator. ETF reductions require an explicit
-# upstream decision.
-KNOWN_ETFS = {
-    "IWDA",
-    "VUAA",
-    "SEC0",
-    "AEMD",
-}
+
 
 
 # ============================================================
@@ -350,25 +340,15 @@ def load_actual_holdings():
 # ASSET TYPE
 # ============================================================
 
-def is_etf(ticker, row=None):
+
+
+
+def get_asset_type(ticker, row=None):
     """
-    Determine whether an asset is an ETF.
+    Return the asset classification supplied by upstream analysis.
 
-    Explicit Asset Type information takes precedence.
-
-    Known ETF tickers are also recognised.
-
-    This function is intentionally independent of the stock
-    scoring model.
+    Defaults to STOCK if no valid classification is available.
     """
-
-    ticker = clean_ticker(
-        ticker
-    )
-
-    # --------------------------------------------------------
-    # Explicit row-level classification takes precedence.
-    # --------------------------------------------------------
 
     if row is not None:
 
@@ -384,42 +364,14 @@ def is_etf(ticker, row=None):
 
         if asset_type in {
             "ETF",
-            "EXCHANGE TRADED FUND",
-            "EXCHANGE-TRADED FUND",
-        }:
-
-            return True
-
-        if asset_type in {
             "STOCK",
-            "EQUITY",
         }:
+            return asset_type
 
-            return False
-
-    # --------------------------------------------------------
-    # Known ETF fallback.
-    # --------------------------------------------------------
-
-    if ticker in KNOWN_ETFS:
-        return True
-
-    return False
-
-
-def get_asset_type(ticker, row=None):
-    """
-    Return STOCK or ETF.
-    """
-
-    if is_etf(
-        ticker,
-        row
-    ):
-        return "ETF"
+        if asset_type == "EQUITY":
+            return "STOCK"
 
     return "STOCK"
-
 
 # ============================================================
 # SCORE HELPERS
@@ -774,11 +726,6 @@ def generate_capital_allocation(
 
         if quantity <= 0:
             continue
-
-        # ----------------------------------------------------
-        # ETF reductions are allowed ONLY when explicitly
-        # instructed by the upstream decision engine.
-        # ----------------------------------------------------
 
         
         release_amount = round(
@@ -1619,6 +1566,48 @@ def generate_capital_allocation(
                 )
             )
 
+            if asset_type == "ETF":
+           
+
+                allocation_pct = safe_float(
+                    row.get(
+                        "Allocation %",
+                        row.get(
+                            "Allocation",
+                            0
+                        )
+                    )
+                )
+
+                if allocation_pct > 10:
+
+                    reason = (
+                        f"ETF Score {allocation_score:.0f}/100 is very strong, "
+                        f"but the existing ETF allocation is already "
+                        f"{allocation_pct:.1f}% of the portfolio. "
+                        f"HOLD to avoid increasing concentration."
+                    )
+
+                elif allocation_pct >= 2:
+
+                    reason = (
+                        f"ETF Score {allocation_score:.0f}/100 is strong, "
+                        f"but the existing ETF position is already meaningful. "
+                        f"HOLD rather than increase the allocation unnecessarily."
+                    )
+
+                else:
+
+                    reason = (
+                        f"ETF Score {allocation_score:.0f}/100 is strong, "
+                        f"but the current position does not yet justify a "
+                        f"portfolio change."
+                    )
+
+            else:
+
+                reason = "Maintain existing position"
+
             allocations.append(
                 {
 
@@ -1689,7 +1678,7 @@ def generate_capital_allocation(
                         "",
 
                     "Reason":
-                        "Maintain existing position",
+                        reason,
 
                     "Reduction Rank":
                         0,

@@ -1,5 +1,91 @@
+# analysis/investment_score.py
+"""
+Calculates the overall Investment Score for a stock.
+
+Architecture:
+
+    Technical Score ─┐
+    Quality Score ───┼──> Weighted Composite
+    Growth Score ────┘
+                          │
+                          ▼
+                   Investment Score
+                          │
+                          ▼
+                     Signal Engine
+                          │
+                          ▼
+                 Portfolio Decision
+
+
+IMPORTANT ARCHITECTURE:
+
+Investment Score is the OUTPUT of the scoring model.
+
+It is NOT an input component and therefore must never have
+its own strategic weighting.
+
+The only strategic weights are:
+
+    - technical_score
+    - quality_score
+    - growth_score
+
+Weights are loaded from analysis.weight_controller.
+
+The weight optimiser may change these weights over time
+based on historical recommendation outcomes, subject to
+governance constraints.
+
+
+CURRENT DESIGN:
+
+Investment Score is deliberately deterministic.
+
+The calculation is:
+
+    Investment Score =
+        Technical Score × Technical Weight
+      + Quality Score   × Quality Weight
+      + Growth Score    × Growth Weight
+
+
+FUTURE AI AUGMENTATION:
+
+Future versions may introduce AI-derived assessments such as:
+
+    - recommendation confidence
+    - historical recommendation reliability
+    - market regime assessment
+    - company-specific risk assessment
+    - qualitative catalysts and risks
+    - valuation/context assessment
+
+These should preferably be introduced in the downstream
+Portfolio Decision Engine rather than allowing AI to
+arbitrarily alter the core Investment Score.
+
+This keeps the Investment Score:
+
+    - explainable
+    - reproducible
+    - statistically calibratable
+    - independent of portfolio context
+
+The Portfolio Decision Engine can subsequently combine
+Investment Score, Signal, AI assessment, portfolio exposure,
+risk, concentration, sector allocation and available capital
+to determine:
+
+    BUY
+    BUY MORE
+    HOLD
+    REDUCE
+    SELL
+"""
+
+
 from analysis.weight_controller import get_weights
-from analysis.adaptive_learning import get_adaptive_adjustments
 
 
 # =====================================================
@@ -7,6 +93,11 @@ from analysis.adaptive_learning import get_adaptive_adjustments
 # =====================================================
 
 def safe_float(value):
+    """
+    Safely convert a value to float.
+
+    Invalid or missing values return 0.0.
+    """
 
     try:
 
@@ -17,12 +108,14 @@ def safe_float(value):
         return 0.0
 
 
-
 def clamp(
     value,
-    minimum=0,
-    maximum=100
+    minimum=0.0,
+    maximum=100.0
 ):
+    """
+    Constrain a numeric value to a defined range.
+    """
 
     return max(
         min(
@@ -33,298 +126,233 @@ def clamp(
     )
 
 
-
 # =====================================================
 # Investment Score Engine
 # =====================================================
 
 def calculate_investment_score(
-
     technical_score,
-
     quality_score,
-
-    growth_score,
-
-    confidence_score=0,
-
-    signal="",
-
-    score_bucket="",
-
-    sector=""
-
-):
-
-    """
-    Calculates final investment conviction score.
-
-    Inputs:
-
-    technical_score
-        Technical market strength
-
-    quality_score
-        Business quality
-
     growth_score
-        Growth characteristics
+):
+    """
+    Calculate the overall Investment Score.
 
-    confidence_score
-        AI confidence 0-100
+    Parameters
+    ----------
+    technical_score : float
+        Technical market strength, 0-100.
 
-    signal
-        BUY / WATCH / SELL
+    quality_score : float
+        Underlying business quality, 0-100.
 
-    score_bucket
-        Low / Medium / Good / High
+    growth_score : float
+        Growth characteristics, 0-100.
 
-    sector
-        Sector classification
+    Returns
+    -------
+    float
+        Investment Score constrained to 0-100.
 
 
-    Returns:
+    Calculation
+    -----------
 
-    Final Investment Score 0-100
+        Investment Score =
+            Technical × Technical Weight
+          + Quality   × Quality Weight
+          + Growth    × Growth Weight
 
+    Investment Score is therefore a composite output.
+
+    It has no independent weighting of its own.
     """
 
-
-
     # -------------------------------------------------
-    # Normalise inputs
+    # Normalise component inputs
     # -------------------------------------------------
 
-    technical_score = safe_float(
-        technical_score
+    technical_score = clamp(
+        safe_float(
+            technical_score
+        )
+    )
+
+    quality_score = clamp(
+        safe_float(
+            quality_score
+        )
+    )
+
+    growth_score = clamp(
+        safe_float(
+            growth_score
+        )
     )
 
 
-    quality_score = safe_float(
-        quality_score
-    )
-
-
-    growth_score = safe_float(
-        growth_score
-    )
-
-
-    confidence_score = safe_float(
-        confidence_score
-    )
-
-
-
     # -------------------------------------------------
-    # Load adaptive weights
+    # Load current governed production weights
     # -------------------------------------------------
+    #
+    # The weight controller is responsible for ensuring
+    # that the production weights are valid and governed.
+    #
+    # The optimiser may change these values over time.
+    #
 
     weights = get_weights()
 
 
-
-    technical_weight = weights.get(
-
-        "technical_score",
-
-        50
-
+    technical_weight = safe_float(
+        weights.get(
+            "technical_score",
+            50.0
+        )
     )
 
-
-    quality_weight = weights.get(
-
-        "quality_score",
-
-        30
-
+    quality_weight = safe_float(
+        weights.get(
+            "quality_score",
+            20.0
+        )
     )
 
-
-    growth_weight = weights.get(
-
-        "growth_score",
-
-        20
-
+    growth_weight = safe_float(
+        weights.get(
+            "growth_score",
+            30.0
+        )
     )
-
 
 
     # -------------------------------------------------
-    # Base investment score
+    # Safety normalisation
     # -------------------------------------------------
+    #
+    # Normally the weight controller guarantees that
+    # these weights total 100%.
+    #
+    # Normalising here protects the scoring engine from
+    # a malformed configuration.
+    #
 
-    score = (
+    total_weight = (
+        technical_weight
+        +
+        quality_weight
+        +
+        growth_weight
+    )
+
+
+    if total_weight <= 0:
+
+        technical_weight = 50.0
+        quality_weight = 20.0
+        growth_weight = 30.0
+
+        total_weight = 100.0
+
+
+    technical_weight /= total_weight
+
+    quality_weight /= total_weight
+
+    growth_weight /= total_weight
+
+
+    # -------------------------------------------------
+    # Calculate base Investment Score
+    # -------------------------------------------------
+    #
+    # This is intentionally the complete production
+    # Investment Score calculation.
+    #
+    # Investment Score is NOT used as an input.
+    #
+
+    investment_score = (
 
         technical_score
         *
         technical_weight
-        /
-        100
-
 
         +
 
         quality_score
         *
         quality_weight
-        /
-        100
-
 
         +
 
         growth_score
         *
         growth_weight
-        /
-        100
 
     )
 
 
-
     # -------------------------------------------------
-    # Confidence adjustment
-    # -------------------------------------------------
-
-    if confidence_score > 0:
-
-
-        confidence_multiplier = (
-
-            0.85
-
-            +
-
-            (
-                confidence_score
-                /
-                100
-                *
-                0.15
-            )
-
-        )
-
-
-        score *= confidence_multiplier
-
-
-
-    # -------------------------------------------------
-    # Adaptive learning adjustment
+    # Final safety constraint
     # -------------------------------------------------
 
-    try:
-
-
-        adjustments = get_adaptive_adjustments()
-
-
-
-        learning_adjustment = adjustments.get(
-
-            (
-
-                signal,
-
-                score_bucket,
-
-                sector
-
-            ),
-
-            0
-
-        )
-
-
-        score += learning_adjustment
-
-
-
-    except Exception as e:
-
-
-        print(
-
-            "Adaptive learning adjustment skipped:",
-
-            e
-
-        )
-
-
-
-    # -------------------------------------------------
-    # Final score
-    # -------------------------------------------------
-
-    score = clamp(
-
-        score
-
+    investment_score = clamp(
+        investment_score
     )
 
 
     return round(
-
-        score,
-
+        investment_score,
         1
-
     )
-
 
 
 # =====================================================
-# Diagnostic Test
+# Future AI augmentation
 # =====================================================
-
-def test_investment_score():
-
-
-    score = calculate_investment_score(
-
-        technical_score=85,
-
-        quality_score=70,
-
-        growth_score=80,
-
-        confidence_score=90,
-
-        signal="BUY",
-
-        score_bucket="High",
-
-        sector="Technology"
-
-    )
-
-
-    print(
-
-        "Investment Score:",
-
-        score
-
-    )
-
-
-    print(
-
-        "Weights:",
-
-        get_weights()
-
-    )
-
-
-
-if __name__ == "__main__":
-
-    test_investment_score()
+#
+# DO NOT add AI adjustments directly into the calculation
+# above without establishing explicit governance.
+#
+# Potential future inputs include:
+#
+#     - AI confidence
+#     - recommendation reliability
+#     - market regime
+#     - qualitative company assessment
+#     - company-specific risk
+#     - catalysts
+#     - valuation context
+#
+# The preferred architecture is for these factors to feed
+# the Portfolio Decision Engine rather than silently changing
+# the underlying Investment Score.
+#
+# Example future architecture:
+#
+#     Investment Score
+#            +
+#     Signal
+#            +
+#     AI Assessment
+#            +
+#     Portfolio Risk
+#            +
+#     Position Size
+#            +
+#     Sector Exposure
+#            +
+#     Available Capital
+#            │
+#            ▼
+#     Portfolio Decision
+#
+#              BUY
+#              BUY MORE
+#              HOLD
+#              REDUCE
+#              SELL
+#
+# This keeps the core score stable while allowing the
+# decision layer to become progressively more intelligent.

@@ -1,0 +1,37 @@
+============================================================
+STOCK MOMENTUM AGENT — VULTURE REDUNDANCY AUDIT
+============================================================
+
+Git baseline:
+ M .DS_Store
+ M analysis/__pycache__/ai_engine.cpython-314.pyc
+ M analysis/__pycache__/decision_engine.cpython-314.pyc
+ M analysis/__pycache__/outcome_tracker.cpython-314.pyc
+ M analysis/__pycache__/portfolio_ai.cpython-314.pyc
+ M analysis/__pycache__/portfolio_analysis.cpython-314.pyc
+ M analysis/__pycache__/portfolio_decision_engine.cpython-314.pyc
+ M analysis/__pycache__/portfolio_manager.cpython-314.pyc
+ M analysis/__pycache__/recommendation_intelligence.cpython-314.pyc
+ M analysis/__pycache__/recommendations.cpython-314.pyc
+ M analysis/__pycache__/sector_analysis.cpython-314.pyc
+ M data/__pycache__/database.cpython-314.pyc
+ M data/__pycache__/market_data.cpython-314.pyc
+ M data/optimised_weights.json
+ M data/portfolio_manager.db
+ M reports/__pycache__/excel_report.cpython-314.pyc
+?? architecture/
+?? run_stock_agent_vulture_audit.sh
+?? vulture_audit.txt
+66e1023 Cache Llama AI analyst responses
+
+Running Vulture...
+usage: vulture [options] [PATH ...]
+vulture: error: unrecognized arguments: --exclude-dir=.venv --exclude-dir=.git --exclude-dir=__pycache__
+
+Vulture output:
+------------------------------------------------------------
+------------------------------------------------------------
+
+No files have been removed or modified by this audit.
+
+Now inspect the findings alongside the architecture document.

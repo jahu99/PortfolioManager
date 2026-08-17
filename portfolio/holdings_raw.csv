@@ -1,17 +1,17 @@
 Ticker,Name,Quantity,Market Value
 NVDA,NVIDIA Corp,0.491323,72.31
-IWDA,iShares Core MSCI World UCITS ETF,0.428629,45.93
-AEMD,Aethlon Medical Inc,0.629127,38.49
+IWDA.L,iShares Core MSCI World UCITS ETF,0.428629,45.93
+AEMD.L,Aethlon Medical Inc,0.629127,38.49
 MSFT,Microsoft Corp,0.139998,36.98
 GOOGL,Alphabet Inc,0.108624,29.26
 IONQ,IonQ Inc,0.957193,25.87
 VRDN,Viridian Therapeutics Inc,1.692801,23.53
-VUAA,Vanguard S&P 500 UCITS ETF,0.210181,22.69
+VUAA.L,Vanguard S&P 500 UCITS ETF,0.210181,22.69
 APLD,Applied Digital Corp,1.084604,21.85
 AAPL,Apple Inc,0.097,17.57
 PLTR,Palantir Technologies Inc,0.135272,12.69
 AMZN,Amazon Inc,0.069491,10.73
-SEC0,iShares MSCI Global Semiconductors UCITS ETF,0.711762,9.72
+SEC0.DE,iShares MSCI Global Semiconductors UCITS ETF,0.711762,9.72
 STX,Seagate Technology,0.013725,8.42
 MELI,MercadoLibre Inc,0.005557,7.83
 GE,General Electric,0.02,7.64
