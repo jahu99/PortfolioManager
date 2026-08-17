@@ -189,6 +189,25 @@ def evaluate_existing_holding(
     growth_score,
     signal
 ):
+    """
+    Evaluate an existing stock holding.
+
+    HOLD is the default for moderate or ambiguous situations.
+
+    REDUCE is triggered when there is sufficiently strong evidence
+    that the existing position no longer deserves its current
+    allocation.
+
+    The decision deliberately uses multiple levels of evidence:
+
+        1. Very low Investment Score + bearish signal
+        2. Low Investment Score + materially weak fundamentals
+           + bearish signal
+        3. Extremely weak Investment Score regardless of signal
+
+    This prevents unnecessary turnover while ensuring that clearly
+    deteriorating holdings are not incorrectly retained as HOLD.
+    """
 
     investment_score = safe_float(
         investment_score
@@ -206,48 +225,90 @@ def evaluate_existing_holding(
         signal
     )
 
+    # ========================================================
+    # STRONG HOLD
+    # ========================================================
+
     if investment_score >= 85:
 
         return (
             "HOLD",
-            "High quality holding meeting portfolio criteria"
+            "High investment score supports retaining the existing position"
         )
+
+    # ========================================================
+    # GOOD / MODERATE HOLD
+    # ========================================================
 
     if investment_score >= 70:
 
         return (
             "HOLD",
-            "Moderate investment score but no sufficiently "
+            "Moderate-to-strong investment score with no sufficiently "
             "strong reason to change the existing position"
         )
 
-    if investment_score >= 45:
-
-        return (
-            "HOLD",
-            "Below buy threshold but not weak enough to "
-            "justify a reduction"
-        )
-
-    weak_quality = (
-        quality_score < 50
-    )
-
-    weak_growth = (
-        growth_score < 40
-    )
-
-    bearish_signal = signal in (
-        "SELL",
-        "STRONG SELL"
-    )
+    # ========================================================
+    # CLEAR REDUCTION
+    #
+    # Very low score + bearish signal is sufficient evidence.
+    #
+    # This is the key rule that protects against retaining clearly
+    # deteriorating positions such as CA.PA.
+    # ========================================================
 
     if (
-        weak_quality
+        investment_score < 30
         and
-        weak_growth
+        signal in {
+            "SELL",
+            "STRONG SELL",
+        }
+    ):
+
+        return (
+            "REDUCE",
+            "Very low investment score combined with a bearish "
+            "signal indicates that the existing position should "
+            "be reduced"
+        )
+
+    # ========================================================
+    # EXTREMELY WEAK FUNDAMENTALS
+    #
+    # Even if the technical signal has not yet become SELL,
+    # exceptionally weak fundamentals justify reducing exposure.
+    # ========================================================
+
+    if (
+        investment_score < 30
         and
-        bearish_signal
+        quality_score < 30
+        and
+        growth_score < 30
+    ):
+
+        return (
+            "REDUCE",
+            "Very low investment score combined with materially "
+            "weak quality and growth"
+        )
+
+    # ========================================================
+    # LOW SCORE + WEAK FUNDAMENTALS + BEARISH SIGNAL
+    # ========================================================
+
+    if (
+        investment_score < 45
+        and
+        quality_score < 50
+        and
+        growth_score < 40
+        and
+        signal in {
+            "SELL",
+            "STRONG SELL",
+        }
     ):
 
         return (
@@ -256,12 +317,30 @@ def evaluate_existing_holding(
             "weak growth and bearish signal"
         )
 
+    # ========================================================
+    # MODERATE SCORE
+    #
+    # Below the BUY threshold does NOT automatically mean sell.
+    # This preserves the portfolio's HOLD-by-default behaviour.
+    # ========================================================
+
+    if investment_score >= 45:
+
+        return (
+            "HOLD",
+            "Below buy threshold but not weak enough to justify "
+            "a reduction in the existing position"
+        )
+
+    # ========================================================
+    # LOW SCORE BUT INSUFFICIENT EVIDENCE
+    # ========================================================
+
     return (
         "HOLD",
-        "Low investment score but insufficient evidence to "
-        "justify reducing an existing holding"
+        "Low investment score but insufficient evidence to justify "
+        "reducing the existing position"
     )
-
 
 # ============================================================
 # ETF BUY APPROVAL

@@ -12,7 +12,6 @@ from data.database import (
 
 
 from data.database_queries import (
-    get_recommendation_history,
     get_performance_summary,
     get_signal_performance,
     get_horizon_performance,
@@ -101,10 +100,6 @@ from analysis.final_portfolio_decision import (
 
 )
 
-from analysis.portfolio_manager_rules import (
-    apply_portfolio_manager_rules
-)
-
 
 
 
@@ -131,6 +126,10 @@ from analysis.capital_allocator import (
 from analysis.stock_analyser import analyse_stock
 
 from analysis.weight_optimizer import run_weight_optimizer
+
+from analysis.investment_score import (
+    calculate_investment_score
+)
 
 
 def main():
@@ -483,30 +482,32 @@ def main():
 
 
 
-            raw_investment_score = (
+            # ---------------------------------
+            # Investment Score
+            # ---------------------------------
+            #
+            # Investment Score is calculated by the
+            # central investment_score module.
+            #
+            # Keeping this calculation in one place
+            # prevents different parts of the application
+            # from producing different Investment Scores.
+            #
+            # The scoring engine can be augmented in the
+            # future with AI-derived assessment or
+            # statistically calibrated inputs, but AI should
+            # not directly override the core score without
+            # explicit governance.
+            # ---------------------------------
 
-                (technical_score * TECHNICAL_WEIGHT)
-
-                +
-
-                (quality_score * QUALITY_WEIGHT)
-
-                +
-
-                (growth_score * GROWTH_WEIGHT)
-
+            investment_score = calculate_investment_score(
+                technical_score,
+                quality_score,
+                growth_score
             )
-
 
             investment_score = round(
-                raw_investment_score * 1.15
-            )
-
-
-            # cap score
-            investment_score = min(
-                investment_score,
-                100
+                float(investment_score)
             )
 
 

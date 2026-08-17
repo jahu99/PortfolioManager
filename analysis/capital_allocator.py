@@ -780,6 +780,7 @@ def generate_capital_allocation(
         # instructed by the upstream decision engine.
         # ----------------------------------------------------
 
+        
         release_amount = round(
             market_value
             *
@@ -787,9 +788,34 @@ def generate_capital_allocation(
             2
         )
 
-        # Ignore economically insignificant reductions.
+        # ----------------------------------------------------
+        # If a reduction is economically insignificant,
+        # sell the entire position instead.
+        #
+        # A small residual position has little portfolio value
+        # and creates unnecessary complexity.
+        # ----------------------------------------------------
+
         if release_amount < MIN_REDUCTION_VALUE:
-            continue
+
+            reduction_percentage = 1.0
+
+            release_amount = round(
+                market_value,
+                2
+            )
+
+            reduction_action = "SELL"
+
+        else:
+
+            reduction_action = (
+                "SELL"
+                if reduction_percentage >= 1
+                else
+                f"REDUCE "
+                f"{int(reduction_percentage * 100)}%"
+            )
 
         price = get_price(
             row

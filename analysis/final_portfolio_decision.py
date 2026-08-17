@@ -90,12 +90,36 @@ def safe_dataframe(data):
     if isinstance(data, pd.DataFrame):
         return data.copy()
 
+    # Capital Allocation Engine returns:
+    #
+    # {
+    #     "Capital Allocation": allocation_df,
+    #     "Capital Summary": summary
+    # }
+    #
+    # The final decision engine needs the allocation
+    # dataframe, not the summary.
+
+    if isinstance(data, dict):
+
+        capital_allocation = data.get(
+            "Capital Allocation"
+        )
+
+        if isinstance(
+            capital_allocation,
+            pd.DataFrame
+        ):
+
+            return capital_allocation.copy()
+
     try:
+
         return pd.DataFrame(data)
 
     except Exception:
-        return pd.DataFrame()
 
+        return pd.DataFrame()
 
 def normalise_tickers(df):
     """Normalise ticker symbols to uppercase."""
