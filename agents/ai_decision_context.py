@@ -1,0 +1,2655 @@
+"""
+AI Decision Context Builder
+
+Purpose
+-------
+Build the structured, portfolio-aware context supplied to the governed
+AI Decision Layer.
+
+Architecture
+------------
+
+    Existing analytical engines
+            |
+            v
+    Rules-based decisions
+            |
+            v
+    Recommendation Intelligence
+            |
+            v
+    AI Decision Context
+            |
+            v
+    AI Decision Scoring
+            |
+            v
+    AI Decision Layer
+            |
+            v
+    AI Decision Explanation
+            |
+            v
+    Portfolio / Capital Allocation
+
+This module is a DATA CONTRACT.
+
+It does not:
+
+    - calculate investment scores
+    - recalculate technical indicators
+    - make BUY / HOLD / REDUCE / SELL decisions
+    - allocate capital
+    - change scoring weights
+    - execute trades
+
+It collects and normalises evidence produced by the existing engines
+so that the AI decision layer can assess the proposed decision.
+
+Important design principles
+---------------------------
+1. Existing analytical engines remain authoritative.
+2. Existing rules-based decisions remain explicit inputs.
+3. Historical recommendation intelligence remains explicit evidence.
+4. Stocks and ETFs remain separate asset classes.
+5. Existing holdings are explicitly identified.
+6. Portfolio concentration is exposed as evidence.
+7. Available capital and released capital are exposed as evidence.
+8. Missing evidence is represented as missing evidence.
+9. No evidence is invented.
+10. The AI layer is responsible for the final governed decision.
+11. HOLD remains the default downstream decision.
+12. The context must be serialisable and independent of pandas objects.
+13. Recommendation evidence snapshots are preferred when available.
+14. Historical/legacy candidates fall back to their existing fields.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import math
+
+import pandas as pd
+
+from data.database import (
+    get_recommendation_evidence,
+)
+
+
+# ============================================================
+# Constants
+# ============================================================
+
+VALID_ASSET_TYPES = {
+    "STOCK",
+    "ETF",
+}
+
+VALID_ACTIONS = {
+    "BUY NEW",
+    "BUY MORE",
+    "HOLD",
+    "REDUCE",
+    "REDUCE 25%",
+    "REDUCE 50%",
+    "REDUCE 75%",
+    "REDUCE 100%",
+    "SELL",
+    "REVIEW",
+}
+
+
+# ============================================================
+# Generic helpers
+# ============================================================
+
+def safe_float(
+    value: Any,
+    default: float = 0.0,
+) -> float:
+    """
+    Safely convert a scalar value to float.
+
+    Prevents pandas Series/DataFrames, lists and invalid values from
+    leaking into the AI decision context.
+    """
+
+    try:
+
+        if value is None:
+            return default
+
+        if isinstance(
+            value,
+            bool,
+        ):
+
+            return float(value)
+
+        if isinstance(
+            value,
+            (list, tuple, set, dict),
+        ):
+
+            return default
+
+        if isinstance(
+            value,
+            pd.Series,
+        ):
+
+            if value.empty:
+                return default
+
+            value = value.iloc[0]
+
+        if isinstance(
+            value,
+            pd.DataFrame,
+        ):
+
+            if value.empty:
+                return default
+
+            value = value.iloc[0, 0]
+
+        value = float(value)
+
+        if not math.isfinite(value):
+            return default
+
+        return value
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        return default
+
+
+def clean_text(
+    value: Any,
+    default: str = "",
+) -> str:
+    """
+    Safely convert a value to clean text.
+    """
+
+    if value is None:
+        return default
+
+    try:
+
+        if pd.isna(value):
+            return default
+
+    except Exception:
+        pass
+
+    try:
+
+        value = str(
+            value
+        ).strip()
+
+    except Exception:
+
+        return default
+
+    if not value:
+        return default
+
+    return value
+
+
+def normalise_text(
+    value: Any,
+    default: str = "",
+) -> str:
+    """
+    Normalise text while preserving its human-readable form.
+    """
+
+    return clean_text(
+        value,
+        default,
+    )
+
+
+def clean_ticker(
+    value: Any,
+) -> str:
+    """
+    Normalise ticker symbols.
+    """
+
+    value = clean_text(
+        value,
+        "",
+    )
+
+    return value.upper()
+
+
+def normalise_action(
+    value: Any,
+) -> str:
+    """
+    Normalise a portfolio action.
+    """
+
+    return clean_text(
+        value,
+        "HOLD",
+    ).upper()
+
+
+def clean_value(
+    value: Any,
+) -> Any:
+    """
+    Convert arbitrary values into serialisable Python values.
+    """
+
+    if value is None:
+        return None
+
+    if isinstance(
+        value,
+        bool,
+    ):
+
+        return value
+
+    if isinstance(
+        value,
+        (str, int, float),
+    ):
+
+        try:
+
+            if isinstance(
+                value,
+                float,
+            ) and not math.isfinite(value):
+
+                return None
+
+        except Exception:
+            pass
+
+        return value
+
+    if isinstance(
+        value,
+        pd.Timestamp,
+    ):
+
+        return value.isoformat()
+
+    if isinstance(
+        value,
+        pd.Series,
+    ):
+
+        if value.empty:
+            return None
+
+        return clean_value(
+            value.iloc[0]
+        )
+
+    if isinstance(
+        value,
+        pd.DataFrame,
+    ):
+
+        return None
+
+    if isinstance(
+        value,
+        (list, tuple, set),
+    ):
+
+        return [
+            clean_value(item)
+            for item in value
+        ]
+
+    if isinstance(
+        value,
+        dict,
+    ):
+
+        return {
+            str(key): clean_value(item)
+            for key, item in value.items()
+        }
+
+    try:
+
+        if pd.isna(value):
+            return None
+
+    except Exception:
+        pass
+
+    return str(value)
+
+
+def clean_record(
+    record: dict,
+) -> dict:
+    """
+    Convert a dictionary into a fully serialisable dictionary.
+    """
+
+    if not isinstance(
+        record,
+        dict,
+    ):
+
+        return {}
+
+    return {
+        str(key): clean_value(value)
+        for key, value in record.items()
+    }
+
+
+def get_value(
+    row: Any,
+    *columns: str,
+    default: Any = None,
+) -> Any:
+    """
+    Return the first available value from a dictionary or pandas Series.
+    """
+
+    if row is None:
+        return default
+
+    for column in columns:
+
+        try:
+
+            if isinstance(
+                row,
+                dict,
+            ):
+
+                if column not in row:
+                    continue
+
+                value = row.get(
+                    column
+                )
+
+            else:
+
+                if not hasattr(
+                    row,
+                    "index",
+                ):
+                    continue
+
+                if column not in row.index:
+                    continue
+
+                value = row.get(
+                    column
+                )
+
+            if value is None:
+                continue
+
+            try:
+
+                if pd.isna(value):
+                    continue
+
+            except Exception:
+                pass
+
+            return value
+
+        except Exception:
+            continue
+
+    return default
+
+
+def dataframe_records(
+    dataframe: Any,
+) -> list[dict]:
+    """
+    Convert a DataFrame to clean Python dictionaries.
+    """
+
+    if not isinstance(
+        dataframe,
+        pd.DataFrame,
+    ):
+
+        return []
+
+    if dataframe.empty:
+        return []
+
+    records = dataframe.to_dict(
+        orient="records"
+    )
+
+    return [
+        clean_record(record)
+        for record in records
+        if isinstance(
+            record,
+            dict,
+        )
+    ]
+
+
+def normalise_records(
+    data: Any,
+) -> list[dict]:
+    """
+    Normalise DataFrame, list or dictionary input into records.
+    """
+
+    if data is None:
+        return []
+
+    if isinstance(
+        data,
+        pd.DataFrame,
+    ):
+
+        return dataframe_records(
+            data
+        )
+
+    if isinstance(
+        data,
+        dict,
+    ):
+
+        return [
+            clean_record(data)
+        ]
+
+    if isinstance(
+        data,
+        (list, tuple),
+    ):
+
+        return [
+            clean_record(item)
+            for item in data
+            if isinstance(
+                item,
+                dict,
+            )
+        ]
+
+    return []
+
+
+# ============================================================
+# Asset classification
+# ============================================================
+
+def get_asset_type(
+    row: Any,
+    default: str = "STOCK",
+) -> str:
+    """
+    Determine whether an asset is a STOCK or ETF.
+
+    Existing upstream classification is preferred.
+
+    This function does not attempt to discover or classify ETFs from
+    external data. It only consumes existing classification fields.
+    """
+
+    value = get_value(
+        row,
+        "Asset Type",
+        "Asset_Type",
+        "Type",
+        "Security Type",
+        "security_type",
+        default=default,
+    )
+
+    asset_type = clean_text(
+        value,
+        default,
+    ).upper()
+
+    if asset_type in {
+        "EQUITY",
+        "SHARE",
+        "SHARES",
+        "STOCK",
+    }:
+
+        return "STOCK"
+
+    if asset_type in {
+        "ETF",
+        "EXCHANGE TRADED FUND",
+        "EXCHANGE-TRADED FUND",
+    }:
+
+        return "ETF"
+
+    if asset_type in VALID_ASSET_TYPES:
+        return asset_type
+
+    return default
+
+
+# ============================================================
+# Portfolio holdings lookup
+# ============================================================
+
+def build_holdings_lookup(
+    portfolio: Any,
+) -> dict[str, dict]:
+    """
+    Build a ticker-based ownership lookup.
+
+    Positive quantity means the asset is owned.
+
+    Cash is retained in the lookup but marked as cash.
+    """
+
+    records = normalise_records(
+        portfolio
+    )
+
+    lookup = {}
+
+    for row in records:
+
+        ticker = clean_ticker(
+            get_value(
+                row,
+                "Ticker",
+                "ticker",
+                "Symbol",
+                "symbol",
+                default="",
+            )
+        )
+
+        if not ticker:
+            continue
+
+        quantity = safe_float(
+            get_value(
+                row,
+                "Quantity",
+                "quantity",
+                "Shares",
+                "shares",
+                default=0,
+            )
+        )
+
+        market_value = safe_float(
+            get_value(
+                row,
+                "Market Value",
+                "market_value",
+                "Current Value",
+                "Current Value £",
+                "Value",
+                default=0,
+            )
+        )
+
+        allocation = safe_float(
+            get_value(
+                row,
+                "Allocation %",
+                "allocation_pct",
+                "Allocation",
+                "Portfolio %",
+                default=0,
+            )
+        )
+
+        sector = clean_text(
+            get_value(
+                row,
+                "Sector",
+                "sector",
+                default="Unknown",
+            ),
+            "Unknown",
+        )
+
+        asset_type = get_asset_type(
+            row
+        )
+
+        is_cash = (
+            ticker == "CASH"
+            or
+            "cash" in ticker.lower()
+        )
+
+        lookup[ticker] = {
+
+            "owned":
+                quantity > 0,
+
+            "quantity":
+                quantity,
+
+            "market_value":
+                market_value,
+
+            "allocation_pct":
+                allocation,
+
+            "sector":
+                sector,
+
+            "asset_type":
+                asset_type,
+
+            "is_cash":
+                is_cash,
+        }
+
+    return lookup
+
+
+# ============================================================
+# Portfolio context
+# ============================================================
+
+def build_portfolio_context(
+    portfolio: Any = None,
+    portfolio_summary: Any = None,
+    sector_analysis: Any = None,
+    capital_allocation: Any = None,
+    capital_summary: Any = None,
+) -> dict:
+    """
+    Build portfolio-level context.
+
+    No portfolio judgement is made here.
+    """
+
+    if portfolio is None:
+        portfolio = portfolio_summary
+
+    records = normalise_records(
+        portfolio
+    )
+
+    holdings = []
+
+    total_market_value = 0.0
+    cash = 0.0
+
+    stock_count = 0
+    etf_count = 0
+
+    largest_position_pct = 0.0
+    largest_position_ticker = ""
+
+    for row in records:
+
+        ticker = clean_ticker(
+            get_value(
+                row,
+                "Ticker",
+                "ticker",
+                "Symbol",
+                default="",
+            )
+        )
+
+        if not ticker:
+            continue
+
+        quantity = safe_float(
+            get_value(
+                row,
+                "Quantity",
+                "quantity",
+                "Shares",
+                "shares",
+                default=0,
+            )
+        )
+
+        market_value = safe_float(
+            get_value(
+                row,
+                "Market Value",
+                "market_value",
+                "Current Value",
+                "Value",
+                default=0,
+            )
+        )
+
+        allocation = safe_float(
+            get_value(
+                row,
+                "Allocation %",
+                "allocation_pct",
+                "Allocation",
+                "Portfolio %",
+                default=0,
+            )
+        )
+
+        sector = clean_text(
+            get_value(
+                row,
+                "Sector",
+                "sector",
+                default="Unknown",
+            ),
+            "Unknown",
+        )
+
+        asset_type = get_asset_type(
+            row
+        )
+
+        is_cash = (
+            ticker == "CASH"
+            or
+            "cash" in ticker.lower()
+        )
+
+        holding = {
+            "ticker":
+                ticker,
+
+            "asset_type":
+                asset_type,
+
+            "quantity":
+                quantity,
+
+            "market_value":
+                market_value,
+
+            "allocation_pct":
+                allocation,
+
+            "sector":
+                sector,
+
+            "is_cash":
+                is_cash,
+        }
+
+        holdings.append(
+            holding
+        )
+
+        if is_cash:
+
+            cash += market_value
+
+            continue
+
+        total_market_value += market_value
+
+        if asset_type == "ETF":
+
+            etf_count += 1
+
+        else:
+
+            stock_count += 1
+
+        if allocation > largest_position_pct:
+
+            largest_position_pct = allocation
+
+            largest_position_ticker = ticker
+
+    sectors = normalise_records(
+        sector_analysis
+    )
+
+    # --------------------------------------------------------
+    # Capital
+    # --------------------------------------------------------
+
+    capital = {
+        "discretionary_spend_limit": 0.0,
+        "capital_released_from_sales": 0.0,
+        "total_available_capital": 0.0,
+        "capital_allocated": 0.0,
+        "remaining_capital": 0.0,
+    }
+
+    capital_records = normalise_records(
+        capital_summary
+    )
+
+    for row in capital_records:
+
+        metric = clean_text(
+            get_value(
+                row,
+                "Metric",
+                "metric",
+                "Name",
+                default="",
+            )
+        ).lower()
+
+        amount = safe_float(
+            get_value(
+                row,
+                "Amount",
+                "amount",
+                "Value",
+                default=0,
+            )
+        )
+
+        if "discretionary" in metric:
+
+            capital[
+                "discretionary_spend_limit"
+            ] = amount
+
+        elif (
+            "released" in metric
+            and
+            "capital" in metric
+        ):
+
+            capital[
+                "capital_released_from_sales"
+            ] = amount
+
+        elif "total available" in metric:
+
+            capital[
+                "total_available_capital"
+            ] = amount
+
+        elif "allocated" in metric:
+
+            capital[
+                "capital_allocated"
+            ] = amount
+
+        elif "remaining" in metric:
+
+            capital[
+                "remaining_capital"
+            ] = amount
+
+    if isinstance(
+        capital_summary,
+        dict,
+    ):
+
+        for key, value in capital_summary.items():
+
+            normalised_key = str(
+                key
+            ).strip().lower()
+
+            if (
+                "discretionary"
+                in normalised_key
+            ):
+
+                capital[
+                    "discretionary_spend_limit"
+                ] = safe_float(value)
+
+            elif (
+                "released"
+                in normalised_key
+            ):
+
+                capital[
+                    "capital_released_from_sales"
+                ] = safe_float(value)
+
+            elif (
+                "total_available"
+                in normalised_key
+                or
+                "total available"
+                in normalised_key
+            ):
+
+                capital[
+                    "total_available_capital"
+                ] = safe_float(value)
+
+            elif "allocated" in normalised_key:
+
+                capital[
+                    "capital_allocated"
+                ] = safe_float(value)
+
+            elif "remaining" in normalised_key:
+
+                capital[
+                    "remaining_capital"
+                ] = safe_float(value)
+
+    allocation_records = normalise_records(
+        capital_allocation
+    )
+
+    portfolio = {
+        "total_positions":
+            len(
+                [
+                    item
+                    for item in holdings
+                    if not item["is_cash"]
+                ]
+            ),
+
+        "total_market_value":
+            total_market_value,
+
+        "cash":
+            cash,
+
+        "largest_position_pct":
+            largest_position_pct,
+
+        "largest_position_ticker":
+            largest_position_ticker,
+
+        "stock_count":
+            stock_count,
+
+        "etf_count":
+            etf_count,
+
+        "sector_count":
+            len(sectors),
+    }
+
+    return {
+
+        "portfolio":
+            portfolio,
+
+        "holdings":
+            holdings,
+
+        "sectors":
+            sectors,
+
+        "capital":
+            capital,
+
+        "capital_allocation":
+            allocation_records,
+    }
+
+
+# ============================================================
+# Recommendation intelligence
+# ============================================================
+
+def build_intelligence_lookup(
+    recommendation_intelligence: Any,
+) -> dict[str, dict]:
+    """
+    Build ticker lookup for recommendation intelligence.
+    """
+
+    records = normalise_records(
+        recommendation_intelligence
+    )
+
+    lookup = {}
+
+    for record in records:
+
+        ticker = clean_ticker(
+            get_value(
+                record,
+                "Ticker",
+                "ticker",
+                "Symbol",
+                default="",
+            )
+        )
+
+        if ticker:
+
+            lookup[ticker] = record
+
+    return lookup
+
+
+def extract_intelligence(
+    ticker: str,
+    intelligence_lookup: dict[str, dict],
+) -> dict:
+    """
+    Extract historical intelligence for one ticker.
+
+    Missing historical evidence remains explicit.
+    """
+
+    record = intelligence_lookup.get(
+        ticker
+    )
+
+    if not record:
+
+        return {
+
+            "available":
+                False,
+
+            "historical_signal_observations":
+                0,
+
+            "historical_signal_average_return_pct":
+                0.0,
+
+            "historical_signal_win_rate_pct":
+                0.0,
+
+            "historical_signal_reliability":
+                "INSUFFICIENT DATA",
+
+            "learning_adjustment":
+                0.0,
+
+            "learning_adjusted_score":
+                None,
+
+            "recommendation_strength":
+                None,
+
+            "score_bucket":
+                None,
+
+            "score_bucket_observations":
+                0,
+
+            "score_bucket_average_return_pct":
+                0.0,
+
+            "score_bucket_win_rate_pct":
+                0.0,
+
+            "confidence":
+                None,
+        }
+
+    learning_adjusted = get_value(
+        record,
+        "Learning Adjusted Score",
+        "learning_adjusted_score",
+        default=None,
+    )
+
+    return {
+
+        "available":
+            True,
+
+        "historical_signal_observations":
+            int(
+                safe_float(
+                    get_value(
+                        record,
+                        "Historical Signal Observations",
+                        "Signal Observations",
+                        default=0,
+                    )
+                )
+            ),
+
+        "historical_signal_average_return_pct":
+            safe_float(
+                get_value(
+                    record,
+                    "Historical Signal Average Return %",
+                    "Signal Average Return %",
+                    default=0,
+                )
+            ),
+
+        "historical_signal_win_rate_pct":
+            safe_float(
+                get_value(
+                    record,
+                    "Historical Signal Win Rate %",
+                    "Signal Win Rate %",
+                    default=0,
+                )
+            ),
+
+        "historical_signal_reliability":
+            clean_text(
+                get_value(
+                    record,
+                    "Historical Signal Reliability",
+                    "Signal Reliability",
+                    default="INSUFFICIENT DATA",
+                ),
+                "INSUFFICIENT DATA",
+            ),
+
+        "learning_adjustment":
+            safe_float(
+                get_value(
+                    record,
+                    "Learning Adjustment",
+                    "learning_adjustment",
+                    default=0,
+                )
+            ),
+
+        "learning_adjusted_score":
+            (
+                safe_float(
+                    learning_adjusted
+                )
+                if learning_adjusted is not None
+                else None
+            ),
+
+        "recommendation_strength":
+            clean_text(
+                get_value(
+                    record,
+                    "Recommendation Strength",
+                    "recommendation_strength",
+                    default="",
+                )
+            ),
+
+        "score_bucket":
+            clean_text(
+                get_value(
+                    record,
+                    "Score Bucket",
+                    "score_bucket",
+                    default="",
+                )
+            ),
+
+        "score_bucket_observations":
+            int(
+                safe_float(
+                    get_value(
+                        record,
+                        "Score Bucket Observations",
+                        "Bucket Observations",
+                        default=0,
+                    )
+                )
+            ),
+
+        "score_bucket_average_return_pct":
+            safe_float(
+                get_value(
+                    record,
+                    "Score Bucket Average Return %",
+                    "Bucket Average Return %",
+                    default=0,
+                )
+            ),
+
+        "score_bucket_win_rate_pct":
+            safe_float(
+                get_value(
+                    record,
+                    "Score Bucket Win Rate %",
+                    "Bucket Win Rate %",
+                    default=0,
+                )
+            ),
+
+        "confidence":
+            clean_text(
+                get_value(
+                    record,
+                    "Confidence",
+                    "confidence",
+                    default="",
+                )
+            ),
+    }
+
+
+# ============================================================
+# Recommendation evidence snapshot
+# ============================================================
+
+def get_recommendation_evidence_snapshot(
+    candidate: Any,
+) -> dict:
+    """
+    Load the immutable evidence snapshot associated with a
+    recommendation when a recommendation ID is available.
+
+    Backward compatibility
+    -----------------------
+    Older candidate records may not contain a recommendation ID
+    and older recommendations may not have an evidence snapshot.
+
+    In either case this function returns an empty dictionary and
+    the existing candidate fields remain authoritative.
+
+    This function performs no scoring or decision logic.
+    """
+
+    recommendation_id = get_value(
+        candidate,
+        "Recommendation ID",
+        "recommendation_id",
+        "RecommendationID",
+        "recommendationId",
+        "id",
+        default=None,
+    )
+
+    if recommendation_id is None:
+
+        return {}
+
+    try:
+
+        return get_recommendation_evidence(
+            int(
+                recommendation_id
+            )
+        ) or {}
+
+    except (
+        TypeError,
+        ValueError,
+        Exception,
+    ):
+
+        return {}
+
+
+def merge_evidence_value(
+    candidate: Any,
+    evidence: dict,
+    *candidate_keys: str,
+    evidence_key: str,
+    default: Any = None,
+) -> Any:
+    """
+    Return the recommendation snapshot value when available,
+    otherwise fall back to the existing candidate value.
+
+    The database snapshot is preferred because it represents the
+    evidence available when the recommendation was generated.
+    """
+
+    if (
+        evidence
+        and
+        evidence.get(
+            evidence_key
+        ) is not None
+    ):
+
+        return evidence.get(
+            evidence_key
+        )
+
+    return get_value(
+        candidate,
+        *candidate_keys,
+        default=default,
+    )
+
+
+# ============================================================
+# Candidate context
+# ============================================================
+
+def build_candidate_context(
+    candidate: Any,
+    intelligence_lookup: dict[str, dict] | None = None,
+    portfolio_holdings: dict[str, dict] | None = None,
+) -> dict | None:
+    """
+    Build the AI context for one candidate.
+
+    The existing rules-based action is preserved exactly as an input.
+
+    No new decision is made here.
+
+    Recommendation evidence
+    ------------------------
+    When a recommendation ID is available, the immutable evidence
+    snapshot saved at recommendation creation time is loaded and
+    used as the preferred source for analytical evidence.
+
+    Existing candidate fields remain the fallback so historical
+    recommendations and legacy callers continue to work.
+    """
+
+    if candidate is None:
+        return None
+
+    if intelligence_lookup is None:
+        intelligence_lookup = {}
+
+    if portfolio_holdings is None:
+        portfolio_holdings = {}
+
+    ticker = clean_ticker(
+        get_value(
+            candidate,
+            "Ticker",
+            "ticker",
+            "Symbol",
+            default="",
+        )
+    )
+
+    if not ticker:
+        return None
+
+    # --------------------------------------------------------
+    # Immutable recommendation evidence
+    # --------------------------------------------------------
+
+    evidence_snapshot = get_recommendation_evidence_snapshot(
+        candidate
+    )
+
+    evidence_available = bool(
+        evidence_snapshot
+    )
+
+    recommendation_id = get_value(
+        candidate,
+        "Recommendation ID",
+        "recommendation_id",
+        "RecommendationID",
+        "recommendationId",
+        "id",
+        default=None,
+    )
+
+    asset_type = get_asset_type(
+        candidate
+    )
+
+    holding = portfolio_holdings.get(
+        ticker,
+        {},
+    )
+
+    owned = bool(
+        holding.get(
+            "owned",
+            False,
+        )
+    )
+
+    if holding:
+
+        quantity = safe_float(
+            holding.get(
+                "quantity",
+                0,
+            )
+        )
+
+        market_value = safe_float(
+            holding.get(
+                "market_value",
+                0,
+            )
+        )
+
+        allocation_pct = safe_float(
+            holding.get(
+                "allocation_pct",
+                0,
+            )
+        )
+
+        sector = clean_text(
+            holding.get(
+                "sector",
+                "Unknown",
+            ),
+            "Unknown",
+        )
+
+        owned = quantity > 0
+
+    else:
+
+        quantity = safe_float(
+            get_value(
+                candidate,
+                "Quantity",
+                "quantity",
+                "Shares",
+                default=0,
+            )
+        )
+
+        market_value = safe_float(
+            get_value(
+                candidate,
+                "Market Value",
+                "market_value",
+                "Current Value",
+                default=0,
+            )
+        )
+
+        allocation_pct = safe_float(
+            get_value(
+                candidate,
+                "Allocation %",
+                "allocation_pct",
+                "Allocation",
+                default=0,
+            )
+        )
+
+        sector = clean_text(
+            merge_evidence_value(
+                candidate,
+                evidence_snapshot,
+                "Sector",
+                "sector",
+                evidence_key="sector",
+                default="Unknown",
+            ),
+            "Unknown",
+        )
+
+        owned = quantity > 0
+
+    # --------------------------------------------------------
+    # Core scoring
+    # --------------------------------------------------------
+
+    investment_score = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Investment Score",
+            "investment_score",
+            "Score",
+            "score",
+            evidence_key="investment_score",
+            default=0,
+        )
+    )
+
+    etf_score_value = get_value(
+        candidate,
+        "ETF Score",
+        "etf_score",
+        default=None,
+    )
+
+    etf_score = (
+        safe_float(
+            etf_score_value
+        )
+        if etf_score_value is not None
+        else None
+    )
+
+    signal = clean_text(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Signal",
+            "Momentum Signal",
+            "signal",
+            evidence_key="signal",
+            default="",
+        )
+    )
+
+    # --------------------------------------------------------
+    # Rules-based proposal
+    # --------------------------------------------------------
+
+    rules_action = normalise_action(
+        get_value(
+            candidate,
+            "Action",
+            "action",
+            "Decision",
+            "Final Decision",
+            default="HOLD",
+        )
+    )
+
+    # --------------------------------------------------------
+    # Analytical evidence
+    # --------------------------------------------------------
+
+    technical_score = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Technical Score",
+            "technical_score",
+            evidence_key="technical_score",
+            default=0,
+        )
+    )
+
+    quality_score = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Quality Score",
+            "quality_score",
+            evidence_key="quality_score",
+            default=0,
+        )
+    )
+
+    growth_score = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Growth Score",
+            "growth_score",
+            evidence_key="growth_score",
+            default=0,
+        )
+    )
+
+    confidence_score = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Confidence Score",
+            "confidence_score",
+            evidence_key="confidence_score",
+            default=0,
+        )
+    )
+
+    current_price = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Price",
+            "Current Price",
+            "Entry Price",
+            "entry_price",
+            evidence_key="entry_price",
+            default=0,
+        )
+    )
+
+    rsi = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "RSI",
+            "rsi",
+            evidence_key="rsi",
+            default=0,
+        )
+    )
+
+    sma50 = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "SMA50",
+            "MA50",
+            "ma50",
+            evidence_key="sma50",
+            default=0,
+        )
+    )
+
+    sma200 = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "SMA200",
+            "MA200",
+            "ma200",
+            evidence_key="sma200",
+            default=0,
+        )
+    )
+
+    return_3m = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Return_3m",
+            "Return 3m",
+            "Return 3M",
+            "3M Return %",
+            evidence_key="return_3m",
+            default=0,
+        )
+    )
+
+    trend = clean_text(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Trend",
+            "trend",
+            evidence_key="trend",
+            default="",
+        )
+    )
+
+    trend_score = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Trend Score",
+            "trend_score",
+            evidence_key="trend_score",
+            default=0,
+        )
+    )
+
+    momentum_score = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Momentum Score",
+            "momentum_score",
+            evidence_key="momentum_score",
+            default=0,
+        )
+    )
+
+    volume_score = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Volume Score",
+            "volume_score",
+            evidence_key="volume_score",
+            default=0,
+        )
+    )
+
+    risk_score = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Risk Score",
+            "risk_score",
+            evidence_key="risk_score",
+            default=0,
+        )
+    )
+
+    # --------------------------------------------------------
+    # Fundamental evidence
+    # --------------------------------------------------------
+
+    revenue_growth = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Revenue Growth",
+            "revenue_growth",
+            evidence_key="revenue_growth",
+            default=0,
+        )
+    )
+
+    profit_margin = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Profit Margin",
+            "profit_margin",
+            evidence_key="profit_margin",
+            default=0,
+        )
+    )
+
+    return_on_equity = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Return on Equity",
+            "ROE",
+            "return_on_equity",
+            evidence_key="return_on_equity",
+            default=0,
+        )
+    )
+
+    debt_to_equity = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Debt to Equity",
+            "Debt / Equity",
+            "debt_to_equity",
+            evidence_key="debt_to_equity",
+            default=0,
+        )
+    )
+
+    sector = clean_text(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Sector",
+            "sector",
+            evidence_key="sector",
+            default=sector,
+        ),
+        "Unknown",
+    )
+
+    industry = clean_text(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Industry",
+            "industry",
+            evidence_key="industry",
+            default="Unknown",
+        ),
+        "Unknown",
+    )
+
+    # --------------------------------------------------------
+    # Reasons / risks
+    # --------------------------------------------------------
+
+    technical_reasons = merge_evidence_value(
+        candidate,
+        evidence_snapshot,
+        "Technical Reasons",
+        "technical_reasons",
+        evidence_key="technical_reasons",
+        default=[],
+    )
+
+    technical_risks = merge_evidence_value(
+        candidate,
+        evidence_snapshot,
+        "Technical Risks",
+        "technical_risks",
+        evidence_key="technical_risks",
+        default=[],
+    )
+
+    recommendation_reasons = merge_evidence_value(
+        candidate,
+        evidence_snapshot,
+        "Recommendation Reasons",
+        "recommendation_reasons",
+        evidence_key="recommendation_reasons",
+        default=[],
+    )
+
+    recommendation_risks = merge_evidence_value(
+        candidate,
+        evidence_snapshot,
+        "Recommendation Risks",
+        "recommendation_risks",
+        evidence_key="recommendation_risks",
+        default=[],
+    )
+
+    # --------------------------------------------------------
+    # Deterministic AI assessment
+    # --------------------------------------------------------
+
+    ai_decision = merge_evidence_value(
+        candidate,
+        evidence_snapshot,
+        "AI Decision",
+        "ai_decision",
+        evidence_key="ai_decision",
+        default="",
+    )
+
+    ai_conviction = merge_evidence_value(
+        candidate,
+        evidence_snapshot,
+        "AI Conviction",
+        "ai_conviction",
+        evidence_key="ai_conviction",
+        default="",
+    )
+
+    ai_conviction_score = safe_float(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "AI Conviction Score",
+            "ai_conviction_score",
+            evidence_key="ai_conviction_score",
+            default=0,
+        )
+    )
+
+    ai_action = merge_evidence_value(
+        candidate,
+        evidence_snapshot,
+        "AI Action",
+        "ai_action",
+        evidence_key="ai_action",
+        default=[],
+    )
+
+    ai_investment_thesis = merge_evidence_value(
+        candidate,
+        evidence_snapshot,
+        "AI Investment Thesis",
+        "Investment Thesis",
+        "ai_investment_thesis",
+        evidence_key="ai_investment_thesis",
+        default=[],
+    )
+
+    ai_risks = merge_evidence_value(
+        candidate,
+        evidence_snapshot,
+        "AI Risks",
+        "ai_risks",
+        evidence_key="ai_risks",
+        default=[],
+    )
+
+    # --------------------------------------------------------
+    # Historical recommendation intelligence
+    # --------------------------------------------------------
+
+    intelligence = extract_intelligence(
+        ticker,
+        intelligence_lookup,
+    )
+
+    return {
+
+        "ticker":
+            ticker,
+
+        "recommendation_id":
+            recommendation_id,
+
+        "recommendation_evidence": {
+
+            "available":
+                evidence_available,
+
+            "capture_date":
+                (
+                    evidence_snapshot.get(
+                        "capture_date"
+                    )
+                    if evidence_snapshot
+                    else None
+                ),
+        },
+
+        "asset_type":
+            asset_type,
+
+        "ownership": {
+
+            "owned":
+                owned,
+
+            "quantity":
+                quantity,
+
+            "market_value":
+                market_value,
+
+            "allocation_pct":
+                allocation_pct,
+        },
+
+        "analysis": {
+
+            "investment_score":
+                (
+                    investment_score
+                    if asset_type == "STOCK"
+                    else None
+                ),
+
+            "etf_score":
+                (
+                    etf_score
+                    if asset_type == "ETF"
+                    else None
+                ),
+
+            "signal":
+                signal,
+
+            "technical_score":
+                (
+                    technical_score
+                    if asset_type == "STOCK"
+                    else None
+                ),
+
+            "quality_score":
+                (
+                    quality_score
+                    if asset_type == "STOCK"
+                    else None
+                ),
+
+            "growth_score":
+                (
+                    growth_score
+                    if asset_type == "STOCK"
+                    else None
+                ),
+
+            "confidence_score":
+                confidence_score,
+
+            "current_price":
+                current_price,
+
+            "rsi":
+                rsi,
+
+            "ma50":
+                sma50,
+
+            "ma200":
+                sma200,
+
+            "return_3m":
+                return_3m,
+
+            "trend":
+                trend,
+
+            "trend_score":
+                trend_score,
+
+            "momentum_score":
+                momentum_score,
+
+            "volume_score":
+                volume_score,
+
+            "risk_score":
+                risk_score,
+
+            "revenue_growth":
+                revenue_growth,
+
+            "profit_margin":
+                profit_margin,
+
+            "return_on_equity":
+                return_on_equity,
+
+            "debt_to_equity":
+                debt_to_equity,
+
+            "sector":
+                sector,
+
+            "industry":
+                industry,
+
+            "technical_reasons":
+                technical_reasons,
+
+            "technical_risks":
+                technical_risks,
+
+            "recommendation_reasons":
+                recommendation_reasons,
+
+            "recommendation_risks":
+                recommendation_risks,
+
+            "ai_decision":
+                ai_decision,
+
+            "ai_conviction":
+                ai_conviction,
+
+            "ai_conviction_score":
+                ai_conviction_score,
+
+            "ai_action":
+                ai_action,
+
+            "ai_investment_thesis":
+                ai_investment_thesis,
+
+            "ai_risks":
+                ai_risks,
+        },
+
+        "portfolio_fit": {
+
+            "allocation_pct":
+                allocation_pct,
+
+            "sector":
+                sector,
+
+            "existing_holding":
+                owned,
+        },
+
+        "rules_based_decision": {
+
+            "action":
+                rules_action,
+
+            "reason":
+                clean_text(
+                    get_value(
+                        candidate,
+                        "Reason",
+                        "reason",
+                        default="",
+                    )
+                ),
+
+            "confidence":
+                clean_text(
+                    get_value(
+                        candidate,
+                        "Confidence",
+                        "confidence",
+                        default="",
+                    )
+                ),
+        },
+
+        "recommendation_intelligence":
+            intelligence,
+
+        "capital": {
+
+            "buy_value":
+                safe_float(
+                    get_value(
+                        candidate,
+                        "Buy Value",
+                        "buy_value",
+                        default=0,
+                    )
+                ),
+
+            "released_capital":
+                safe_float(
+                    get_value(
+                        candidate,
+                        "Released Capital",
+                        "released_capital",
+                        default=0,
+                    )
+                ),
+        },
+
+        "ai_assessment":
+            None,
+    }
+
+
+# ============================================================
+# Portfolio flags
+# ============================================================
+
+def build_portfolio_flags(
+    portfolio: dict,
+) -> list[str]:
+    """
+    Build observations about portfolio structure.
+
+    These are NOT decisions.
+    """
+
+    flags = []
+
+    largest_position = safe_float(
+        portfolio.get(
+            "largest_position_pct",
+            0,
+        )
+    )
+
+    if largest_position > 25:
+
+        flags.append(
+            "LARGE_POSITION"
+        )
+
+    if largest_position > 40:
+
+        flags.append(
+            "HIGH_CONCENTRATION"
+        )
+
+    if safe_float(
+        portfolio.get(
+            "etf_count",
+            0,
+        )
+    ) > 0:
+
+        flags.append(
+            "ETF_EXPOSURE_PRESENT"
+        )
+
+    if safe_float(
+        portfolio.get(
+            "cash",
+            0,
+        )
+    ) > 0:
+
+        flags.append(
+            "CASH_PRESENT"
+        )
+
+    return flags
+
+
+# ============================================================
+# Main context builder
+# ============================================================
+
+def build_ai_decision_context(
+    portfolio: Any = None,
+    candidate_decisions: Any = None,
+    recommendation_intelligence: Any = None,
+    sector_analysis: Any = None,
+    capital_allocation: Any = None,
+    capital_summary: Any = None,
+    portfolio_summary: Any = None,
+) -> dict:
+    """
+    Build the complete AI Decision Context.
+
+    Parameters
+    ----------
+    portfolio:
+        Preferred portfolio input.
+
+    candidate_decisions:
+        Existing rules-based decisions.
+
+    recommendation_intelligence:
+        Existing recommendation intelligence output.
+
+    sector_analysis:
+        Existing sector analysis output.
+
+    capital_allocation:
+        Existing capital allocator output.
+
+    capital_summary:
+        Existing capital allocator summary.
+
+    portfolio_summary:
+        Legacy alias for portfolio.
+
+    Returns
+    -------
+    dict
+        Fully serialisable AI Decision Context.
+    """
+
+    # --------------------------------------------------------
+    # Backward compatibility
+    # --------------------------------------------------------
+
+    if portfolio is None:
+
+        portfolio = portfolio_summary
+
+    # --------------------------------------------------------
+    # Existing portfolio
+    # --------------------------------------------------------
+
+    portfolio_context = build_portfolio_context(
+        portfolio=portfolio,
+        sector_analysis=sector_analysis,
+        capital_allocation=capital_allocation,
+        capital_summary=capital_summary,
+    )
+
+    # --------------------------------------------------------
+    # Holdings
+    # --------------------------------------------------------
+
+    holdings_lookup = build_holdings_lookup(
+        portfolio
+    )
+
+    # --------------------------------------------------------
+    # Recommendation intelligence
+    # --------------------------------------------------------
+
+    intelligence_lookup = build_intelligence_lookup(
+        recommendation_intelligence
+    )
+
+    # --------------------------------------------------------
+    # Candidate decisions
+    # --------------------------------------------------------
+
+    candidates = normalise_records(
+        candidate_decisions
+    )
+
+    candidate_contexts = []
+
+    for candidate in candidates:
+
+        candidate_context = build_candidate_context(
+            candidate=candidate,
+            intelligence_lookup=intelligence_lookup,
+            portfolio_holdings=holdings_lookup,
+        )
+
+        if candidate_context is not None:
+
+            candidate_contexts.append(
+                candidate_context
+            )
+
+    # --------------------------------------------------------
+    # Portfolio flags
+    # --------------------------------------------------------
+
+    portfolio_flags = build_portfolio_flags(
+        portfolio_context[
+            "portfolio"
+        ]
+    )
+
+    # --------------------------------------------------------
+    # Final context
+    # --------------------------------------------------------
+
+    context = {
+
+        "context_version":
+            "1.1",
+
+        "purpose":
+            "Portfolio-aware AI assessment of existing rules-based decisions",
+
+        "portfolio":
+            portfolio_context[
+                "portfolio"
+            ],
+
+        "holdings":
+            portfolio_context[
+                "holdings"
+            ],
+
+        "sectors":
+            portfolio_context[
+                "sectors"
+            ],
+
+        "capital":
+            portfolio_context[
+                "capital"
+            ],
+
+        "capital_allocation":
+            portfolio_context[
+                "capital_allocation"
+            ],
+
+        "portfolio_flags":
+            portfolio_flags,
+
+        "candidates":
+            candidate_contexts,
+
+        "governance": {
+
+            "hold_is_default":
+                True,
+
+            "ai_must_not_recalculate_scores":
+                True,
+
+            "ai_must_not_allocate_capital":
+                True,
+
+            "ai_must_preserve_stock_etf_distinction":
+                True,
+
+            "ai_must_explain_overrides":
+                True,
+
+            "ai_must_not_invent_missing_evidence":
+                True,
+
+            "existing_rules_based_decision_is_input":
+                True,
+
+            "historical_reliability_is_supporting_evidence":
+                True,
+
+            "recommendation_evidence_snapshot_is_preferred":
+                True,
+
+            "legacy_candidate_fields_are_valid_fallback":
+                True,
+        },
+    }
+
+    return clean_value(
+        context
+    )
+
+
+# ============================================================
+# Convenience helper
+# ============================================================
+
+def get_candidate_context(
+    context: Any,
+    ticker: str,
+) -> dict | None:
+    """
+    Retrieve one candidate context from a completed AI context.
+    """
+
+    if not isinstance(
+        context,
+        dict,
+    ):
+
+        return None
+
+    ticker = clean_ticker(
+        ticker
+    )
+
+    for candidate in context.get(
+        "candidates",
+        [],
+    ):
+
+        if not isinstance(
+            candidate,
+            dict,
+        ):
+
+            continue
+
+        if clean_ticker(
+            candidate.get(
+                "ticker",
+                "",
+            )
+        ) == ticker:
+
+            return candidate
+
+    return None
+
+
+# ============================================================
+# Structural validation
+# ============================================================
+
+def validate_ai_decision_context(
+    context: Any,
+) -> tuple[bool, list[str]]:
+    """
+    Validate the structure of an AI Decision Context.
+
+    This validates the DATA CONTRACT only.
+
+    It does not validate whether an investment decision is correct.
+    """
+
+    errors = []
+
+    if not isinstance(
+        context,
+        dict,
+    ):
+
+        return (
+            False,
+            [
+                "Context is not a dictionary"
+            ],
+        )
+
+    required_sections = [
+        "context_version",
+        "portfolio",
+        "holdings",
+        "sectors",
+        "capital",
+        "capital_allocation",
+        "portfolio_flags",
+        "candidates",
+        "governance",
+    ]
+
+    for section in required_sections:
+
+        if section not in context:
+
+            errors.append(
+                f"Missing context section: {section}"
+            )
+
+    if not isinstance(
+        context.get(
+            "portfolio",
+            {},
+        ),
+        dict,
+    ):
+
+        errors.append(
+            "Portfolio section must be a dictionary"
+        )
+
+    if not isinstance(
+        context.get(
+            "holdings",
+            [],
+        ),
+        list,
+    ):
+
+        errors.append(
+            "Holdings section must be a list"
+        )
+
+    if not isinstance(
+        context.get(
+            "candidates",
+            [],
+        ),
+        list,
+    ):
+
+        errors.append(
+            "Candidates section must be a list"
+        )
+
+    # --------------------------------------------------------
+    # Candidate validation
+    # --------------------------------------------------------
+
+    candidates = context.get(
+        "candidates",
+        [],
+    )
+
+    for index, candidate in enumerate(
+        candidates
+    ):
+
+        if not isinstance(
+            candidate,
+            dict,
+        ):
+
+            errors.append(
+                f"Candidate {index} is not a dictionary"
+            )
+
+            continue
+
+        ticker = candidate.get(
+            "ticker"
+        )
+
+        if not ticker:
+
+            errors.append(
+                f"Candidate {index} has no ticker"
+            )
+
+        asset_type = candidate.get(
+            "asset_type"
+        )
+
+        if asset_type not in VALID_ASSET_TYPES:
+
+            errors.append(
+                f"Candidate {index} has invalid asset type: "
+                f"{asset_type}"
+            )
+
+        decision = candidate.get(
+            "rules_based_decision",
+            {},
+        )
+
+        if not isinstance(
+            decision,
+            dict,
+        ):
+
+            errors.append(
+                f"Candidate {index} rules_based_decision "
+                f"must be a dictionary"
+            )
+
+        else:
+
+            action = normalise_action(
+                decision.get(
+                    "action",
+                    "HOLD",
+                )
+            )
+
+            if action not in VALID_ACTIONS:
+
+                errors.append(
+                    f"Candidate {index} has invalid action: "
+                    f"{action}"
+                )
+
+        evidence = candidate.get(
+            "recommendation_evidence",
+            {},
+        )
+
+        if not isinstance(
+            evidence,
+            dict,
+        ):
+
+            errors.append(
+                f"Candidate {index} recommendation_evidence "
+                f"must be a dictionary"
+            )
+
+    return (
+        len(errors) == 0,
+        errors,
+    )
+
+
+# ============================================================
+# Module test
+# ============================================================
+
+if __name__ == "__main__":
+
+    print(
+        "AI Decision Context Builder"
+    )
+
+    context = build_ai_decision_context()
+
+    valid, errors = (
+        validate_ai_decision_context(
+            context
+        )
+    )
+
+    print(
+        f"Context valid: {valid}"
+    )
+
+    if errors:
+
+        for error in errors:
+
+            print(
+                f"ERROR: {error}"
+            )
+
+    else:
+
+        print(
+            "Context structure is valid."
+        )
+
+    print(
+        f"Candidates: "
+        f"{len(context.get('candidates', []))}"
+    )

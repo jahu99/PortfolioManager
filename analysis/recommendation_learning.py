@@ -1,11 +1,62 @@
+"""
+Recommendation Learning
 
-import pandas as pd
+Purpose
+-------
+Analyse completed recommendation outcomes and produce statistical
+learning evidence for the stock recommendation engine.
+
+Learning milestones
+-------------------
+The governed learning horizons are:
+
+    - 5 trading days
+    - 10 trading days
+    - 60 trading days
+
+Only completed evaluations are treated as learning observations.
+
+Architecture
+------------
+
+    recommendations
+            |
+            v
+    outcome_tracker.py
+            |
+            v
+    recommendation_evaluations
+            |
+            v
+    recommendation_learning.py
+            |
+            v
+    recommendation_intelligence.py
+            |
+            v
+    AI Decision Context
+            |
+            v
+    Governed AI Portfolio Decision
+
+Important
+---------
+- This module learns from completed recommendation evaluations.
+- It does not invent results for future milestones.
+- Missing 60-day history is treated as immature evidence.
+- Historical learning does not automatically rewrite core scoring weights.
+- Learning evidence is supporting evidence for downstream decision layers.
+"""
+
+from __future__ import annotations
+
 import numpy as np
+import pandas as pd
 
 
-# ==========================================================
+# ============================================================
 # CONFIGURATION
-# ==========================================================
+# ============================================================
 
 MIN_RELIABLE_OBSERVATIONS = 20
 
@@ -37,19 +88,36 @@ COMPONENTS = [
 ]
 
 
-# ==========================================================
+LEARNING_HORIZONS = (
+    5,
+    10,
+    60,
+)
+
+
+# ============================================================
 # BASIC HELPERS
-# ==========================================================
+# ============================================================
 
 def safe_numeric(series):
+    """Convert values to numeric, coercing invalid values to NaN."""
 
     return pd.to_numeric(
         series,
-        errors="coerce"
+        errors="coerce",
     )
 
 
 def reliability_label(count):
+    """
+    Classify the reliability of a dataset based on observation count.
+    """
+
+    count = int(
+        safe_numeric(
+            count
+        )
+    )
 
     if count >= MIN_RELIABLE_OBSERVATIONS:
         return "VALID"
@@ -61,51 +129,73 @@ def reliability_label(count):
 
 
 def safe_mean(series):
+    """Return a rounded mean or zero when no observations exist."""
 
-    values = pd.Series(series).dropna()
-
-    if values.empty:
-        return 0.0
-
-    return round(
-        float(values.mean()),
-        2
-    )
-
-
-def safe_median(series):
-
-    values = pd.Series(series).dropna()
-
-    if values.empty:
-        return 0.0
-
-    return round(
-        float(values.median()),
-        2
-    )
-
-
-def calculate_win_rate(values):
-
-    values = pd.Series(values).dropna()
+    values = pd.Series(
+        series
+    ).dropna()
 
     if values.empty:
         return 0.0
 
     return round(
         float(
-            (values > 0).mean() * 100
+            values.mean()
         ),
-        2
+        2,
+    )
+
+
+def safe_median(series):
+    """Return a rounded median or zero when no observations exist."""
+
+    values = pd.Series(
+        series
+    ).dropna()
+
+    if values.empty:
+        return 0.0
+
+    return round(
+        float(
+            values.median()
+        ),
+        2,
+    )
+
+
+def calculate_win_rate(values):
+    """
+    Calculate positive-directional-return win rate.
+
+    A recommendation is considered successful for learning purposes
+    when its directional return is greater than zero.
+    """
+
+    values = pd.Series(
+        values
+    ).dropna()
+
+    if values.empty:
+        return 0.0
+
+    return round(
+        float(
+            (
+                values > 0
+            ).mean()
+            * 100
+        ),
+        2,
     )
 
 
 def safe_correlation(
     df,
     x,
-    y
+    y,
 ):
+    """Safely calculate correlation between two numeric columns."""
 
     if x not in df.columns:
         return 0.0
@@ -114,7 +204,10 @@ def safe_correlation(
         return 0.0
 
     temp = df[
-        [x, y]
+        [
+            x,
+            y,
+        ]
     ].copy()
 
     temp[x] = safe_numeric(
@@ -140,41 +233,47 @@ def safe_correlation(
         temp[y]
     )
 
-    if pd.isna(correlation):
+    if pd.isna(
+        correlation
+    ):
         return 0.0
 
     return round(
-        float(correlation),
-        3
+        float(
+            correlation
+        ),
+        3,
     )
 
 
-# ==========================================================
+# ============================================================
 # DIRECTION-AWARE RETURN
-# ==========================================================
+# ============================================================
 
 def calculate_directional_return(
     signal,
-    stock_return
+    stock_return,
 ):
     """
-    Convert the underlying stock return into the return
-    relevant to the recommendation.
+    Convert the underlying stock return into the return relevant
+    to the recommendation.
 
     BUY / STRONG BUY
-        Stock +10%  -> recommendation +10%
+        Stock +10% -> recommendation +10%
 
     SELL / STRONG SELL
-        Stock +10%  -> recommendation -10%
+        Stock +10% -> recommendation -10%
 
     HOLD / WATCH
-        Retain the underlying stock return.
+        Underlying stock return is retained.
 
-    The important point is that a SELL recommendation
-    followed by a rising stock is a LOSS, not a WIN.
+    The important point is that a SELL recommendation followed by
+    a rising stock is a LOSS, not a WIN.
     """
 
-    if pd.isna(stock_return):
+    if pd.isna(
+        stock_return
+    ):
         return np.nan
 
     signal = str(
@@ -187,58 +286,105 @@ def calculate_directional_return(
 
     if signal in (
         "SELL",
-        "STRONG SELL"
+        "STRONG SELL",
     ):
         return -stock_return
 
     return stock_return
 
 
-# ==========================================================
+# ============================================================
 # SUCCESS / FAILURE
-# ==========================================================
+# ============================================================
 
 def calculate_success(
     signal,
-    directional_return
+    directional_return,
 ):
     """
     Return:
 
-        1 = successful recommendation
-        0 = unsuccessful recommendation
-        NaN = insufficient information
-
-    For BUY / SELL recommendations this represents
-    directional trading success.
-
-    For HOLD / WATCH it represents whether the underlying
-    position performed positively.
+        1   successful recommendation
+        0   unsuccessful recommendation
+        NaN insufficient information
     """
 
-    if pd.isna(directional_return):
+    if pd.isna(
+        directional_return
+    ):
         return np.nan
 
     return (
         1
-        if float(directional_return) > 0
+        if float(
+            directional_return
+        ) > 0
         else 0
     )
 
 
-# ==========================================================
-# NORMALISE HISTORY
-# ==========================================================
+# ============================================================
+# LEARNING DATA SOURCE
+# ============================================================
 
-def prepare_learning_data(history):
+def get_completed_evaluation_history():
+    """
+    Load the completed recommendation evaluation history.
+
+    This is the preferred source of truth for recommendation learning.
+
+    The raw recommendations table contains recommendations that may
+    not yet have realised outcomes. The recommendation_evaluations
+    table contains only completed milestone evaluations.
+    """
+
+    from data.database import (
+        get_evaluation_history,
+    )
+
+    history = get_evaluation_history()
 
     if history is None:
         return pd.DataFrame()
 
     if not isinstance(
         history,
-        pd.DataFrame
+        pd.DataFrame,
     ):
+        history = pd.DataFrame(
+            history
+        )
+
+    return history
+
+
+# ============================================================
+# NORMALISE HISTORY
+# ============================================================
+
+def prepare_learning_data(
+    history,
+):
+    """
+    Normalise completed recommendation evaluation history.
+
+    The expected primary input is recommendation_evaluations.
+
+    Important
+    ---------
+    Learning is performed only on rows containing a realised
+    return. Future/uncompleted milestones therefore do not enter
+    the statistical learning calculations.
+    """
+
+    if history is None:
+        return pd.DataFrame()
+
+    if not isinstance(
+        history,
+        pd.DataFrame,
+    ):
+
         history = pd.DataFrame(
             history
         )
@@ -248,22 +394,27 @@ def prepare_learning_data(history):
 
     df = history.copy()
 
-    # ------------------------------------------------------
+    # --------------------------------------------------------
     # Normalise column names
-    # ------------------------------------------------------
+    # --------------------------------------------------------
 
     df.columns = [
-        str(column).strip()
+        str(
+            column
+        ).strip()
         for column in df.columns
     ]
 
-    # ------------------------------------------------------
-    # Map current database-query names to internal names
-    # ------------------------------------------------------
+    # --------------------------------------------------------
+    # Map database / reporting names to internal names
+    # --------------------------------------------------------
 
     aliases = {
 
         "Ticker":
+            "ticker",
+
+        "ticker":
             "ticker",
 
         "Recommendation Date":
@@ -272,31 +423,61 @@ def prepare_learning_data(history):
         "Date":
             "recommendation_date",
 
+        "date":
+            "recommendation_date",
+
         "Signal":
+            "signal",
+
+        "signal":
             "signal",
 
         "Investment Score":
             "investment_score",
 
+        "investment_score":
+            "investment_score",
+
         "Technical Score":
+            "technical_score",
+
+        "technical_score":
             "technical_score",
 
         "Quality Score":
             "quality_score",
 
+        "quality_score":
+            "quality_score",
+
         "Growth Score":
+            "growth_score",
+
+        "growth_score":
             "growth_score",
 
         "Confidence":
             "confidence",
 
+        "confidence":
+            "confidence",
+
         "Confidence Score":
+            "confidence_score",
+
+        "confidence_score":
             "confidence_score",
 
         "Evaluation Date":
             "evaluation_date",
 
+        "evaluation_date":
+            "evaluation_date",
+
         "Days After":
+            "days_after",
+
+        "days_after":
             "days_after",
 
         "Evaluation Price":
@@ -305,13 +486,37 @@ def prepare_learning_data(history):
         "Price":
             "evaluation_price",
 
+        "price":
+            "evaluation_price",
+
+        "Evaluation Price £":
+            "evaluation_price",
+
         "Return %":
             "return_percent",
 
         "Return Percent":
             "return_percent",
 
+        "return_percent":
+            "return_percent",
+
+        "Recommendation Return %":
+            "recommendation_return_percent",
+
+        "recommendation_return_percent":
+            "recommendation_return_percent",
+
+        "Recommendation Success":
+            "recommendation_success",
+
+        "recommendation_success":
+            "recommendation_success",
+
         "Outcome":
+            "outcome",
+
+        "outcome":
             "outcome",
     }
 
@@ -322,50 +527,13 @@ def prepare_learning_data(history):
             and target not in df.columns
         ):
 
-            df[target] = df[source]
+            df[target] = df[
+                source
+            ]
 
-    # ------------------------------------------------------
-    # Lowercase aliases if already supplied
-    # ------------------------------------------------------
-
-    lower_aliases = {
-
-        "Ticker":
-            "ticker",
-
-        "Signal":
-            "signal",
-
-        "Investment Score":
-            "investment_score",
-
-        "Technical Score":
-            "technical_score",
-
-        "Quality Score":
-            "quality_score",
-
-        "Growth Score":
-            "growth_score",
-
-        "Confidence Score":
-            "confidence_score",
-
-        "Days After":
-            "days_after",
-
-        "Return %":
-            "return_percent",
-    }
-
-    for source, target in lower_aliases.items():
-
-        if source in df.columns:
-            df[target] = df[source]
-
-    # ------------------------------------------------------
+    # --------------------------------------------------------
     # Numeric columns
-    # ------------------------------------------------------
+    # --------------------------------------------------------
 
     numeric_columns = [
 
@@ -375,6 +543,8 @@ def prepare_learning_data(history):
         "growth_score",
         "confidence_score",
         "return_percent",
+        "recommendation_return_percent",
+        "recommendation_success",
         "days_after",
         "evaluation_price",
     ]
@@ -387,14 +557,18 @@ def prepare_learning_data(history):
                 df[column]
             )
 
-    # ------------------------------------------------------
+    # --------------------------------------------------------
     # Signal
-    # ------------------------------------------------------
+    # --------------------------------------------------------
 
     if "signal" in df.columns:
 
-        df["signal"] = (
-            df["signal"]
+        df[
+            "signal"
+        ] = (
+            df[
+                "signal"
+            ]
             .astype(str)
             .str.strip()
             .str.upper()
@@ -402,87 +576,249 @@ def prepare_learning_data(history):
 
     else:
 
-        df["signal"] = "UNKNOWN"
+        df[
+            "signal"
+        ] = "UNKNOWN"
 
-    # ------------------------------------------------------
-    # Required fields
-    # ------------------------------------------------------
+    # --------------------------------------------------------
+    # Required learning fields
+    # --------------------------------------------------------
 
     if "return_percent" not in df.columns:
 
-        df["return_percent"] = np.nan
+        df[
+            "return_percent"
+        ] = np.nan
 
     if "days_after" not in df.columns:
 
-        df["days_after"] = np.nan
+        df[
+            "days_after"
+        ] = np.nan
 
-    # ------------------------------------------------------
+    if "investment_score" not in df.columns:
+
+        df[
+            "investment_score"
+        ] = np.nan
+
+    # --------------------------------------------------------
+    # Restrict to governed learning horizons
+    # --------------------------------------------------------
+
+    valid_horizons = set(
+        LEARNING_HORIZONS
+    )
+
+    df = df[
+        df[
+            "days_after"
+        ].isin(
+            valid_horizons
+        )
+        |
+        df[
+            "days_after"
+        ].isna()
+    ].copy()
+
+    # --------------------------------------------------------
     # Directional return
-    # ------------------------------------------------------
+    #
+    # Prefer the persisted recommendation-adjusted return when
+    # available because recommendation_evaluations already stores
+    # the correctly direction-adjusted value.
+    #
+    # Otherwise calculate it from signal + raw return.
+    # --------------------------------------------------------
 
-    df["directional_return"] = [
+    if (
+        "recommendation_return_percent"
+        in df.columns
+    ):
 
-        calculate_directional_return(
-            signal,
-            stock_return
+        persisted_directional_return = safe_numeric(
+            df[
+                "recommendation_return_percent"
+            ]
         )
 
-        for signal, stock_return
-        in zip(
-            df["signal"],
-            df["return_percent"]
+    else:
+
+        persisted_directional_return = (
+            pd.Series(
+                np.nan,
+                index=df.index,
+                dtype=float,
+            )
         )
 
-    ]
+    calculated_directional_return = pd.Series(
+        [
+            calculate_directional_return(
+                signal,
+                stock_return,
+            )
+            for signal, stock_return
+            in zip(
+                df[
+                    "signal"
+                ],
+                df[
+                    "return_percent"
+                ],
+            )
+        ],
+        index=df.index,
+        dtype=float,
+    )
 
-    # ------------------------------------------------------
+    df[
+        "directional_return"
+    ] = (
+        persisted_directional_return
+        .where(
+            persisted_directional_return.notna(),
+            calculated_directional_return,
+        )
+    )
+
+    # --------------------------------------------------------
     # Learning success
-    # ------------------------------------------------------
+    # --------------------------------------------------------
 
-    df["learning_success"] = [
+    if (
+        "recommendation_success"
+        in df.columns
+    ):
 
-        calculate_success(
-            signal,
-            directional_return
+        persisted_success = safe_numeric(
+            df[
+                "recommendation_success"
+            ]
         )
 
-        for signal, directional_return
-        in zip(
-            df["signal"],
-            df["directional_return"]
+    else:
+
+        persisted_success = pd.Series(
+            np.nan,
+            index=df.index,
+            dtype=float,
         )
 
-    ]
+    calculated_success = pd.Series(
+        [
+            calculate_success(
+                signal,
+                directional_return,
+            )
+            for signal, directional_return
+            in zip(
+                df[
+                    "signal"
+                ],
+                df[
+                    "directional_return"
+                ],
+            )
+        ],
+        index=df.index,
+        dtype=float,
+    )
 
-    return df
+    df[
+        "learning_success"
+    ] = (
+        persisted_success
+        .where(
+            persisted_success.notna(),
+            calculated_success,
+        )
+    )
+
+    # --------------------------------------------------------
+    # Ensure historical date fields are usable
+    # --------------------------------------------------------
+
+    if "recommendation_date" in df.columns:
+
+        df[
+            "recommendation_date"
+        ] = pd.to_datetime(
+            df[
+                "recommendation_date"
+            ],
+            errors="coerce",
+        )
+
+    if "evaluation_date" in df.columns:
+
+        df[
+            "evaluation_date"
+        ] = pd.to_datetime(
+            df[
+                "evaluation_date"
+            ],
+            errors="coerce",
+        )
+
+    # --------------------------------------------------------
+    # Final learning population
+    #
+    # Rows without realised directional return are not usable
+    # observations and are therefore excluded from statistical
+    # learning.
+    # --------------------------------------------------------
+
+    df = df[
+        df[
+            "directional_return"
+        ].notna()
+    ].copy()
+
+    return df.reset_index(
+        drop=True
+    )
 
 
-# ==========================================================
+# ============================================================
 # OVERALL PERFORMANCE
-# ==========================================================
+# ============================================================
 
-def calculate_overall_performance(df):
+def calculate_overall_performance(
+    df,
+):
+    """Calculate overall recommendation performance."""
 
-    if df.empty:
+    if df is None or df.empty:
+
         return {
-            "Observations": 0,
-            "Average Return %": 0,
-            "Median Return %": 0,
-            "Win Rate %": 0,
-            "Reliability": "NO DATA",
+            "Observations":
+                0,
+
+            "Average Return %":
+                0,
+
+            "Median Return %":
+                0,
+
+            "Win Rate %":
+                0,
+
+            "Reliability":
+                "NO DATA",
         }
 
     returns = (
-        df["directional_return"]
+        df[
+            "directional_return"
+        ]
         .dropna()
     )
 
-    successes = (
-        df["learning_success"]
-        .dropna()
+    count = len(
+        returns
     )
-
-    count = len(returns)
 
     return {
 
@@ -490,10 +826,14 @@ def calculate_overall_performance(df):
             count,
 
         "Average Return %":
-            safe_mean(returns),
+            safe_mean(
+                returns
+            ),
 
         "Median Return %":
-            safe_median(returns),
+            safe_median(
+                returns
+            ),
 
         "Win Rate %":
             calculate_win_rate(
@@ -507,11 +847,26 @@ def calculate_overall_performance(df):
     }
 
 
-# ==========================================================
+# ============================================================
 # HORIZON PERFORMANCE
-# ==========================================================
+# ============================================================
 
-def calculate_horizon_performance(df):
+def calculate_horizon_performance(
+    df,
+):
+    """
+    Calculate learning performance for:
+
+        5 trading days
+        10 trading days
+        60 trading days
+
+    A milestone with no completed observations is classified as
+    IMMATURE when the available dataset has not yet reached that
+    horizon.
+
+    It is never treated as negative evidence.
+    """
 
     columns = [
         "Horizon",
@@ -520,47 +875,126 @@ def calculate_horizon_performance(df):
         "Median Return %",
         "Win Rate %",
         "Reliability",
+        "Milestone Status",
     ]
 
     if (
-        df.empty
+        df is None
+        or df.empty
         or "days_after" not in df.columns
     ):
 
-        return pd.DataFrame(
-            columns=columns
+        working = pd.DataFrame()
+
+    else:
+
+        working = df.dropna(
+            subset=[
+                "days_after"
+            ]
+        ).copy()
+
+        working[
+            "days_after"
+        ] = safe_numeric(
+            working[
+                "days_after"
+            ]
         )
+
+    max_available_horizon = 0
+
+    if not working.empty:
+
+        valid_horizons = (
+            working[
+                "days_after"
+            ]
+            .dropna()
+            .astype(int)
+            .tolist()
+        )
+
+        if valid_horizons:
+
+            max_available_horizon = max(
+                valid_horizons
+            )
 
     rows = []
 
-    working = df.dropna(
-        subset=["days_after"]
-    )
+    for horizon in LEARNING_HORIZONS:
 
-    for horizon, group in working.groupby(
-        "days_after"
-    ):
+        if working.empty:
+
+            group = pd.DataFrame()
+
+        else:
+
+            group = working[
+                working[
+                    "days_after"
+                ]
+                ==
+                horizon
+            ]
 
         returns = (
-            group["directional_return"]
+            group[
+                "directional_return"
+            ]
             .dropna()
+            if not group.empty
+            else pd.Series(
+                dtype=float
+            )
         )
 
-        count = len(returns)
+        count = len(
+            returns
+        )
+
+        if count > 0:
+
+            reliability = (
+                reliability_label(
+                    count
+                )
+            )
+
+            milestone_status = (
+                "MATURE"
+                if count >= MIN_RELIABLE_OBSERVATIONS
+                else "IMMATURE"
+            )
+
+        elif max_available_horizon < horizon:
+
+            reliability = "IMMATURE"
+            milestone_status = "IMMATURE"
+
+        else:
+
+            reliability = "NO DATA"
+            milestone_status = "NO DATA"
 
         rows.append(
             {
                 "Horizon":
-                    int(horizon),
+                    horizon,
 
                 "Recommendations":
                     count,
 
                 "Average Return %":
-                    safe_mean(returns),
+                    safe_mean(
+                        returns
+                    ),
 
                 "Median Return %":
-                    safe_median(returns),
+                    safe_median(
+                        returns
+                    ),
 
                 "Win Rate %":
                     calculate_win_rate(
@@ -568,29 +1002,27 @@ def calculate_horizon_performance(df):
                     ),
 
                 "Reliability":
-                    reliability_label(
-                        count
-                    ),
+                    reliability,
+
+                "Milestone Status":
+                    milestone_status,
             }
         )
 
-    if not rows:
-        return pd.DataFrame(
-            columns=columns
-        )
-
-    return (
-        pd.DataFrame(rows)
-        .sort_values("Horizon")
-        .reset_index(drop=True)
+    return pd.DataFrame(
+        rows,
+        columns=columns,
     )
 
 
-# ==========================================================
+# ============================================================
 # SIGNAL PERFORMANCE
-# ==========================================================
+# ============================================================
 
-def calculate_signal_performance(df):
+def calculate_signal_performance(
+    df,
+):
+    """Calculate performance grouped by recommendation signal."""
 
     columns = [
         "Signal",
@@ -601,7 +1033,8 @@ def calculate_signal_performance(df):
         "Reliability",
     ]
 
-    if df.empty:
+    if df is None or df.empty:
+
         return pd.DataFrame(
             columns=columns
         )
@@ -611,15 +1044,23 @@ def calculate_signal_performance(df):
     for signal in SIGNALS:
 
         group = df[
-            df["signal"] == signal
+            df[
+                "signal"
+            ]
+            ==
+            signal
         ]
 
         returns = (
-            group["directional_return"]
+            group[
+                "directional_return"
+            ]
             .dropna()
         )
 
-        count = len(returns)
+        count = len(
+            returns
+        )
 
         rows.append(
             {
@@ -630,10 +1071,14 @@ def calculate_signal_performance(df):
                     count,
 
                 "Average Return %":
-                    safe_mean(returns),
+                    safe_mean(
+                        returns
+                    ),
 
                 "Median Return %":
-                    safe_median(returns),
+                    safe_median(
+                        returns
+                    ),
 
                 "Win Rate %":
                     calculate_win_rate(
@@ -647,25 +1092,31 @@ def calculate_signal_performance(df):
             }
         )
 
-    result = pd.DataFrame(
-        rows
+    return (
+        pd.DataFrame(
+            rows
+        )
+        .sort_values(
+            "Average Return %",
+            ascending=False,
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
-    return result.sort_values(
-        "Average Return %",
-        ascending=False
-    ).reset_index(
-        drop=True
-    )
 
-
-# ==========================================================
+# ============================================================
 # SIGNAL RELIABILITY
-# ==========================================================
+# ============================================================
 
-def calculate_signal_reliability(df):
+def calculate_signal_reliability(
+    df,
+):
+    """Calculate signal reliability statistics."""
 
-    if df.empty:
+    if df is None or df.empty:
+
         return pd.DataFrame()
 
     rows = []
@@ -673,15 +1124,23 @@ def calculate_signal_reliability(df):
     for signal in SIGNALS:
 
         group = df[
-            df["signal"] == signal
+            df[
+                "signal"
+            ]
+            ==
+            signal
         ]
 
         returns = (
-            group["directional_return"]
+            group[
+                "directional_return"
+            ]
             .dropna()
         )
 
-        count = len(returns)
+        count = len(
+            returns
+        )
 
         rows.append(
             {
@@ -692,7 +1151,9 @@ def calculate_signal_reliability(df):
                     count,
 
                 "Average Return %":
-                    safe_mean(returns),
+                    safe_mean(
+                        returns
+                    ),
 
                 "Win Rate %":
                     calculate_win_rate(
@@ -706,26 +1167,37 @@ def calculate_signal_reliability(df):
             }
         )
 
-    return pd.DataFrame(
-        rows
-    ).sort_values(
-        "Average Return %",
-        ascending=False
-    ).reset_index(
-        drop=True
+    return (
+        pd.DataFrame(
+            rows
+        )
+        .sort_values(
+            "Average Return %",
+            ascending=False,
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
 
-# ==========================================================
+# ============================================================
 # SCORE BUCKET
-# ==========================================================
+# ============================================================
 
-def get_score_bucket(score):
+def get_score_bucket(
+    score,
+):
+    """Map an investment/component score to its learning bucket."""
 
-    if pd.isna(score):
+    if pd.isna(
+        score
+    ):
         return None
 
-    score = float(score)
+    score = float(
+        score
+    )
 
     if score < 40:
         return "<40"
@@ -742,24 +1214,55 @@ def get_score_bucket(score):
     return "85-100"
 
 
-# ==========================================================
+# ============================================================
 # SCORE BUCKET PERFORMANCE
-# ==========================================================
+# ============================================================
 
-def calculate_score_bucket_performance(df):
+def calculate_score_bucket_performance(
+    df,
+):
+    """Calculate realised performance by investment-score bucket."""
+
+    columns = [
+        "Score Bucket",
+        "Minimum Score",
+        "Maximum Score",
+        "Observations",
+        "Average Return %",
+        "Median Return %",
+        "Win Rate %",
+        "Reliability",
+    ]
 
     if (
-        df.empty
+        df is None
+        or df.empty
         or "investment_score" not in df.columns
     ):
 
-        return pd.DataFrame()
+        return pd.DataFrame(
+            columns=columns
+        )
 
     temp = df.copy()
 
-    temp["Score Bucket"] = (
-        temp["investment_score"]
-        .apply(get_score_bucket)
+    temp[
+        "investment_score"
+    ] = safe_numeric(
+        temp[
+            "investment_score"
+        ]
+    )
+
+    temp[
+        "Score Bucket"
+    ] = (
+        temp[
+            "investment_score"
+        ]
+        .apply(
+            get_score_bucket
+        )
     )
 
     rows = []
@@ -767,15 +1270,23 @@ def calculate_score_bucket_performance(df):
     for bucket, minimum, maximum in SCORE_BUCKETS:
 
         group = temp[
-            temp["Score Bucket"] == bucket
+            temp[
+                "Score Bucket"
+            ]
+            ==
+            bucket
         ]
 
         returns = (
-            group["directional_return"]
+            group[
+                "directional_return"
+            ]
             .dropna()
         )
 
-        count = len(returns)
+        count = len(
+            returns
+        )
 
         rows.append(
             {
@@ -792,10 +1303,14 @@ def calculate_score_bucket_performance(df):
                     count,
 
                 "Average Return %":
-                    safe_mean(returns),
+                    safe_mean(
+                        returns
+                    ),
 
                 "Median Return %":
-                    safe_median(returns),
+                    safe_median(
+                        returns
+                    ),
 
                 "Win Rate %":
                     calculate_win_rate(
@@ -810,18 +1325,36 @@ def calculate_score_bucket_performance(df):
         )
 
     return pd.DataFrame(
-        rows
+        rows,
+        columns=columns,
     )
 
 
-# ==========================================================
+# ============================================================
 # COMPONENT SCORE PERFORMANCE
-# ==========================================================
+# ============================================================
 
-def calculate_component_score_performance(df):
+def calculate_component_score_performance(
+    df,
+):
+    """Calculate realised performance for component score buckets."""
 
-    if df.empty:
-        return pd.DataFrame()
+    columns = [
+        "Component",
+        "Component Score Bucket",
+        "Minimum Score",
+        "Maximum Score",
+        "Observations",
+        "Average Return %",
+        "Win Rate %",
+        "Reliability",
+    ]
+
+    if df is None or df.empty:
+
+        return pd.DataFrame(
+            columns=columns
+        )
 
     rows = []
 
@@ -832,23 +1365,39 @@ def calculate_component_score_performance(df):
 
         temp = df.copy()
 
-        temp["Score Bucket"] = (
-            temp[column]
-            .apply(get_score_bucket)
+        temp[
+            "Score Bucket"
+        ] = (
+            safe_numeric(
+                temp[
+                    column
+                ]
+            )
+            .apply(
+                get_score_bucket
+            )
         )
 
         for bucket, minimum, maximum in SCORE_BUCKETS:
 
             group = temp[
-                temp["Score Bucket"] == bucket
+                temp[
+                    "Score Bucket"
+                ]
+                ==
+                bucket
             ]
 
             returns = (
-                group["directional_return"]
+                group[
+                    "directional_return"
+                ]
                 .dropna()
             )
 
-            count = len(returns)
+            count = len(
+                returns
+            )
 
             rows.append(
                 {
@@ -868,7 +1417,9 @@ def calculate_component_score_performance(df):
                         count,
 
                     "Average Return %":
-                        safe_mean(returns),
+                        safe_mean(
+                            returns
+                        ),
 
                     "Win Rate %":
                         calculate_win_rate(
@@ -883,20 +1434,28 @@ def calculate_component_score_performance(df):
             )
 
     return pd.DataFrame(
-        rows
+        rows,
+        columns=columns,
     )
 
 
-# ==========================================================
+# ============================================================
 # CONFIDENCE PERFORMANCE
-# ==========================================================
+# ============================================================
 
-def get_confidence_bucket(score):
+def get_confidence_bucket(
+    score,
+):
+    """Map confidence score into a standard learning bucket."""
 
-    if pd.isna(score):
+    if pd.isna(
+        score
+    ):
         return None
 
-    score = float(score)
+    score = float(
+        score
+    )
 
     if score < 40:
         return "0-39"
@@ -913,20 +1472,44 @@ def get_confidence_bucket(score):
     return "90-100"
 
 
-def calculate_confidence_performance(df):
+def calculate_confidence_performance(
+    df,
+):
+    """Calculate realised performance by confidence-score bucket."""
+
+    columns = [
+        "Confidence Bucket",
+        "Minimum Score",
+        "Observations",
+        "Average Return %",
+        "Median Return %",
+        "Win Rate %",
+        "Reliability",
+    ]
 
     if (
-        df.empty
+        df is None
+        or df.empty
         or "confidence_score" not in df.columns
     ):
 
-        return pd.DataFrame()
+        return pd.DataFrame(
+            columns=columns
+        )
 
     temp = df.copy()
 
-    temp["Confidence Bucket"] = (
-        temp["confidence_score"]
-        .apply(get_confidence_bucket)
+    temp[
+        "Confidence Bucket"
+    ] = (
+        safe_numeric(
+            temp[
+                "confidence_score"
+            ]
+        )
+        .apply(
+            get_confidence_bucket
+        )
     )
 
     buckets = [
@@ -942,15 +1525,23 @@ def calculate_confidence_performance(df):
     for bucket, minimum in buckets:
 
         group = temp[
-            temp["Confidence Bucket"] == bucket
+            temp[
+                "Confidence Bucket"
+            ]
+            ==
+            bucket
         ]
 
         returns = (
-            group["directional_return"]
+            group[
+                "directional_return"
+            ]
             .dropna()
         )
 
-        count = len(returns)
+        count = len(
+            returns
+        )
 
         rows.append(
             {
@@ -964,10 +1555,14 @@ def calculate_confidence_performance(df):
                     count,
 
                 "Average Return %":
-                    safe_mean(returns),
+                    safe_mean(
+                        returns
+                    ),
 
                 "Median Return %":
-                    safe_median(returns),
+                    safe_median(
+                        returns
+                    ),
 
                 "Win Rate %":
                     calculate_win_rate(
@@ -982,17 +1577,22 @@ def calculate_confidence_performance(df):
         )
 
     return pd.DataFrame(
-        rows
+        rows,
+        columns=columns,
     )
 
 
-# ==========================================================
+# ============================================================
 # SIGNAL + HORIZON
-# ==========================================================
+# ============================================================
 
-def calculate_signal_horizon_performance(df):
+def calculate_signal_horizon_performance(
+    df,
+):
+    """Calculate signal performance separately for each learning horizon."""
 
-    if df.empty:
+    if df is None or df.empty:
+
         return pd.DataFrame()
 
     rows = []
@@ -1000,25 +1600,51 @@ def calculate_signal_horizon_performance(df):
     for signal in SIGNALS:
 
         signal_df = df[
-            df["signal"] == signal
+            df[
+                "signal"
+            ]
+            ==
+            signal
         ]
 
-        for horizon in sorted(
-            signal_df["days_after"]
-            .dropna()
-            .unique()
-        ):
+        horizons = sorted(
+            set(
+                safe_numeric(
+                    signal_df[
+                        "days_after"
+                    ]
+                )
+                .dropna()
+                .astype(int)
+                .tolist()
+            )
+            & set(
+                LEARNING_HORIZONS
+            )
+        )
+
+        for horizon in horizons:
 
             group = signal_df[
-                signal_df["days_after"] == horizon
+                safe_numeric(
+                    signal_df[
+                        "days_after"
+                    ]
+                )
+                ==
+                horizon
             ]
 
             returns = (
-                group["directional_return"]
+                group[
+                    "directional_return"
+                ]
                 .dropna()
             )
 
-            count = len(returns)
+            count = len(
+                returns
+            )
 
             rows.append(
                 {
@@ -1026,13 +1652,15 @@ def calculate_signal_horizon_performance(df):
                         signal,
 
                     "Days After":
-                        int(horizon),
+                        horizon,
 
                     "Recommendations":
                         count,
 
                     "Average Return %":
-                        safe_mean(returns),
+                        safe_mean(
+                            returns
+                        ),
 
                     "Win Rate %":
                         calculate_win_rate(
@@ -1051,20 +1679,38 @@ def calculate_signal_horizon_performance(df):
     )
 
 
-# ==========================================================
+# ============================================================
 # SCORE + HORIZON
-# ==========================================================
+# ============================================================
 
-def calculate_score_horizon_performance(df):
+def calculate_score_horizon_performance(
+    df,
+):
+    """Calculate score-bucket performance separately by horizon."""
 
-    if df.empty:
+    if df is None or df.empty:
+
         return pd.DataFrame()
 
     temp = df.copy()
 
-    temp["Score Bucket"] = (
-        temp["investment_score"]
-        .apply(get_score_bucket)
+    temp[
+        "investment_score"
+    ] = safe_numeric(
+        temp[
+            "investment_score"
+        ]
+    )
+
+    temp[
+        "Score Bucket"
+    ] = (
+        temp[
+            "investment_score"
+        ]
+        .apply(
+            get_score_bucket
+        )
     )
 
     rows = []
@@ -1072,25 +1718,51 @@ def calculate_score_horizon_performance(df):
     for bucket, minimum, maximum in SCORE_BUCKETS:
 
         bucket_df = temp[
-            temp["Score Bucket"] == bucket
+            temp[
+                "Score Bucket"
+            ]
+            ==
+            bucket
         ]
 
-        for horizon in sorted(
-            bucket_df["days_after"]
-            .dropna()
-            .unique()
-        ):
+        horizons = sorted(
+            set(
+                safe_numeric(
+                    bucket_df[
+                        "days_after"
+                    ]
+                )
+                .dropna()
+                .astype(int)
+                .tolist()
+            )
+            & set(
+                LEARNING_HORIZONS
+            )
+        )
+
+        for horizon in horizons:
 
             group = bucket_df[
-                bucket_df["days_after"] == horizon
+                safe_numeric(
+                    bucket_df[
+                        "days_after"
+                    ]
+                )
+                ==
+                horizon
             ]
 
             returns = (
-                group["directional_return"]
+                group[
+                    "directional_return"
+                ]
                 .dropna()
             )
 
-            count = len(returns)
+            count = len(
+                returns
+            )
 
             rows.append(
                 {
@@ -1098,13 +1770,15 @@ def calculate_score_horizon_performance(df):
                         bucket,
 
                     "Days After":
-                        int(horizon),
+                        horizon,
 
                     "Observations":
                         count,
 
                     "Average Return %":
-                        safe_mean(returns),
+                        safe_mean(
+                            returns
+                        ),
 
                     "Win Rate %":
                         calculate_win_rate(
@@ -1123,25 +1797,47 @@ def calculate_score_horizon_performance(df):
     )
 
 
-# ==========================================================
+# ============================================================
 # CORRELATION ANALYSIS
-# ==========================================================
+# ============================================================
 
-def calculate_score_correlations(df):
+def calculate_score_correlations(
+    df,
+):
+    """Calculate score correlation with directional return by horizon."""
 
-    if df.empty:
+    if df is None or df.empty:
+
         return pd.DataFrame()
 
     rows = []
 
-    for horizon in sorted(
-        df["days_after"]
-        .dropna()
-        .unique()
-    ):
+    horizons = sorted(
+        set(
+            safe_numeric(
+                df[
+                    "days_after"
+                ]
+            )
+            .dropna()
+            .astype(int)
+            .tolist()
+        )
+        & set(
+            LEARNING_HORIZONS
+        )
+    )
+
+    for horizon in horizons:
 
         horizon_df = df[
-            df["days_after"] == horizon
+            safe_numeric(
+                df[
+                    "days_after"
+                ]
+            )
+            ==
+            horizon
         ]
 
         for component_name, column in COMPONENTS:
@@ -1152,11 +1848,13 @@ def calculate_score_correlations(df):
             valid = horizon_df[
                 [
                     column,
-                    "directional_return"
+                    "directional_return",
                 ]
             ].dropna()
 
-            if len(valid) < 20:
+            if len(
+                valid
+            ) < 20:
 
                 correlation = None
 
@@ -1165,13 +1863,13 @@ def calculate_score_correlations(df):
                 correlation = safe_correlation(
                     horizon_df,
                     column,
-                    "directional_return"
+                    "directional_return",
                 )
 
             rows.append(
                 {
                     "Days After":
-                        int(horizon),
+                        horizon,
 
                     "Component":
                         column,
@@ -1194,13 +1892,17 @@ def calculate_score_correlations(df):
     )
 
 
-# ==========================================================
+# ============================================================
 # COMPONENT CORRELATION SUMMARY
-# ==========================================================
+# ============================================================
 
-def calculate_component_correlations(df):
+def calculate_component_correlations(
+    df,
+):
+    """Calculate overall component correlation with directional return."""
 
-    if df.empty:
+    if df is None or df.empty:
+
         return pd.DataFrame()
 
     rows = []
@@ -1213,14 +1915,14 @@ def calculate_component_correlations(df):
         valid = df[
             [
                 column,
-                "directional_return"
+                "directional_return",
             ]
         ].dropna()
 
         correlation = safe_correlation(
             df,
             column,
-            "directional_return"
+            "directional_return",
         )
 
         rows.append(
@@ -1246,22 +1948,26 @@ def calculate_component_correlations(df):
     )
 
 
-# ==========================================================
+# ============================================================
 # DIAGNOSTIC OUTPUT
-# ==========================================================
+# ============================================================
 
 def run_diagnostic(
     history=None,
-    print_output=True
+    print_output=True,
 ):
+    """
+    Run a recommendation-learning diagnostic.
+
+    When no history is supplied, completed recommendation evaluations
+    are loaded directly from recommendation_evaluations.
+    """
 
     if history is None:
 
-        from data.database_queries import (
-            get_learning_history
+        history = (
+            get_completed_evaluation_history()
         )
-
-        history = get_learning_history()
 
     df = prepare_learning_data(
         history
@@ -1270,69 +1976,97 @@ def run_diagnostic(
     if df.empty:
 
         if print_output:
+
             print(
-                "\nNo recommendation learning data available.\n"
+                "\nNo completed recommendation learning data available.\n"
             )
 
         return {}
 
-    horizon = calculate_horizon_performance(
-        df
+    horizon = (
+        calculate_horizon_performance(
+            df
+        )
     )
 
-    score = calculate_score_bucket_performance(
-        df
+    score = (
+        calculate_score_bucket_performance(
+            df
+        )
     )
 
-    signal = calculate_signal_horizon_performance(
-        df
+    signal = (
+        calculate_signal_horizon_performance(
+            df
+        )
     )
 
-    technical = calculate_component_bucket(
-        df,
-        "technical_score",
-        "Technical Bucket"
+    technical = (
+        calculate_component_bucket(
+            df,
+            "technical_score",
+            "Technical Bucket",
+        )
     )
 
-    quality = calculate_component_bucket(
-        df,
-        "quality_score",
-        "Quality Bucket"
+    quality = (
+        calculate_component_bucket(
+            df,
+            "quality_score",
+            "Quality Bucket",
+        )
     )
 
-    growth = calculate_component_bucket(
-        df,
-        "growth_score",
-        "Growth Bucket"
+    growth = (
+        calculate_component_bucket(
+            df,
+            "growth_score",
+            "Growth Bucket",
+        )
     )
 
-    confidence = calculate_confidence_performance(
-        df
+    confidence = (
+        calculate_confidence_performance(
+            df
+        )
     )
 
-    correlations = calculate_score_correlations(
-        df
+    correlations = (
+        calculate_score_correlations(
+            df
+        )
     )
 
     if print_output:
 
-        print("=" * 90)
+        print(
+            "=" * 90
+        )
+
         print(
             "RECOMMENDATION LEARNING DIAGNOSTIC"
         )
-        print("=" * 90)
 
         print(
-            f"\nTotal evaluations: {len(df):,}"
+            "=" * 90
+        )
+
+        print(
+            f"\nTotal completed evaluations: "
+            f"{len(df):,}"
         )
 
         print(
             "\n" + "=" * 90
         )
+
         print(
             "1. PERFORMANCE BY HORIZON"
         )
-        print("=" * 90)
+
+        print(
+            "=" * 90
+        )
 
         print(
             horizon.to_string(
@@ -1343,10 +2077,14 @@ def run_diagnostic(
         print(
             "\n" + "=" * 90
         )
+
         print(
             "2. PERFORMANCE BY INVESTMENT SCORE"
         )
-        print("=" * 90)
+
+        print(
+            "=" * 90
+        )
 
         print(
             score.to_string(
@@ -1357,10 +2095,14 @@ def run_diagnostic(
         print(
             "\n" + "=" * 90
         )
+
         print(
             "3. PERFORMANCE BY SIGNAL"
         )
-        print("=" * 90)
+
+        print(
+            "=" * 90
+        )
 
         print(
             calculate_signal_performance(
@@ -1373,10 +2115,14 @@ def run_diagnostic(
         print(
             "\n" + "=" * 90
         )
+
         print(
             "4. PERFORMANCE BY TECHNICAL SCORE"
         )
-        print("=" * 90)
+
+        print(
+            "=" * 90
+        )
 
         print(
             technical.to_string(
@@ -1387,10 +2133,14 @@ def run_diagnostic(
         print(
             "\n" + "=" * 90
         )
+
         print(
             "5. PERFORMANCE BY QUALITY SCORE"
         )
-        print("=" * 90)
+
+        print(
+            "=" * 90
+        )
 
         print(
             quality.to_string(
@@ -1401,10 +2151,14 @@ def run_diagnostic(
         print(
             "\n" + "=" * 90
         )
+
         print(
             "6. PERFORMANCE BY GROWTH SCORE"
         )
-        print("=" * 90)
+
+        print(
+            "=" * 90
+        )
 
         print(
             growth.to_string(
@@ -1415,10 +2169,14 @@ def run_diagnostic(
         print(
             "\n" + "=" * 90
         )
+
         print(
             "7. PERFORMANCE BY CONFIDENCE SCORE"
         )
-        print("=" * 90)
+
+        print(
+            "=" * 90
+        )
 
         print(
             confidence.to_string(
@@ -1429,61 +2187,78 @@ def run_diagnostic(
         print(
             "\n" + "=" * 90
         )
+
         print(
             "8. SCORE CORRELATION WITH DIRECTIONAL RETURN"
         )
-        print("=" * 90)
 
-        for horizon_value in sorted(
-            correlations["Days After"]
-            .dropna()
-            .unique()
-        ):
+        print(
+            "=" * 90
+        )
+
+        if correlations.empty:
 
             print(
-                f"\n{int(horizon_value)}D:"
+                "No horizon correlation data available."
             )
 
-            temp = correlations[
-                correlations["Days After"]
-                == horizon_value
-            ]
+        else:
 
-            for _, row in temp.iterrows():
+            for horizon_value in sorted(
+                correlations[
+                    "Days After"
+                ]
+                .dropna()
+                .unique()
+            ):
 
-                if pd.isna(
-                    row["Correlation"]
-                ):
+                print(
+                    f"\n{int(horizon_value)}D:"
+                )
 
-                    print(
-                        f"  {row['Component']}: "
-                        f"insufficient data"
-                    )
+                temp = correlations[
+                    correlations[
+                        "Days After"
+                    ]
+                    ==
+                    horizon_value
+                ]
 
-                else:
+                for _, row in temp.iterrows():
 
-                    print(
-                        f"  {row['Component']}: "
-                        f"{row['Correlation']:.3f} "
-                        f"({int(row['Observations']):,} observations)"
-                    )
+                    if pd.isna(
+                        row[
+                            "Correlation"
+                        ]
+                    ):
+
+                        print(
+                            f"  {row['Component']}: "
+                            f"insufficient data"
+                        )
+
+                    else:
+
+                        print(
+                            f"  {row['Component']}: "
+                            f"{row['Correlation']:.3f} "
+                            f"({int(row['Observations']):,} observations)"
+                        )
 
         print(
             "\n" + "=" * 90
         )
+
         print(
             "9. SIGNAL RANKING"
         )
-        print("=" * 90)
 
-        signal_horizon = (
-            calculate_signal_horizon_performance(
-                df
-            )
+        print(
+            "=" * 90
         )
 
         print(
-            signal_horizon.to_string(
+            signal.to_string(
                 index=False
             )
         )
@@ -1491,10 +2266,14 @@ def run_diagnostic(
         print(
             "\n" + "=" * 90
         )
+
         print(
             "10. LEARNING SUMMARY"
         )
-        print("=" * 90)
+
+        print(
+            "=" * 90
+        )
 
         for _, row in horizon.iterrows():
 
@@ -1514,53 +2293,92 @@ def run_diagnostic(
                 f"{row['Win Rate %']:.1f}%"
             )
 
+            print(
+                f"{int(row['Horizon'])}D status: "
+                f"{row['Milestone Status']}"
+            )
+
         print(
             "\nDIAGNOSTIC COMPLETE"
         )
 
     return {
-        "data": df,
-        "Overall": calculate_overall_performance(df),
-        "Horizon Learning": horizon,
+
+        "data":
+            df,
+
+        "Overall":
+            calculate_overall_performance(
+                df
+            ),
+
+        "Horizon Learning":
+            horizon,
+
         "Signal Performance":
-            calculate_signal_performance(df),
+            calculate_signal_performance(
+                df
+            ),
+
         "Signal Reliability":
-            calculate_signal_reliability(df),
+            calculate_signal_reliability(
+                df
+            ),
+
         "Score Bucket Performance":
             score,
+
         "Score Horizon Performance":
-            calculate_score_horizon_performance(df),
+            calculate_score_horizon_performance(
+                df
+            ),
+
         "Signal Horizon Performance":
-            calculate_signal_horizon_performance(df),
+            calculate_signal_horizon_performance(
+                df
+            ),
+
         "Component Score Performance":
-            calculate_component_score_performance(df),
+            calculate_component_score_performance(
+                df
+            ),
+
         "Confidence Performance":
             confidence,
+
         "Technical Performance":
             technical,
+
         "Quality Performance":
             quality,
+
         "Growth Performance":
             growth,
+
         "Score Correlations":
             correlations,
+
         "Component Correlations":
-            calculate_component_correlations(df),
+            calculate_component_correlations(
+                df
+            ),
     }
 
 
-# ==========================================================
+# ============================================================
 # GENERIC COMPONENT BUCKET ANALYSIS
-# ==========================================================
+# ============================================================
 
 def calculate_component_bucket(
     df,
     column,
-    bucket_column_name
+    bucket_column_name,
 ):
+    """Calculate performance by a generic score-component bucket."""
 
     if (
-        df.empty
+        df is None
+        or df.empty
         or column not in df.columns
     ):
 
@@ -1568,9 +2386,17 @@ def calculate_component_bucket(
 
     temp = df.copy()
 
-    temp[bucket_column_name] = (
-        temp[column]
-        .apply(get_component_bucket)
+    temp[
+        bucket_column_name
+    ] = (
+        safe_numeric(
+            temp[
+                column
+            ]
+        )
+        .apply(
+            get_component_bucket
+        )
     )
 
     bucket_order = [
@@ -1586,16 +2412,23 @@ def calculate_component_bucket(
     for bucket in bucket_order:
 
         group = temp[
-            temp[bucket_column_name]
-            == bucket
+            temp[
+                bucket_column_name
+            ]
+            ==
+            bucket
         ]
 
         returns = (
-            group["directional_return"]
+            group[
+                "directional_return"
+            ]
             .dropna()
         )
 
-        count = len(returns)
+        count = len(
+            returns
+        )
 
         rows.append(
             {
@@ -1606,10 +2439,14 @@ def calculate_component_bucket(
                     count,
 
                 "Average Return %":
-                    safe_mean(returns),
+                    safe_mean(
+                        returns
+                    ),
 
                 "Median Return %":
-                    safe_median(returns),
+                    safe_median(
+                        returns
+                    ),
 
                 "Win Rate %":
                     calculate_win_rate(
@@ -1628,12 +2465,19 @@ def calculate_component_bucket(
     )
 
 
-def get_component_bucket(score):
+def get_component_bucket(
+    score,
+):
+    """Map a component score into the standard score bucket."""
 
-    if pd.isna(score):
+    if pd.isna(
+        score
+    ):
         return None
 
-    score = float(score)
+    score = float(
+        score
+    )
 
     if score < 40:
         return "<40"
@@ -1650,25 +2494,42 @@ def get_component_bucket(score):
     return "85-100"
 
 
-# ==========================================================
+# ============================================================
 # MAIN LEARNING FUNCTION
-# ==========================================================
+# ============================================================
 
 def calculate_recommendation_learning(
-    history
+    history=None,
 ):
     """
-    Main interface used by main.py.
+    Main production interface used by main.py.
 
-    This function deliberately returns the structure expected
-    by the existing Excel reporting layer.
+    Parameters
+    ----------
+    history:
+        Optional completed evaluation history.
+
+        When omitted, recommendation_evaluations is loaded directly.
+
+        Passing an explicit DataFrame remains supported for compatibility.
+
+    Returns
+    -------
+    dict
+        Complete recommendation learning model.
     """
+
+    if history is None:
+
+        history = (
+            get_completed_evaluation_history()
+        )
 
     print(
         "\nRECOMMENDATION LEARNING INPUT:",
         len(history)
         if history is not None
-        else 0
+        else 0,
     )
 
     df = prepare_learning_data(
@@ -1678,7 +2539,7 @@ def calculate_recommendation_learning(
     if df.empty:
 
         print(
-            "RECOMMENDATION LEARNING: NO DATA"
+            "RECOMMENDATION LEARNING: NO COMPLETED EVALUATIONS"
         )
 
         return {
@@ -1733,7 +2594,7 @@ def calculate_recommendation_learning(
 
     print(
         "RECOMMENDATION LEARNING PREPARED:",
-        len(df)
+        len(df),
     )
 
     if "signal" in df.columns:
@@ -1743,7 +2604,9 @@ def calculate_recommendation_learning(
         )
 
         print(
-            df["signal"].value_counts()
+            df[
+                "signal"
+            ].value_counts()
         )
 
     if "days_after" in df.columns:
@@ -1753,15 +2616,20 @@ def calculate_recommendation_learning(
         )
 
         print(
-            df["days_after"].value_counts()
+            df[
+                "days_after"
+            ].value_counts()
+            .sort_index()
         )
 
-    # ------------------------------------------------------
+    # --------------------------------------------------------
     # Calculate all learning outputs
-    # ------------------------------------------------------
+    # --------------------------------------------------------
 
-    overall = calculate_overall_performance(
-        df
+    overall = (
+        calculate_overall_performance(
+            df
+        )
     )
 
     horizon_learning = (
@@ -1816,7 +2684,7 @@ def calculate_recommendation_learning(
         calculate_component_bucket(
             df,
             "technical_score",
-            "Technical Bucket"
+            "Technical Bucket",
         )
     )
 
@@ -1824,7 +2692,7 @@ def calculate_recommendation_learning(
         calculate_component_bucket(
             df,
             "quality_score",
-            "Quality Bucket"
+            "Quality Bucket",
         )
     )
 
@@ -1832,7 +2700,7 @@ def calculate_recommendation_learning(
         calculate_component_bucket(
             df,
             "growth_score",
-            "Growth Bucket"
+            "Growth Bucket",
         )
     )
 
@@ -1848,58 +2716,54 @@ def calculate_recommendation_learning(
         )
     )
 
-    # ------------------------------------------------------
+    # --------------------------------------------------------
     # Diagnostic console output
-    # ------------------------------------------------------
+    # --------------------------------------------------------
 
     print(
         "Overall:",
-        overall
+        overall,
     )
 
     print(
         "Horizon Learning:",
-        horizon_learning
+        horizon_learning,
     )
 
     print(
         "Signal Performance:",
-        signal_performance
+        signal_performance,
     )
 
     print(
         "Signal Reliability:",
-        signal_reliability
+        signal_reliability,
     )
 
     print(
         "Score Bucket Performance:",
-        score_bucket_performance
+        score_bucket_performance,
     )
 
     print(
         "Score Horizon Performance:",
-        score_horizon_performance
+        score_horizon_performance,
     )
 
     print(
         "Signal Horizon Performance:",
-        signal_horizon_performance
+        signal_horizon_performance,
     )
 
     print(
         "Component Score Performance:",
-        component_score_performance
+        component_score_performance,
     )
 
     print(
         "Confidence Performance:",
-        confidence_performance
+        confidence_performance,
     )
-
-    # ------------------------------------------------------
-    # Return complete learning model
-    # ------------------------------------------------------
 
     return {
 
@@ -1947,21 +2811,169 @@ def calculate_recommendation_learning(
     }
 
 
-# ==========================================================
+# ============================================================
+# LEARNING MILESTONE STATUS
+# ============================================================
+
+def get_learning_milestone_status(
+    horizon_performance,
+):
+    """
+    Summarise the current maturity of the governed learning milestones.
+
+    Returns one record for each of:
+
+        5
+        10
+        60
+
+    Also identifies the highest mature milestone.
+    """
+
+    horizons = list(
+        LEARNING_HORIZONS
+    )
+
+    records = []
+
+    highest_mature_horizon = None
+
+    if (
+        horizon_performance is None
+        or horizon_performance.empty
+    ):
+
+        horizon_lookup = {}
+
+    else:
+
+        horizon_lookup = {}
+
+        for _, row in horizon_performance.iterrows():
+
+            try:
+
+                horizon = int(
+                    row[
+                        "Horizon"
+                    ]
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                continue
+
+            horizon_lookup[
+                horizon
+            ] = row.to_dict()
+
+    for horizon in horizons:
+
+        row = horizon_lookup.get(
+            horizon,
+            {},
+        )
+
+        observations = int(
+            safe_numeric(
+                row.get(
+                    "Recommendations",
+                    0,
+                )
+            )
+        )
+
+        reliability = str(
+            row.get(
+                "Reliability",
+                "IMMATURE",
+            )
+        ).strip().upper()
+
+        status = str(
+            row.get(
+                "Milestone Status",
+                "IMMATURE",
+            )
+        ).strip().upper()
+
+        if (
+            reliability == "VALID"
+            and
+            observations >= MIN_RELIABLE_OBSERVATIONS
+        ):
+
+            highest_mature_horizon = max(
+                highest_mature_horizon or 0,
+                horizon,
+            )
+
+        records.append(
+            {
+                "Horizon":
+                    horizon,
+
+                "Observations":
+                    observations,
+
+                "Reliability":
+                    reliability,
+
+                "Status":
+                    status,
+
+                "Average Return %":
+                    safe_numeric(
+                        row.get(
+                            "Average Return %",
+                            0,
+                        )
+                    ),
+
+                "Median Return %":
+                    safe_numeric(
+                        row.get(
+                            "Median Return %",
+                            0,
+                        )
+                    ),
+
+                "Win Rate %":
+                    safe_numeric(
+                        row.get(
+                            "Win Rate %",
+                            0,
+                        )
+                    ),
+            }
+        )
+
+    return {
+
+        "milestones":
+            records,
+
+        "highest_mature_horizon":
+            highest_mature_horizon,
+    }
+
+
+# ============================================================
 # STANDALONE EXECUTION
-# ==========================================================
+# ============================================================
 
 if __name__ == "__main__":
 
-    from data.database_queries import (
-        get_learning_history
+    history = (
+        get_completed_evaluation_history()
     )
 
-    history = get_learning_history()
-
     print(
-        "\nLoaded learning history:",
-        len(history)
+        "\nLoaded completed evaluation history:",
+        len(history),
     )
 
     run_diagnostic(

@@ -2,6 +2,77 @@ import pandas as pd
 import os
 from datetime import datetime
 
+
+# ============================================================
+# Final Portfolio Decisions - Executive Report Contract
+# ============================================================
+
+FINAL_DECISION_COLUMNS = [
+    # Position
+    "Ticker",
+    "Name",
+    "Asset Type",
+    "Existing Holding",
+    "Sector",
+    "Allocation %",
+
+    # Investment
+    "Investment Score",
+    "Signal",
+
+    # Decision
+    "Proposed Action",
+    "Final Decision",
+    "Decision Status",
+
+    # Evidence / governance
+    "Evidence Score",
+    "Evidence Strength",
+    "Decision Support",
+    "Deterministic Confidence",
+
+    # Independent AI review
+    "LLM Assessment",
+    "LLM Confidence",
+    "LLM Reason",
+
+    # Reconciliation
+    "Reconciliation Status",
+    "Reconciliation Reason",
+
+    # Capital impact
+    "Reduction %",
+    "Released Capital",
+    "Buy Value",
+]
+
+
+FINAL_DECISION_HEADERS = {
+    "Ticker": "Ticker",
+    "Name": "Name",
+    "Asset Type": "Asset",
+    "Existing Holding": "Held?",
+    "Sector": "Sector",
+    "Allocation %": "Current Allocation %",
+    "Investment Score": "Investment Score",
+    "Signal": "Signal",
+    "Proposed Action": "Proposed Action",
+    "Final Decision": "Final Decision",
+    "Decision Status": "Decision Status",
+    "Evidence Score": "Evidence Score",
+    "Evidence Strength": "Evidence Strength",
+    "Decision Support": "Evidence Support",
+    "Deterministic Confidence": "Decision Confidence",
+    "LLM Assessment": "LLM Review",
+    "LLM Confidence": "LLM Confidence",
+    "LLM Reason": "LLM Reason",
+    "Reconciliation Status": "Reconciliation",
+    "Reconciliation Reason": "Reconciliation Reason",
+    "Reduction %": "Reduction %",
+    "Released Capital": "Released Capital",
+    "Buy Value": "Buy Value",
+}
+
 def create_capital_allocation_sheet(
     writer,
     capital_allocation
@@ -996,7 +1067,14 @@ def create_report(
             "Creating Final Portfolio Decisions"
         )
 
-        final_portfolio_decisions.to_excel(
+        final_report = (
+            prepare_final_portfolio_decisions_report(
+                final_portfolio_decisions,
+                results,
+            )
+        )
+
+        final_report.to_excel(
             writer,
             sheet_name="Final Portfolio Decisions",
             index=False
@@ -1545,3 +1623,449 @@ def create_report(
         )
 
     return filename
+
+# ============================================================
+# Final Portfolio Decisions - Executive Report Preparation
+# ============================================================
+
+def prepare_final_portfolio_decisions_report(
+    final_portfolio_decisions,
+    results,
+):
+    """
+    Prepare the Final Portfolio Decisions dataframe for the
+    executive-facing Excel worksheet.
+
+    Responsibilities
+    ----------------
+    - Preserve the underlying decision output unchanged.
+    - Enrich non-owned BUY NEW candidates with Name / Sector.
+    - Normalise Existing Holding to True / False.
+    - Force non-owned allocation to 0%.
+    - Populate missing reconciliation reasons.
+    - Remove upstream / duplicate columns.
+    - Return the final executive-report dataframe.
+
+    This function changes reporting presentation only.
+    It does not alter portfolio decision logic.
+    """
+
+    if final_portfolio_decisions is None:
+
+        final_report = pd.DataFrame()
+
+    elif isinstance(
+        final_portfolio_decisions,
+        pd.DataFrame,
+    ):
+
+        final_report = (
+            final_portfolio_decisions
+            .copy()
+        )
+
+    else:
+
+        try:
+
+            final_report = pd.DataFrame(
+                final_portfolio_decisions
+            )
+
+        except Exception:
+
+            final_report = pd.DataFrame()
+
+    # --------------------------------------------------------
+    # Ensure required fields exist.
+    # --------------------------------------------------------
+
+    required_defaults = {
+
+        "Ticker": "",
+
+        "Name": "",
+
+        "Asset Type": "STOCK",
+
+        "Existing Holding": False,
+
+        "Sector": "",
+
+        "Allocation %": 0.0,
+
+        "Investment Score": 0.0,
+
+        "Signal": "",
+
+        "Proposed Action": "HOLD",
+
+        "Final Decision": "HOLD",
+
+        "Decision Status": "",
+
+        "Evidence Score": 0.0,
+
+        "Evidence Strength": "UNKNOWN",
+
+        "Decision Support": "UNKNOWN",
+
+        "Deterministic Confidence": 0.0,
+
+        "LLM Assessment": "CHALLENGE",
+
+        "LLM Confidence": 0.0,
+
+        "LLM Reason": "",
+
+        "Reconciliation Status": "",
+
+        "Reconciliation Reason": "",
+
+        "Reduction %": 0.0,
+
+        "Released Capital": 0.0,
+
+        "Buy Value": 0.0,
+
+    }
+
+    for column, default_value in required_defaults.items():
+
+        if column not in final_report.columns:
+
+            final_report[
+                column
+            ] = default_value
+
+    # --------------------------------------------------------
+    # Build lookup from stock scan results.
+    #
+    # BUY NEW candidates will not exist in portfolio_summary,
+    # so Name and Sector may need to come from results.
+    # --------------------------------------------------------
+
+    try:
+
+        results_df = pd.DataFrame(
+            results
+        )
+
+    except Exception:
+
+        results_df = pd.DataFrame()
+
+    results_lookup = {}
+
+    if (
+        not results_df.empty
+        and
+        "Ticker" in results_df.columns
+    ):
+
+        for _, row in results_df.iterrows():
+
+            ticker = str(
+                row.get(
+                    "Ticker",
+                    ""
+                )
+            ).strip().upper()
+
+            if not ticker:
+                continue
+
+            if ticker not in results_lookup:
+
+                results_lookup[
+                    ticker
+                ] = row.to_dict()
+
+    # --------------------------------------------------------
+    # Process each final decision row.
+    # --------------------------------------------------------
+
+    for index in final_report.index:
+
+        ticker = str(
+            final_report.at[
+                index,
+                "Ticker"
+            ]
+        ).strip().upper()
+
+        # ----------------------------------------------------
+        # Existing holding
+        # ----------------------------------------------------
+
+        holding_value = final_report.at[
+            index,
+            "Existing Holding"
+        ]
+
+        if isinstance(
+            holding_value,
+            bool,
+        ):
+
+            owned = holding_value
+
+        else:
+
+            holding_text = str(
+                holding_value
+            ).strip().upper()
+
+            owned = (
+                holding_text
+                in {
+                    "TRUE",
+                    "YES",
+                    "Y",
+                    "1",
+                    "OWNED",
+                    "EXISTING",
+                }
+            )
+
+        final_report.at[
+            index,
+            "Existing Holding"
+        ] = owned
+
+        # ----------------------------------------------------
+        # Existing holdings keep their portfolio allocation.
+        # Non-owned candidates have zero current allocation.
+        # ----------------------------------------------------
+
+        if not owned:
+
+            final_report.at[
+                index,
+                "Allocation %"
+            ] = 0.0
+
+        # ----------------------------------------------------
+        # Enrich Name / Sector for BUY NEW candidates.
+        # ----------------------------------------------------
+
+        result_record = results_lookup.get(
+            ticker
+        )
+
+        if result_record:
+
+            current_name = final_report.at[
+                index,
+                "Name"
+            ]
+
+            if (
+                pd.isna(
+                    current_name
+                )
+                or
+                str(
+                    current_name
+                ).strip()
+                == ""
+            ):
+
+                final_report.at[
+                    index,
+                    "Name"
+                ] = (
+                    result_record.get(
+                        "Name"
+                    )
+                    or
+                    result_record.get(
+                        "Company"
+                    )
+                    or
+                    ""
+                )
+
+            current_sector = final_report.at[
+                index,
+                "Sector"
+            ]
+
+            if (
+                pd.isna(
+                    current_sector
+                )
+                or
+                str(
+                    current_sector
+                ).strip()
+                == ""
+            ):
+
+                final_report.at[
+                    index,
+                    "Sector"
+                ] = (
+                    result_record.get(
+                        "Sector"
+                    )
+                    or
+                    result_record.get(
+                        "Sector_Scanner"
+                    )
+                    or
+                    ""
+                )
+
+        # ----------------------------------------------------
+        # Populate missing reconciliation reason.
+        # ----------------------------------------------------
+
+        reconciliation_reason = (
+            final_report.at[
+                index,
+                "Reconciliation Reason"
+            ]
+        )
+
+        if (
+            pd.isna(
+                reconciliation_reason
+            )
+            or
+            str(
+                reconciliation_reason
+            ).strip()
+            == ""
+        ):
+
+            final_decision = str(
+                final_report.at[
+                    index,
+                    "Final Decision"
+                ]
+            ).strip().upper()
+
+            if final_decision == "NO ACTION":
+
+                reconciliation_reason = (
+                    "BUY NEW proposal did not pass the "
+                    "governed decision process; no position "
+                    "should be established."
+                )
+
+            elif final_decision == "HOLD":
+
+                reconciliation_reason = (
+                    "No sufficiently strong evidence justified "
+                    "a change to the existing position."
+                )
+
+            elif final_decision == "REDUCE":
+
+                reconciliation_reason = (
+                    "REDUCE proposal passed the governed "
+                    "decision and reconciliation checks."
+                )
+
+            elif final_decision == "SELL":
+
+                reconciliation_reason = (
+                    "SELL proposal passed the governed "
+                    "decision and reconciliation checks."
+                )
+
+            elif final_decision == "BUY NEW":
+
+                reconciliation_reason = (
+                    "BUY NEW proposal passed the governed "
+                    "decision and reconciliation checks."
+                )
+
+            elif final_decision == "BUY MORE":
+
+                reconciliation_reason = (
+                    "BUY MORE proposal passed the governed "
+                    "decision and reconciliation checks."
+                )
+
+            else:
+
+                reconciliation_reason = ""
+
+            final_report.at[
+                index,
+                "Reconciliation Reason"
+            ] = reconciliation_reason
+
+    # --------------------------------------------------------
+    # Numeric normalisation.
+    # --------------------------------------------------------
+
+    numeric_columns = [
+        "Allocation %",
+        "Investment Score",
+        "Evidence Score",
+        "Deterministic Confidence",
+        "LLM Confidence",
+        "Reduction %",
+        "Released Capital",
+        "Buy Value",
+    ]
+
+    for column in numeric_columns:
+
+        final_report[
+            column
+        ] = pd.to_numeric(
+            final_report[
+                column
+            ],
+            errors="coerce",
+        ).fillna(
+            0.0
+        )
+
+    # --------------------------------------------------------
+    # Select executive columns only.
+    # --------------------------------------------------------
+
+    available_columns = [
+        column
+        for column in FINAL_DECISION_COLUMNS
+        if column in final_report.columns
+    ]
+
+    final_report = final_report[
+        available_columns
+    ].copy()
+
+    # --------------------------------------------------------
+    # Rename for executive presentation.
+    # --------------------------------------------------------
+
+    final_report.rename(
+        columns=FINAL_DECISION_HEADERS,
+        inplace=True,
+    )
+
+    # --------------------------------------------------------
+    # Executive presentation values.
+    # --------------------------------------------------------
+
+    if "Held?" in final_report.columns:
+
+        final_report[
+            "Held?"
+        ] = final_report[
+            "Held?"
+        ].map(
+            {
+                True: "Yes",
+                False: "No",
+            }
+        ).fillna(
+            "No"
+        )
+
+    return final_report

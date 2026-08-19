@@ -17,6 +17,7 @@ Database:
 
 import sqlite3
 import os
+import json
 import pandas as pd
 from datetime import datetime
 
@@ -86,6 +87,60 @@ def initialise_database():
             confidence_reasons TEXT,
 
             evaluated INTEGER DEFAULT 0
+        )
+        """
+    )
+
+    # -------------------------------------------------
+    # Recommendation evidence snapshot table
+    #
+    # Stores the evidence available when a recommendation was
+    # created. Kept separate from recommendations for backwards
+    # compatibility with all existing consumers.
+    # -------------------------------------------------
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recommendation_evidence
+        (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recommendation_id INTEGER NOT NULL,
+            ticker TEXT,
+            capture_date TEXT,
+            signal TEXT,
+            investment_score REAL,
+            technical_score REAL,
+            quality_score REAL,
+            growth_score REAL,
+            confidence_score REAL,
+            entry_price REAL,
+            rsi REAL,
+            sma50 REAL,
+            sma200 REAL,
+            return_3m REAL,
+            trend TEXT,
+            trend_score REAL,
+            momentum_score REAL,
+            volume_score REAL,
+            risk_score REAL,
+            revenue_growth REAL,
+            profit_margin REAL,
+            return_on_equity REAL,
+            debt_to_equity REAL,
+            sector TEXT,
+            industry TEXT,
+            technical_reasons TEXT,
+            technical_risks TEXT,
+            recommendation_reasons TEXT,
+            recommendation_risks TEXT,
+            ai_decision TEXT,
+            ai_conviction TEXT,
+            ai_conviction_score REAL,
+            ai_action TEXT,
+            ai_investment_thesis TEXT,
+            ai_risks TEXT,
+            FOREIGN KEY(recommendation_id) REFERENCES recommendations(id),
+            UNIQUE(recommendation_id)
         )
         """
     )
@@ -273,17 +328,34 @@ def initialise_database():
 # SAVE RECOMMENDATIONS
 # =====================================================
 
+# =====================================================
+# SAVE RECOMMENDATIONS
+# =====================================================
+
 def save_recommendations(
     stock_results
 ):
-
     """
     Save the daily stock recommendations.
 
-    Only one recommendation set is saved per
-    trading day.
+    Existing behaviour
+    ------------------
+    Only one recommendation set is saved per trading day.
+    Existing recommendation rows are never duplicated.
 
-    Existing daily recommendations are not duplicated.
+    Recommendation evidence
+    ------------------------
+    Each recommendation also has an immutable evidence snapshot
+    stored in:
+
+        recommendation_evidence
+
+    For an existing daily recommendation run, the function will
+    backfill a missing evidence snapshot without creating a new
+    recommendation row.
+
+    This keeps the existing recommendations table and downstream
+    logic backwards compatible.
     """
 
     if not stock_results:
@@ -292,137 +364,810 @@ def save_recommendations(
     conn = get_connection()
     cursor = conn.cursor()
 
-    # -------------------------------------------------
-    # Determine trading date
-    # -------------------------------------------------
+    try:
 
-    today = get_last_trading_day(
-        "SPY",
-        datetime.today().strftime("%Y-%m-%d")
-    )
+        # -------------------------------------------------
+        # Determine trading date
+        # -------------------------------------------------
 
-    # -------------------------------------------------
-    # Prevent duplicate daily recommendation runs
-    # -------------------------------------------------
-
-    cursor.execute(
-        """
-        SELECT COUNT(*)
-        FROM recommendations
-        WHERE date = ?
-        """,
-        (
-            today,
-        )
-    )
-
-    if cursor.fetchone()[0] > 0:
-
-        conn.close()
-
-        print(
-            "Recommendations already saved for today"
+        today = get_last_trading_day(
+            "SPY",
+            datetime.today().strftime(
+                "%Y-%m-%d"
+            )
         )
 
-        return
-
-    # -------------------------------------------------
-    # Insert recommendations
-    # -------------------------------------------------
-
-    saved = 0
-
-    for stock in stock_results:
+        # -------------------------------------------------
+        # Determine whether today's recommendations already
+        # exist.
+        # -------------------------------------------------
 
         cursor.execute(
             """
-            INSERT INTO recommendations
-            (
-                date,
-                ticker,
-                signal,
-                investment_score,
-                technical_score,
-                quality_score,
-                growth_score,
-                price,
-                confidence,
-                confidence_score,
-                confidence_reasons,
-                evaluated
-            )
+            SELECT
+                id,
+                ticker
 
-            VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0
-            )
+            FROM recommendations
+
+            WHERE date = ?
             """,
             (
-
                 today,
-
-                stock.get(
-                    "Ticker",
-                    ""
-                ),
-
-                stock.get(
-                    "Signal",
-                    ""
-                ),
-
-                stock.get(
-                    "Investment Score",
-                    0
-                ),
-
-                stock.get(
-                    "Technical Score",
-                    0
-                ),
-
-                stock.get(
-                    "Quality Score",
-                    0
-                ),
-
-                stock.get(
-                    "Growth Score",
-                    0
-                ),
-
-                stock.get(
-                    "Price",
-                    0
-                ),
-
-                stock.get(
-                    "Confidence",
-                    ""
-                ),
-
-                stock.get(
-                    "Confidence Score",
-                    0
-                ),
-
-                str(
-                    stock.get(
-                        "Confidence Reasons",
-                        []
-                    )
-                )
-
             )
         )
 
-        saved += 1
+        existing_rows = cursor.fetchall()
 
-    conn.commit()
-    conn.close()
+        existing_recommendations = {
 
-    print(
-        f"Saved {saved} recommendations"
-    )
+            str(
+                row[1]
+            ).strip().upper():
+
+                row[0]
+
+            for row in existing_rows
+
+            if row[1]
+        }
+
+        if existing_recommendations:
+
+            print(
+                "Recommendations already saved for today"
+            )
+
+        # -------------------------------------------------
+        # Counters
+        # -------------------------------------------------
+
+        saved = 0
+        evidence_saved = 0
+
+        # -------------------------------------------------
+        # Process each stock result
+        # -------------------------------------------------
+
+        for stock in stock_results:
+
+            ticker = str(
+                stock.get(
+                    "Ticker",
+                    ""
+                )
+            ).strip().upper()
+
+            if not ticker:
+                continue
+
+            # =================================================
+            # EXISTING RECOMMENDATION
+            # =================================================
+
+            if ticker in existing_recommendations:
+
+                recommendation_id = (
+                    existing_recommendations[
+                        ticker
+                    ]
+                )
+
+                # ---------------------------------------------
+                # Check whether evidence snapshot already exists
+                # ---------------------------------------------
+
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+
+                    FROM recommendation_evidence
+
+                    WHERE recommendation_id = ?
+                    """,
+                    (
+                        recommendation_id,
+                    )
+                )
+
+                evidence_exists = (
+                    cursor.fetchone()[0] > 0
+                )
+
+                if evidence_exists:
+
+                    continue
+
+                # ---------------------------------------------
+                # Backfill missing evidence snapshot
+                # ---------------------------------------------
+
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO recommendation_evidence
+                    (
+                        recommendation_id,
+                        ticker,
+                        capture_date,
+
+                        signal,
+
+                        investment_score,
+                        technical_score,
+                        quality_score,
+                        growth_score,
+                        confidence_score,
+
+                        entry_price,
+                        rsi,
+                        sma50,
+                        sma200,
+                        return_3m,
+
+                        trend,
+                        trend_score,
+                        momentum_score,
+                        volume_score,
+                        risk_score,
+
+                        revenue_growth,
+                        profit_margin,
+                        return_on_equity,
+                        debt_to_equity,
+
+                        sector,
+                        industry,
+
+                        technical_reasons,
+                        technical_risks,
+                        recommendation_reasons,
+                        recommendation_risks,
+
+                        ai_decision,
+                        ai_conviction,
+                        ai_conviction_score,
+                        ai_action,
+                        ai_investment_thesis,
+                        ai_risks
+                    )
+
+                    VALUES (
+                        ?, ?, ?,
+                        ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?,
+                        ?, ?,
+                        ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        recommendation_id,
+
+                        ticker,
+
+                        today,
+
+                        stock.get(
+                            "Signal",
+                            ""
+                        ),
+
+                        stock.get(
+                            "Investment Score",
+                            0
+                        ),
+
+                        stock.get(
+                            "Technical Score",
+                            0
+                        ),
+
+                        stock.get(
+                            "Quality Score",
+                            0
+                        ),
+
+                        stock.get(
+                            "Growth Score",
+                            0
+                        ),
+
+                        stock.get(
+                            "Confidence Score",
+                            0
+                        ),
+
+                        stock.get(
+                            "Price",
+                            0
+                        ),
+
+                        stock.get(
+                            "RSI",
+                            0
+                        ),
+
+                        stock.get(
+                            "SMA50",
+                            0
+                        ),
+
+                        stock.get(
+                            "SMA200",
+                            0
+                        ),
+
+                        stock.get(
+                            "Return_3m",
+                            0
+                        ),
+
+                        stock.get(
+                            "Trend",
+                            ""
+                        ),
+
+                        stock.get(
+                            "Trend Score",
+                            0
+                        ),
+
+                        stock.get(
+                            "Momentum Score",
+                            0
+                        ),
+
+                        stock.get(
+                            "Volume Score",
+                            0
+                        ),
+
+                        stock.get(
+                            "Risk Score",
+                            0
+                        ),
+
+                        stock.get(
+                            "Revenue Growth",
+                            0
+                        ),
+
+                        stock.get(
+                            "Profit Margin",
+                            0
+                        ),
+
+                        stock.get(
+                            "Return on Equity",
+                            0
+                        ),
+
+                        stock.get(
+                            "Debt to Equity",
+                            0
+                        ),
+
+                        stock.get(
+                            "Sector",
+                            ""
+                        ),
+
+                        stock.get(
+                            "Industry",
+                            ""
+                        ),
+
+                        json.dumps(
+                            stock.get(
+                                "Technical Reasons",
+                                []
+                            ),
+                            default=str
+                        ),
+
+                        json.dumps(
+                            stock.get(
+                                "Technical Risks",
+                                []
+                            ),
+                            default=str
+                        ),
+
+                        json.dumps(
+                            stock.get(
+                                "Recommendation Reasons",
+                                []
+                            ),
+                            default=str
+                        ),
+
+                        json.dumps(
+                            stock.get(
+                                "Recommendation Risks",
+                                []
+                            ),
+                            default=str
+                        ),
+
+                        stock.get(
+                            "AI Decision",
+                            ""
+                        ),
+
+                        stock.get(
+                            "AI Conviction",
+                            ""
+                        ),
+
+                        stock.get(
+                            "AI Conviction Score",
+                            0
+                        ),
+
+                        json.dumps(
+                            stock.get(
+                                "AI Action",
+                                []
+                            ),
+                            default=str
+                        ),
+
+                        json.dumps(
+                            stock.get(
+                                "AI Investment Thesis",
+                                []
+                            ),
+                            default=str
+                        ),
+
+                        json.dumps(
+                            stock.get(
+                                "AI Risks",
+                                []
+                            ),
+                            default=str
+                        ),
+                    )
+                )
+
+                if cursor.rowcount > 0:
+
+                    evidence_saved += 1
+
+                continue
+
+            # =================================================
+            # NEW RECOMMENDATION
+            # =================================================
+
+            cursor.execute(
+                """
+                INSERT INTO recommendations
+                (
+                    date,
+                    ticker,
+                    signal,
+                    investment_score,
+                    technical_score,
+                    quality_score,
+                    growth_score,
+                    price,
+                    confidence,
+                    confidence_score,
+                    confidence_reasons,
+                    evaluated
+                )
+
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0
+                )
+                """,
+                (
+
+                    today,
+
+                    ticker,
+
+                    stock.get(
+                        "Signal",
+                        ""
+                    ),
+
+                    stock.get(
+                        "Investment Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Technical Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Quality Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Growth Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Price",
+                        0
+                    ),
+
+                    stock.get(
+                        "Confidence",
+                        ""
+                    ),
+
+                    stock.get(
+                        "Confidence Score",
+                        0
+                    ),
+
+                    str(
+                        stock.get(
+                            "Confidence Reasons",
+                            []
+                        )
+                    )
+
+                )
+            )
+
+            recommendation_id = (
+                cursor.lastrowid
+            )
+
+            # ---------------------------------------------
+            # Save immutable evidence snapshot
+            # ---------------------------------------------
+
+            cursor.execute(
+                """
+                INSERT INTO recommendation_evidence
+                (
+                    recommendation_id,
+                    ticker,
+                    capture_date,
+
+                    signal,
+
+                    investment_score,
+                    technical_score,
+                    quality_score,
+                    growth_score,
+                    confidence_score,
+
+                    entry_price,
+                    rsi,
+                    sma50,
+                    sma200,
+                    return_3m,
+
+                    trend,
+                    trend_score,
+                    momentum_score,
+                    volume_score,
+                    risk_score,
+
+                    revenue_growth,
+                    profit_margin,
+                    return_on_equity,
+                    debt_to_equity,
+
+                    sector,
+                    industry,
+
+                    technical_reasons,
+                    technical_risks,
+                    recommendation_reasons,
+                    recommendation_risks,
+
+                    ai_decision,
+                    ai_conviction,
+                    ai_conviction_score,
+                    ai_action,
+                    ai_investment_thesis,
+                    ai_risks
+                )
+
+                VALUES (
+                    ?, ?, ?,
+                    ?,
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+
+                    recommendation_id,
+
+                    ticker,
+
+                    today,
+
+                    stock.get(
+                        "Signal",
+                        ""
+                    ),
+
+                    stock.get(
+                        "Investment Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Technical Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Quality Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Growth Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Confidence Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Price",
+                        0
+                    ),
+
+                    stock.get(
+                        "RSI",
+                        0
+                    ),
+
+                    stock.get(
+                        "SMA50",
+                        0
+                    ),
+
+                    stock.get(
+                        "SMA200",
+                        0
+                    ),
+
+                    stock.get(
+                        "Return_3m",
+                        0
+                    ),
+
+                    stock.get(
+                        "Trend",
+                        ""
+                    ),
+
+                    stock.get(
+                        "Trend Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Momentum Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Volume Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Risk Score",
+                        0
+                    ),
+
+                    stock.get(
+                        "Revenue Growth",
+                        0
+                    ),
+
+                    stock.get(
+                        "Profit Margin",
+                        0
+                    ),
+
+                    stock.get(
+                        "Return on Equity",
+                        0
+                    ),
+
+                    stock.get(
+                        "Debt to Equity",
+                        0
+                    ),
+
+                    stock.get(
+                        "Sector",
+                        ""
+                    ),
+
+                    stock.get(
+                        "Industry",
+                        ""
+                    ),
+
+                    json.dumps(
+                        stock.get(
+                            "Technical Reasons",
+                            []
+                        ),
+                        default=str
+                    ),
+
+                    json.dumps(
+                        stock.get(
+                            "Technical Risks",
+                            []
+                        ),
+                        default=str
+                    ),
+
+                    json.dumps(
+                        stock.get(
+                            "Recommendation Reasons",
+                            []
+                        ),
+                        default=str
+                    ),
+
+                    json.dumps(
+                        stock.get(
+                            "Recommendation Risks",
+                            []
+                        ),
+                        default=str
+                    ),
+
+                    stock.get(
+                        "AI Decision",
+                        ""
+                    ),
+
+                    stock.get(
+                        "AI Conviction",
+                        ""
+                    ),
+
+                    stock.get(
+                        "AI Conviction Score",
+                        0
+                    ),
+
+                    json.dumps(
+                        stock.get(
+                            "AI Action",
+                            []
+                        ),
+                        default=str
+                    ),
+
+                    json.dumps(
+                        stock.get(
+                            "AI Investment Thesis",
+                            []
+                        ),
+                        default=str
+                    ),
+
+                    json.dumps(
+                        stock.get(
+                            "AI Risks",
+                            []
+                        ),
+                        default=str
+                    ),
+                )
+            )
+
+            saved += 1
+            evidence_saved += 1
+
+        # -------------------------------------------------
+        # Commit recommendation/evidence changes together
+        # -------------------------------------------------
+
+        conn.commit()
+
+        print(
+            f"Saved {saved} new recommendations"
+        )
+
+        print(
+            f"Saved {evidence_saved} recommendation evidence snapshots"
+        )
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        conn.close()
+
+# =====================================================
+# GET RECOMMENDATION EVIDENCE
+# =====================================================
+
+def get_recommendation_evidence(recommendation_id):
+    """
+    Return the immutable evidence snapshot for a recommendation.
+
+    Returns None for historical recommendations created before
+    recommendation_evidence was introduced.
+    """
+
+    conn = get_connection()
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT *
+            FROM recommendation_evidence
+            WHERE recommendation_id = ?
+            """,
+            (recommendation_id,)
+        )
+
+        row = cursor.fetchone()
+
+        if row is None:
+            return None
+
+        columns = [
+            description[0]
+            for description in cursor.description
+        ]
+
+        result = dict(zip(columns, row))
+
+        json_fields = [
+            "technical_reasons",
+            "technical_risks",
+            "recommendation_reasons",
+            "recommendation_risks",
+            "ai_action",
+            "ai_investment_thesis",
+            "ai_risks",
+        ]
+
+        for field in json_fields:
+            value = result.get(field)
+            if not value:
+                result[field] = []
+                continue
+            try:
+                result[field] = json.loads(value)
+            except Exception:
+                result[field] = [value]
+
+        return result
+
+    finally:
+        conn.close()
 
 
 # =====================================================
@@ -608,13 +1353,29 @@ def save_recommendation_evaluations(
             )
         )
 
-        evaluation_date = row[
+        evaluation_date = row.get(
             "evaluation_date"
-        ]
+        )
 
-        price = row[
-            "price"
-        ]
+        if pd.notna(
+            evaluation_date
+        ):
+            evaluation_date = (
+                pd.Timestamp(
+                    evaluation_date
+                )
+                .strftime("%Y-%m-%d")
+            )
+        else:
+            evaluation_date = None
+
+        price = row.get(
+            "evaluation_price",
+            row.get(
+                "price",
+                0
+            )
+        )
 
         outcome = row[
             "outcome"
@@ -961,3 +1722,74 @@ def get_evaluation_history():
     conn.close()
 
     return df
+
+# =====================================================
+# GET LATEST RECOMMENDATION ID
+# =====================================================
+
+def get_latest_recommendation_id(
+    ticker,
+    recommendation_date=None,
+):
+    """
+    Return the recommendation ID for the latest saved
+    recommendation for a ticker.
+
+    When recommendation_date is supplied, restrict the lookup
+    to that date.
+
+    Returns None when no matching recommendation exists.
+    """
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        ticker = str(
+            ticker
+        ).strip().upper()
+
+        if recommendation_date:
+
+            cursor.execute(
+                """
+                SELECT id
+                FROM recommendations
+                WHERE UPPER(TRIM(ticker)) = ?
+                AND date = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (
+                    ticker,
+                    recommendation_date,
+                )
+            )
+
+        else:
+
+            cursor.execute(
+                """
+                SELECT id
+                FROM recommendations
+                WHERE UPPER(TRIM(ticker)) = ?
+                ORDER BY date DESC, id DESC
+                LIMIT 1
+                """,
+                (
+                    ticker,
+                )
+            )
+
+        row = cursor.fetchone()
+
+        if row is None:
+            return None
+
+        return row[0]
+
+    finally:
+
+        conn.close()

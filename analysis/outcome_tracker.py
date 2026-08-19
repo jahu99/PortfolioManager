@@ -1,84 +1,189 @@
-# analysis/outcome_tracker.py
+
+"""
+Outcome Tracker
+
+Purpose
+-------
+Evaluate historical stock recommendations against realised market
+performance at the agreed learning milestones:
+
+    - 5 trading days
+    - 10 trading days
+    - 60 trading days
+
+This module is the source of truth for realised recommendation outcomes.
+
+Architecture
+------------
+
+    recommendations
+            |
+            v
+    outcome_tracker.py
+            |
+            v
+    recommendation_evaluations
+            |
+            v
+    recommendation_learning.py
+            |
+            v
+    recommendation_intelligence.py
+            |
+            v
+    AI Decision Context
+            |
+            v
+    Governed Portfolio Decision
+
+Important
+---------
+- Only 5, 10 and 60 trading-day milestones are evaluated.
+- 20 trading days is deliberately NOT a learning milestone.
+- Raw OHLCV data is the only data cached by this module.
+- Completed evaluations contain realised return/outcome data.
+- Future/uncompleted milestones are simply omitted.
+- Historical recommendation scores are copied into each completed
+  evaluation so learning can relate outcomes to the score at the
+  time of recommendation.
+- No recommendation scores or weights are recalculated here.
+- No portfolio decisions are made here.
+"""
+
+from __future__ import annotations
+
+import os
 
 import pandas as pd
+import yfinance as yf
 
-from data.market_data import get_stock_data
 
-
-# =====================================================
+# ============================================================
 # Evaluation horizons
-# =====================================================
+# ============================================================
 
 EVALUATION_HORIZONS = [
     5,
     10,
-    20,
-    60
+    60,
 ]
 
 
-# =====================================================
+# ============================================================
 # Run-level price cache
-# =====================================================
+# ============================================================
+
+# Raw Close price series only.
 #
-# This prevents the same ticker being loaded repeatedly
-# during a single evaluation run.
-#
-# The underlying data is supplied by market_data.py,
-# which already maintains the parquet price cache.
-# =====================================================
+# This prevents the same ticker being loaded repeatedly during
+# a single evaluation run.
 
-PRICE_HISTORY_CACHE = {}
+PRICE_HISTORY_CACHE: dict[str, pd.Series] = {}
 
 
-# =====================================================
+# ============================================================
+# Starting price helper
+# ============================================================
+
+def safe_start_price(
+    value,
+):
+    """
+    Safely convert the recommendation starting price to a valid
+    positive float.
+    """
+
+    try:
+
+        if value is None:
+            return None
+
+        price = float(
+            value
+        )
+
+        if price <= 0:
+            return None
+
+        return price
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        return None
+
+
+# ============================================================
 # Price history
-# =====================================================
-
-# =====================================================
-# Price history
-# =====================================================
+# ============================================================
 
 def load_price_history(
     ticker,
     recommendation_date,
-    today=None
+    today=None,
 ):
     """
-    Load raw historical OHLCV data for outcome evaluation.
+    Load raw historical Close prices for outcome evaluation.
+
+    Parameters
+    ----------
+    ticker:
+        Security ticker.
+
+    recommendation_date:
+        Earliest recommendation date that must be covered.
+
+    today:
+        Current evaluation date.
+
+    Returns
+    -------
+    pandas.Series
+        Raw closing prices indexed by trading date.
 
     Cache policy
     ------------
-    The cache contains RAW PRICE DATA ONLY.
+    Only raw market prices are cached.
 
-    We reuse cached data when it already contains the
-    latest available trading session.
-
-    If the cache is missing newer data, only the missing
-    period is downloaded and merged into the cache.
-
-    No scores, indicators, signals, recommendations,
-    outcomes or learning results are cached here.
+    The cache is refreshed when it does not contain the latest
+    available market session. No recommendation, score, signal or
+    learning result is stored in this cache.
     """
-
-    import os
-    import yfinance as yf
 
     CACHE_DIR = "cache/prices"
 
     os.makedirs(
         CACHE_DIR,
-        exist_ok=True
+        exist_ok=True,
     )
 
     try:
 
+        ticker = str(
+            ticker
+        ).strip().upper()
+
+        if not ticker:
+            return pd.Series(
+                dtype=float
+            )
+
         recommendation_date = (
             pd.to_datetime(
-                recommendation_date
+                recommendation_date,
+                errors="coerce",
             )
             .normalize()
         )
+
+        if pd.isna(
+            recommendation_date
+        ):
+            return pd.Series(
+                dtype=float
+            )
 
         if today is None:
 
@@ -87,24 +192,40 @@ def load_price_history(
                 .normalize()
             )
 
-        if today <= recommendation_date:
+        else:
 
+            today = (
+                pd.to_datetime(
+                    today,
+                    errors="coerce",
+                )
+                .normalize()
+            )
+
+        if pd.isna(today):
+            return pd.Series(
+                dtype=float
+            )
+
+        if today <= recommendation_date:
             return pd.Series(
                 dtype=float
             )
 
         cache_file = os.path.join(
             CACHE_DIR,
-            f"{ticker}_evaluation.parquet"
+            f"{ticker}_evaluation.parquet",
         )
 
         cached = None
 
-        # =================================================
+        # --------------------------------------------------------
         # Load existing raw evaluation cache
-        # =================================================
+        # --------------------------------------------------------
 
-        if os.path.exists(cache_file):
+        if os.path.exists(
+            cache_file
+        ):
 
             try:
 
@@ -114,9 +235,17 @@ def load_price_history(
 
                 if not cached.empty:
 
-                    cached.index = pd.to_datetime(
-                        cached.index
-                    ).normalize()
+                    cached.index = (
+                        pd.to_datetime(
+                            cached.index,
+                            errors="coerce",
+                        )
+                        .normalize()
+                    )
+
+                    cached = cached[
+                        ~cached.index.isna()
+                    ]
 
                     cached = (
                         cached
@@ -128,18 +257,18 @@ def load_price_history(
                         ]
                     )
 
-            except Exception as e:
+            except Exception as exc:
 
                 print(
                     f"{ticker}: "
-                    f"evaluation cache read failed: {e}"
+                    f"evaluation cache read failed: {exc}"
                 )
 
                 cached = None
 
-        # =================================================
+        # --------------------------------------------------------
         # Determine latest cached date
-        # =================================================
+        # --------------------------------------------------------
 
         latest_cached_date = None
 
@@ -152,13 +281,9 @@ def load_price_history(
                 cached.index.max()
             )
 
-        # =================================================
+        # --------------------------------------------------------
         # Determine whether refresh is required
-        # =================================================
-
-        # We deliberately allow today's date to be a
-        # non-trading day. Yahoo will simply return the
-        # latest available trading session.
+        # --------------------------------------------------------
 
         needs_refresh = (
             cached is None
@@ -166,9 +291,9 @@ def load_price_history(
             or latest_cached_date < today
         )
 
-        # =================================================
+        # --------------------------------------------------------
         # Download only when required
-        # =================================================
+        # --------------------------------------------------------
 
         if needs_refresh:
 
@@ -182,10 +307,8 @@ def load_price_history(
 
             else:
 
-                # Need enough history to cover the
-                # recommendation date plus all evaluation
-                # horizons.
-
+                # Include a small buffer before the earliest
+                # recommendation date.
                 download_start = (
                     recommendation_date
                     -
@@ -205,21 +328,31 @@ def load_price_history(
                 f"{today.date()}"
             )
 
-            data = yf.download(
-                ticker,
-                start=download_start,
-                end=download_end,
-                progress=False,
-                auto_adjust=False
-            )
+            try:
+
+                data = yf.download(
+                    ticker,
+                    start=download_start,
+                    end=download_end,
+                    progress=False,
+                    auto_adjust=False,
+                )
+
+            except Exception as exc:
+
+                print(
+                    f"{ticker}: "
+                    f"Yahoo download failed: {exc}"
+                )
+
+                data = pd.DataFrame()
 
             if not data.empty:
 
                 # Flatten yfinance MultiIndex columns.
-
                 if isinstance(
                     data.columns,
-                    pd.MultiIndex
+                    pd.MultiIndex,
                 ):
 
                     data.columns = (
@@ -227,9 +360,17 @@ def load_price_history(
                         .get_level_values(0)
                     )
 
-                data.index = pd.to_datetime(
-                    data.index
-                ).normalize()
+                data.index = (
+                    pd.to_datetime(
+                        data.index,
+                        errors="coerce",
+                    )
+                    .normalize()
+                )
+
+                data = data[
+                    ~data.index.isna()
+                ]
 
                 data = (
                     data
@@ -241,10 +382,7 @@ def load_price_history(
                     ]
                 )
 
-                # -------------------------------------------------
-                # Merge RAW OHLCV data only
-                # -------------------------------------------------
-
+                # Raw OHLCV merge only.
                 if (
                     cached is not None
                     and not cached.empty
@@ -253,7 +391,7 @@ def load_price_history(
                     cached = pd.concat(
                         [
                             cached,
-                            data
+                            data,
                         ]
                     )
 
@@ -271,48 +409,63 @@ def load_price_history(
 
                     cached = data
 
-                # -------------------------------------------------
-                # Save RAW price data only
-                # -------------------------------------------------
-
+                # Save raw price data only.
                 try:
 
                     cached.to_parquet(
                         cache_file
                     )
 
-                except Exception as e:
+                except Exception as exc:
 
                     print(
                         f"{ticker}: "
-                        f"evaluation cache save failed: {e}"
+                        f"evaluation cache save failed: {exc}"
                     )
 
-        # =================================================
+        # --------------------------------------------------------
         # Validate history
-        # =================================================
+        # --------------------------------------------------------
 
         if (
             cached is None
             or cached.empty
+            or "Close" not in cached.columns
         ):
 
             return pd.Series(
                 dtype=float
             )
 
-        # =================================================
+        # --------------------------------------------------------
         # Extract Close
-        # =================================================
+        # --------------------------------------------------------
 
-        close = cached["Close"]
+        close = cached[
+            "Close"
+        ]
 
         if isinstance(
             close,
-            pd.DataFrame
+            pd.DataFrame,
         ):
 
-            close = close.iloc[:, 0]
+            close = close.iloc[
+                :,
+                0,
+            ]
+
+        close.index = (
+            pd.to_datetime(
+                close.index,
+                errors="coerce",
+            )
+            .normalize()
+        )
+
+        close = close[
+            ~close.index.isna()
+        ]
 
         close = (
             close
@@ -320,9 +473,7 @@ def load_price_history(
             .sort_index()
         )
 
-        # We need the recommendation date and everything
-        # after it for trading-day evaluation.
-
+        # Keep the recommendation date and everything after it.
         close = close[
             close.index >= (
                 recommendation_date
@@ -333,139 +484,156 @@ def load_price_history(
 
         return close
 
-    except Exception as e:
+    except Exception as exc:
 
         print(
             f"Historical price error "
-            f"{ticker}: {e}"
+            f"{ticker}: {exc}"
         )
 
         return pd.Series(
             dtype=float
         )
-# =====================================================
+
+
+# ============================================================
 # Trading days elapsed
-# =====================================================
+# ============================================================
 
 def get_trading_days_elapsed(
     close,
-    recommendation_date
+    recommendation_date,
 ):
     """
-    Return the number of completed trading sessions
-    following the recommendation date.
+    Return the number of completed trading sessions after the
+    recommendation date.
 
-    Example:
+    The recommendation date itself is excluded.
 
-        recommendation Friday
-        Monday = session 1
-        Tuesday = session 2
+    Example
+    -------
+    Recommendation Friday:
+
+        Monday = trading day 1
+        Tuesday = trading day 2
     """
 
     try:
 
-        if close is None or close.empty:
+        if (
+            close is None
+            or close.empty
+        ):
 
             return None
 
-
         recommendation_date = (
             pd.to_datetime(
-                recommendation_date
+                recommendation_date,
+                errors="coerce",
             )
             .normalize()
         )
 
+        if pd.isna(
+            recommendation_date
+        ):
+
+            return None
 
         future_dates = close.index[
             close.index > recommendation_date
         ]
 
-
         return len(
             future_dates
         )
 
-
-    except Exception as e:
+    except Exception as exc:
 
         print(
             "Trading-day calculation error:",
-            e
+            exc,
         )
 
         return None
 
 
-# =====================================================
+# ============================================================
 # Evaluation price
-# =====================================================
+# ============================================================
 
 def get_evaluation_price(
     close,
     recommendation_date,
-    days
+    days,
 ):
     """
-    Return the closing price after exactly `days`
-    trading sessions following the recommendation date.
+    Return the closing price exactly `days` completed trading
+    sessions after the recommendation date.
 
-    Day 1 = first trading session after recommendation.
+    Day 1 is the first trading session after the recommendation.
     """
 
     try:
 
-        if close is None or close.empty:
+        if (
+            close is None
+            or close.empty
+        ):
 
             return None
 
-
         recommendation_date = (
             pd.to_datetime(
-                recommendation_date
+                recommendation_date,
+                errors="coerce",
             )
             .normalize()
         )
 
+        if pd.isna(
+            recommendation_date
+        ):
+
+            return None
 
         future_prices = close[
             close.index > recommendation_date
         ]
 
-
-        if len(future_prices) < days:
+        if len(
+            future_prices
+        ) < days:
 
             return None
-
 
         price = future_prices.iloc[
             days - 1
         ]
 
-
         return float(
             price
         )
 
-
-    except Exception as e:
+    except Exception as exc:
 
         print(
-            f"Evaluation price error: {e}"
+            f"Evaluation price error: {exc}"
         )
 
         return None
 
 
-# =====================================================
+# ============================================================
 # Outcome
-# =====================================================
+# ============================================================
 
 def calculate_outcome(
-    return_percent
+    return_percent,
 ):
     """
-    Classify the outcome of a recommendation.
+    Classify an evaluation result.
 
     SUCCESS:
         +5% or better
@@ -478,58 +646,128 @@ def calculate_outcome(
     """
 
     if return_percent >= 5:
-
         return "SUCCESS"
 
-
-    elif return_percent <= -5:
-
+    if return_percent <= -5:
         return "FAILED"
-
 
     return "FLAT"
 
 
-# =====================================================
-# Main evaluation engine
-# =====================================================
+# ============================================================
+# Recommendation date lookup
+# ============================================================
 
-def calculate_evaluations(
-    recommendations
+def build_ticker_recommendation_dates(
+    recommendations,
 ):
     """
-    Evaluate recommendation performance at:
+    Determine the earliest recommendation date for each ticker.
+
+    Each ticker is loaded once per evaluation run, using the earliest
+    recommendation date as the required starting point for raw price
+    history.
+    """
+
+    result = {}
+
+    if (
+        recommendations is None
+        or recommendations.empty
+    ):
+
+        return result
+
+    for _, row in recommendations.iterrows():
+
+        ticker = str(
+            row.get(
+                "ticker",
+                "",
+            )
+        ).upper().strip()
+
+        if not ticker:
+            continue
+
+        recommendation_date = pd.to_datetime(
+            row.get(
+                "date"
+            ),
+            errors="coerce",
+        )
+
+        if pd.isna(
+            recommendation_date
+        ):
+
+            continue
+
+        recommendation_date = (
+            recommendation_date
+            .normalize()
+        )
+
+        existing = result.get(
+            ticker
+        )
+
+        if (
+            existing is None
+            or
+            recommendation_date < existing
+        ):
+
+            result[
+                ticker
+            ] = recommendation_date
+
+    return result
+
+
+# ============================================================
+# Main evaluation engine
+# ============================================================
+
+def calculate_evaluations(
+    recommendations,
+):
+    """
+    Evaluate recommendation performance at the agreed milestones:
 
         5 trading days
         10 trading days
-        20 trading days
         60 trading days
+
+    Only completed evaluations are returned.
 
     The function:
 
-        1. Reuses the existing market-data parquet cache.
-        2. Loads each ticker only once per run.
-        3. Reuses that history for all recommendations
-           for the ticker.
-        4. Creates one evaluation row per completed
-           recommendation/horizon combination.
+        1. Reuses the raw market-data parquet cache.
+        2. Determines the earliest recommendation date per ticker.
+        3. Loads each ticker once per run.
+        4. Stores the resulting Close series in the run-level cache.
+        5. Reuses that history for all recommendations for the ticker.
+        6. Creates one row per completed recommendation/horizon.
+        7. Never creates rows for milestones that have not yet completed.
+
+    This function is the source of realised outcome evidence.
+    Downstream learning should consume its completed evaluation rows.
     """
 
     print(
         "OUTCOME EVALUATION START"
     )
 
-
-    # -------------------------------------------------
+    # --------------------------------------------------------
     # Clear run-level cache
-    # -------------------------------------------------
+    # --------------------------------------------------------
 
     PRICE_HISTORY_CACHE.clear()
 
-
-    # -------------------------------------------------
+    # --------------------------------------------------------
     # No recommendations
-    # -------------------------------------------------
+    # --------------------------------------------------------
 
     if (
         recommendations is None
@@ -542,62 +780,35 @@ def calculate_evaluations(
 
         return pd.DataFrame()
 
-
     evaluations = []
-
 
     today = (
         pd.Timestamp.today()
         .normalize()
     )
 
+    # ========================================================
+    # Identify unique tickers and earliest dates
+    # ========================================================
 
-    # =================================================
-    # Identify unique tickers
-    # =================================================
+    ticker_recommendation_dates = (
+        build_ticker_recommendation_dates(
+            recommendations
+        )
+    )
 
-    tickers = set()
-
-
-    for _, row in recommendations.iterrows():
-
-        ticker = str(
-            row.get(
-                "ticker",
-                ""
-            )
-        ).upper().strip()
-
-
-        if ticker:
-
-            tickers.add(
-                ticker
-            )
-
+    tickers = set(
+        ticker_recommendation_dates.keys()
+    )
 
     print(
         "UNIQUE EVALUATION TICKERS:",
-        len(tickers)
+        len(tickers),
     )
 
-
-    # =================================================
+    # ========================================================
     # Load price history once per ticker
-    # =================================================
-    #
-    # IMPORTANT:
-    #
-    # This is now the only loading phase.
-    #
-    # Each ticker calls get_stock_data() once.
-    #
-    # If the parquet cache is valid:
-    #
-    #     ticker: loaded from cache
-    #
-    # No Yahoo download occurs.
-    # =================================================
+    # ========================================================
 
     for ticker in sorted(
         tickers
@@ -607,71 +818,87 @@ def calculate_evaluations(
             f"Loading price history: {ticker}"
         )
 
+        recommendation_date = (
+            ticker_recommendation_dates[
+                ticker
+            ]
+        )
 
         close = load_price_history(
             ticker,
-            None,
-            today
+            recommendation_date,
+            today,
         )
 
-
-        if close is None or close.empty:
+        if (
+            close is None
+            or close.empty
+        ):
 
             print(
                 f"{ticker}: "
                 f"historical price data unavailable"
             )
 
+            continue
+
+        # IMPORTANT:
+        # The previous implementation loaded the data but did not
+        # store it in PRICE_HISTORY_CACHE. The processing phase then
+        # retrieved an empty cache. Store the loaded raw Close series.
+        PRICE_HISTORY_CACHE[
+            ticker
+        ] = close
 
     print(
         "PRICE HISTORY CACHE COMPLETE:",
-        len(PRICE_HISTORY_CACHE),
-        "tickers"
+        len(
+            PRICE_HISTORY_CACHE
+        ),
+        "tickers",
     )
 
-
-    # =================================================
+    # ========================================================
     # Process recommendations
-    # =================================================
+    # ========================================================
 
     for _, row in recommendations.iterrows():
 
         ticker = str(
             row.get(
                 "ticker",
-                ""
+                "",
             )
         ).upper().strip()
 
+        if not ticker:
+            continue
 
         print(
             "Evaluating",
-            ticker
+            ticker,
         )
-
 
         try:
 
-            # -----------------------------------------
+            # ------------------------------------------------
             # Recommendation ID
-            # -----------------------------------------
+            # ------------------------------------------------
 
             recommendation_id = row.get(
                 "id"
             )
 
-
-            # -----------------------------------------
+            # ------------------------------------------------
             # Recommendation date
-            # -----------------------------------------
+            # ------------------------------------------------
 
             recommendation_date = pd.to_datetime(
                 row.get(
                     "date"
                 ),
-                errors="coerce"
+                errors="coerce",
             )
-
 
             if pd.isna(
                 recommendation_date
@@ -684,26 +911,23 @@ def calculate_evaluations(
 
                 continue
 
-
             recommendation_date = (
                 recommendation_date
                 .normalize()
             )
 
-
-            # -----------------------------------------
+            # ------------------------------------------------
             # Price history from run-level cache
-            # -----------------------------------------
+            # ------------------------------------------------
 
             close = PRICE_HISTORY_CACHE.get(
-                ticker,
-                pd.Series(
-                    dtype=float
-                )
+                ticker
             )
 
-
-            if close is None or close.empty:
+            if (
+                close is None
+                or close.empty
+            ):
 
                 print(
                     f"{ticker}: "
@@ -712,18 +936,16 @@ def calculate_evaluations(
 
                 continue
 
-
-            # -----------------------------------------
+            # ------------------------------------------------
             # Trading sessions elapsed
-            # -----------------------------------------
+            # ------------------------------------------------
 
             trading_days_elapsed = (
                 get_trading_days_elapsed(
                     close,
-                    recommendation_date
+                    recommendation_date,
                 )
             )
-
 
             if trading_days_elapsed is None:
 
@@ -733,7 +955,6 @@ def calculate_evaluations(
                 )
 
                 continue
-
 
             print(
                 f"DEBUG EVALUATOR: "
@@ -746,24 +967,18 @@ def calculate_evaluations(
                 f"{row.get('confidence_score', 0)}"
             )
 
-
-            # -----------------------------------------
+            # ------------------------------------------------
             # Starting price
-            # -----------------------------------------
+            # ------------------------------------------------
 
-            start_price = row.get(
-                "price",
-                0
+            start_price = safe_start_price(
+                row.get(
+                    "price",
+                    0,
+                )
             )
 
-
-            try:
-
-                start_price = float(
-                    start_price
-                )
-
-            except Exception:
+            if start_price is None:
 
                 print(
                     f"{ticker}: "
@@ -772,29 +987,21 @@ def calculate_evaluations(
 
                 continue
 
-
-            if start_price <= 0:
-
-                print(
-                    f"{ticker}: "
-                    f"invalid starting price "
-                    f"{start_price}"
-                )
-
-                continue
-
-
-            # =========================================
+            # =================================================
             # Evaluation horizons
-            # =========================================
+            # =================================================
 
             for horizon in EVALUATION_HORIZONS:
 
-                # -------------------------------------
+                # ---------------------------------------------
                 # Not enough trading sessions
-                # -------------------------------------
+                # ---------------------------------------------
 
-                if trading_days_elapsed < horizon:
+                if (
+                    trading_days_elapsed
+                    <
+                    horizon
+                ):
 
                     print(
                         f"{ticker}: "
@@ -806,19 +1013,17 @@ def calculate_evaluations(
 
                     continue
 
-
-                # -------------------------------------
+                # ---------------------------------------------
                 # Evaluation price
-                # -------------------------------------
+                # ---------------------------------------------
 
                 evaluation_price = (
                     get_evaluation_price(
                         close,
                         recommendation_date,
-                        horizon
+                        horizon,
                     )
                 )
-
 
                 if evaluation_price is None:
 
@@ -830,13 +1035,11 @@ def calculate_evaluations(
 
                     continue
 
-
-                # -------------------------------------
+                # ---------------------------------------------
                 # Return
-                # -------------------------------------
+                # ---------------------------------------------
 
                 return_percent = round(
-
                     (
                         (
                             evaluation_price
@@ -847,29 +1050,24 @@ def calculate_evaluations(
                         start_price
                     )
                     * 100,
-
-                    2
-
+                    2,
                 )
 
-
-                # -------------------------------------
+                # ---------------------------------------------
                 # Outcome
-                # -------------------------------------
+                # ---------------------------------------------
 
                 outcome = calculate_outcome(
                     return_percent
                 )
 
-
-                # -------------------------------------
+                # ---------------------------------------------
                 # Evaluation date
-                # -------------------------------------
+                # ---------------------------------------------
 
                 future_dates = close.index[
                     close.index > recommendation_date
                 ]
-
 
                 if len(
                     future_dates
@@ -885,15 +1083,12 @@ def calculate_evaluations(
 
                     evaluation_date = today
 
-
-                # -------------------------------------
-                # Store evaluation
-                # -------------------------------------
+                # ---------------------------------------------
+                # Store completed evaluation
+                # ---------------------------------------------
 
                 evaluations.append(
-
                     {
-
                         "recommendation_id":
                             recommendation_id,
 
@@ -903,7 +1098,7 @@ def calculate_evaluations(
                         "signal":
                             row.get(
                                 "signal",
-                                ""
+                                "",
                             ),
 
                         "recommendation_date":
@@ -918,13 +1113,13 @@ def calculate_evaluations(
                         "start_price":
                             round(
                                 start_price,
-                                4
+                                4,
                             ),
 
                         "evaluation_price":
                             round(
                                 evaluation_price,
-                                4
+                                4,
                             ),
 
                         "return_percent":
@@ -936,37 +1131,34 @@ def calculate_evaluations(
                         "investment_score":
                             row.get(
                                 "investment_score",
-                                0
+                                0,
                             ),
 
                         "technical_score":
                             row.get(
                                 "technical_score",
-                                0
+                                0,
                             ),
 
                         "quality_score":
                             row.get(
                                 "quality_score",
-                                0
+                                0,
                             ),
 
                         "growth_score":
                             row.get(
                                 "growth_score",
-                                0
+                                0,
                             ),
 
                         "confidence_score":
                             row.get(
                                 "confidence_score",
-                                0
-                            )
-
+                                0,
+                            ),
                     }
-
                 )
-
 
                 print(
                     f"DEBUG EVALUATION "
@@ -976,20 +1168,18 @@ def calculate_evaluations(
                     f"{outcome}"
                 )
 
-
-        except Exception as e:
+        except Exception as exc:
 
             print(
                 f"Evaluation error "
-                f"{ticker}: {e}"
+                f"{ticker}: {exc}"
             )
 
             continue
 
-
-    # =================================================
+    # ========================================================
     # Create DataFrame
-    # =================================================
+    # ========================================================
 
     if not evaluations:
 
@@ -999,15 +1189,13 @@ def calculate_evaluations(
 
         return pd.DataFrame()
 
-
     df = pd.DataFrame(
         evaluations
     )
 
-
-    # =================================================
+    # ========================================================
     # Final ordering
-    # =================================================
+    # ========================================================
 
     if not df.empty:
 
@@ -1016,11 +1204,10 @@ def calculate_evaluations(
             for column in [
                 "recommendation_date",
                 "ticker",
-                "days_after"
+                "days_after",
             ]
             if column in df.columns
         ]
-
 
         if sort_columns:
 
@@ -1034,11 +1221,49 @@ def calculate_evaluations(
                 )
             )
 
+    # ========================================================
+    # Diagnostics
+    # ========================================================
 
     print(
         "EVALUATIONS CREATED:",
-        df.shape
+        df.shape,
     )
 
+    if not df.empty:
+
+        print(
+            "\nEVALUATION HORIZON COUNTS:"
+        )
+
+        print(
+            df[
+                "days_after"
+            ]
+            .value_counts()
+            .sort_index()
+            .to_string()
+        )
 
     return df
+
+
+# ============================================================
+# Module test
+# ============================================================
+
+if __name__ == "__main__":
+
+    print(
+        "Outcome Tracker"
+    )
+
+    print(
+        "Evaluation horizons:",
+        EVALUATION_HORIZONS,
+    )
+
+    print(
+        "Expected milestones: "
+        "5, 10, 60 trading days"
+    )

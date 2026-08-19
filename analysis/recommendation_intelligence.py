@@ -80,16 +80,26 @@ def _find_column(df, possible_names):
     return None
 
 
-def _get_signal_evidence(signal, signal_performance):
+def _get_signal_evidence(
+    signal,
+    signal_performance,
+):
     """
     Return historical evidence for the supplied signal.
+
+    Reliability is derived from the observation count when the
+    upstream dataset does not explicitly provide a Reliability
+    column. This keeps Recommendation Intelligence aligned with
+    recommendation_learning.py.
     """
+
+    MIN_RELIABLE_OBSERVATIONS = 20
 
     evidence = {
         "observations": 0,
         "average_return": 0.0,
         "win_rate": 0.0,
-        "reliability": "INSUFFICIENT DATA",
+        "reliability": "NO DATA",
     }
 
     if (
@@ -100,18 +110,24 @@ def _get_signal_evidence(signal, signal_performance):
 
     signal_column = _find_column(
         signal_performance,
-        ["Signal"]
+        [
+            "Signal",
+            "signal",
+        ],
     )
 
     if signal_column is None:
         return evidence
 
     matching = signal_performance[
-        signal_performance[signal_column]
+        signal_performance[
+            signal_column
+        ]
         .astype(str)
         .str.strip()
         .str.upper()
-        == _normalise_text(signal)
+        ==
+        _normalise_text(signal)
     ]
 
     if matching.empty:
@@ -127,7 +143,7 @@ def _get_signal_evidence(signal, signal_performance):
             "Evaluations",
             "Count",
             "Sample Size",
-        ]
+        ],
     )
 
     average_return_column = _find_column(
@@ -137,7 +153,7 @@ def _get_signal_evidence(signal, signal_performance):
             "Average_Return_Percent",
             "Average Return",
             "Mean Return %",
-        ]
+        ],
     )
 
     win_rate_column = _find_column(
@@ -146,7 +162,7 @@ def _get_signal_evidence(signal, signal_performance):
             "Win Rate %",
             "Win_Rate_Percent",
             "Win Rate",
-        ]
+        ],
     )
 
     reliability_column = _find_column(
@@ -154,74 +170,137 @@ def _get_signal_evidence(signal, signal_performance):
         [
             "Reliability",
             "Signal Reliability",
-        ]
+        ],
     )
 
     if observations_column is not None:
 
         evidence["observations"] = int(
             _safe_number(
-                row[observations_column]
+                row[
+                    observations_column
+                ]
             )
         )
 
     if average_return_column is not None:
 
         evidence["average_return"] = _safe_number(
-            row[average_return_column]
+            row[
+                average_return_column
+            ]
         )
 
     if win_rate_column is not None:
 
         evidence["win_rate"] = _safe_number(
-            row[win_rate_column]
+            row[
+                win_rate_column
+            ]
         )
+
+    # --------------------------------------------------------
+    # Prefer explicit upstream reliability.
+    # Otherwise derive it from observation count.
+    # --------------------------------------------------------
 
     if reliability_column is not None:
 
-        reliability = row[reliability_column]
+        reliability = row[
+            reliability_column
+        ]
 
-        if not pd.isna(reliability):
+        if not pd.isna(
+            reliability
+        ):
 
-            evidence["reliability"] = str(
+            evidence[
+                "reliability"
+            ] = str(
                 reliability
-            )
+            ).strip().upper()
+
+    if (
+        evidence["reliability"]
+        in {
+            "NO DATA",
+            "",
+        }
+    ):
+
+        if evidence[
+            "observations"
+        ] >= MIN_RELIABLE_OBSERVATIONS:
+
+            evidence[
+                "reliability"
+            ] = "VALID"
+
+        elif evidence[
+            "observations"
+        ] > 0:
+
+            evidence[
+                "reliability"
+            ] = "INSUFFICIENT DATA"
+
+        else:
+
+            evidence[
+                "reliability"
+            ] = "NO DATA"
 
     return evidence
 
-
-def _get_score_bucket(score):
+def _get_score_bucket(
+    score,
+):
     """
     Convert an investment score into the standard learning bucket.
 
-    Buckets used by the recommendation-learning engine:
+    Must remain aligned with analysis.recommendation_learning.py.
 
-        85-100
-        70-84
+    Buckets:
+
+        <40
+        40-54
         55-69
-        0-54
+        70-84
+        85-100
     """
 
-    score = _safe_number(score)
+    score = _safe_number(
+        score,
+        default=-1,
+    )
 
-    if score >= 85:
-        return "85-100"
+    if score < 0:
+        return None
 
-    if score >= 70:
-        return "70-84"
+    if score < 40:
+        return "<40"
 
-    if score >= 55:
+    if score < 55:
+        return "40-54"
+
+    if score < 70:
         return "55-69"
 
-    return "0-54"
+    if score < 85:
+        return "70-84"
 
+    return "85-100"
 
 def _get_score_bucket_evidence(
     score,
-    score_bucket_performance
+    score_bucket_performance,
 ):
     """
-    Return historical evidence for the stock's investment-score bucket.
+    Return historical evidence for the investment-score bucket.
+
+    Numeric range matching is preferred because it keeps this
+    module compatible with the authoritative bucket definitions
+    produced by recommendation_learning.py.
     """
 
     evidence = {
@@ -236,7 +315,37 @@ def _get_score_bucket_evidence(
     ):
         return evidence
 
-    bucket = _get_score_bucket(score)
+    score = _safe_number(
+        score,
+        default=-1,
+    )
+
+    if score < 0:
+        return evidence
+
+    bucket = _get_score_bucket(
+        score
+    )
+
+    minimum_column = _find_column(
+        score_bucket_performance,
+        [
+            "Minimum Score",
+            "Minimum_Score",
+            "Min Score",
+            "Min_Score",
+        ],
+    )
+
+    maximum_column = _find_column(
+        score_bucket_performance,
+        [
+            "Maximum Score",
+            "Maximum_Score",
+            "Max Score",
+            "Max_Score",
+        ],
+    )
 
     bucket_column = _find_column(
         score_bucket_performance,
@@ -244,19 +353,60 @@ def _get_score_bucket_evidence(
             "Score Bucket",
             "Score_Bucket",
             "Bucket",
-        ]
+        ],
     )
 
-    if bucket_column is None:
-        return evidence
+    matching = pd.DataFrame()
 
-    matching = score_bucket_performance[
-        score_bucket_performance[bucket_column]
-        .astype(str)
-        .str.strip()
-        .str.upper()
-        == bucket.upper()
-    ]
+    # --------------------------------------------------------
+    # Preferred: numeric bucket range.
+    # --------------------------------------------------------
+
+    if (
+        minimum_column is not None
+        and maximum_column is not None
+    ):
+
+        minimums = pd.to_numeric(
+            score_bucket_performance[
+                minimum_column
+            ],
+            errors="coerce",
+        )
+
+        maximums = pd.to_numeric(
+            score_bucket_performance[
+                maximum_column
+            ],
+            errors="coerce",
+        )
+
+        matching = score_bucket_performance[
+            (minimums <= score)
+            &
+            (maximums >= score)
+        ]
+
+    # --------------------------------------------------------
+    # Fallback: exact bucket label.
+    # --------------------------------------------------------
+
+    if (
+        matching.empty
+        and bucket_column is not None
+        and bucket is not None
+    ):
+
+        matching = score_bucket_performance[
+            score_bucket_performance[
+                bucket_column
+            ]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            ==
+            bucket.upper()
+        ]
 
     if matching.empty:
         return evidence
@@ -266,12 +416,12 @@ def _get_score_bucket_evidence(
     observations_column = _find_column(
         matching,
         [
-            "Recommendations",
             "Observations",
+            "Recommendations",
             "Evaluations",
             "Count",
             "Sample Size",
-        ]
+        ],
     )
 
     average_return_column = _find_column(
@@ -281,7 +431,7 @@ def _get_score_bucket_evidence(
             "Average_Return_Percent",
             "Average Return",
             "Mean Return %",
-        ]
+        ],
     )
 
     win_rate_column = _find_column(
@@ -290,31 +440,42 @@ def _get_score_bucket_evidence(
             "Win Rate %",
             "Win_Rate_Percent",
             "Win Rate",
-        ]
+        ],
     )
 
     if observations_column is not None:
 
-        evidence["observations"] = int(
+        evidence[
+            "observations"
+        ] = int(
             _safe_number(
-                row[observations_column]
+                row[
+                    observations_column
+                ]
             )
         )
 
     if average_return_column is not None:
 
-        evidence["average_return"] = _safe_number(
-            row[average_return_column]
+        evidence[
+            "average_return"
+        ] = _safe_number(
+            row[
+                average_return_column
+            ]
         )
 
     if win_rate_column is not None:
 
-        evidence["win_rate"] = _safe_number(
-            row[win_rate_column]
+        evidence[
+            "win_rate"
+        ] = _safe_number(
+            row[
+                win_rate_column
+            ]
         )
 
     return evidence
-
 
 def _get_component_evidence(
     component_score_performance
@@ -382,7 +543,8 @@ def generate_recommendation_intelligence(
     results,
     signal_performance,
     score_bucket_performance,
-    component_score_performance
+    component_score_performance,
+    horizon_performance=None,
 ):
     """
     Generate the Recommendation Intelligence DataFrame.
@@ -409,6 +571,10 @@ def generate_recommendation_intelligence(
 
     print(
         "RECOMMENDATION INTELLIGENCE START"
+    )
+
+    preferred_horizon = _get_preferred_learning_horizon(
+        horizon_performance
     )
 
     if results is None:
@@ -722,6 +888,16 @@ def generate_recommendation_intelligence(
             "Intelligence Notes":
                 "; ".join(notes),
 
+            "Preferred Learning Horizon":
+                preferred_horizon,
+
+            "Learning Horizon Status":
+                (
+                    f"{preferred_horizon} DAY MATURE"
+                    if preferred_horizon is not None
+                    else "IMMATURE"
+                ),
+
         }
 
         intelligence.append(
@@ -766,3 +942,83 @@ def generate_recommendation_intelligence(
     )
 
     return df
+
+def _get_preferred_learning_horizon(
+    horizon_performance,
+):
+    """
+    Return the highest learning milestone with sufficiently mature data.
+
+    Preference order:
+
+        60
+        10
+        5
+
+    A milestone is considered mature when it has at least
+    MIN_RELIABLE_OBSERVATIONS observations.
+
+    An immature 60-day milestone never displaces mature
+    5-day or 10-day evidence.
+    """
+
+    if (
+        horizon_performance is None
+        or horizon_performance.empty
+    ):
+        return None
+
+    required_columns = {
+        "Horizon",
+        "Recommendations",
+        "Reliability",
+    }
+
+    if not required_columns.issubset(
+        set(
+            horizon_performance.columns
+        )
+    ):
+        return None
+
+    for horizon in (
+        60,
+        10,
+        5,
+    ):
+
+        matches = horizon_performance[
+            horizon_performance[
+                "Horizon"
+            ]
+            ==
+            horizon
+        ]
+
+        if matches.empty:
+            continue
+
+        row = matches.iloc[0]
+
+        observations = _safe_number(
+            row.get(
+                "Recommendations",
+                0,
+            )
+        )
+
+        reliability = _normalise_text(
+            row.get(
+                "Reliability",
+                "",
+            )
+        )
+
+        if (
+            observations >= 20
+            and
+            reliability == "VALID"
+        ):
+            return horizon
+
+    return None

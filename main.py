@@ -8,6 +8,7 @@ from data.database import (
     get_open_recommendations,
     save_recommendations,
     save_recommendation_evaluations,
+    get_evaluation_history,
 )
 
 
@@ -81,9 +82,13 @@ from analysis.portfolio_ai import (
     generate_portfolio_review
 )
 
-from analysis.portfolio_decision_engine import generate_portfolio_decisions
+from analysis.portfolio_decision_engine import (
+    generate_portfolio_decisions
+)
 
-from analysis.portfolio_manager import generate_portfolio_manager_review
+from analysis.portfolio_manager import (
+    generate_portfolio_manager_review
+)
 
 from agents.orchestrator import run_ai_agents
 
@@ -93,16 +98,6 @@ from analysis.portfolio_growth_engine import (
 
 from analysis.portfolio_context import evaluate_portfolio_context
 
-
-
-from analysis.final_portfolio_decision import (
-    generate_final_portfolio_decisions
-
-)
-
-
-
-
 from analysis.recommendation_learning import (
     calculate_recommendation_learning
 )
@@ -110,7 +105,7 @@ from analysis.recommendation_learning import (
 from analysis.score_calibration import get_calibrated_weights
 
 from analysis.portfolio_enrichment import (
-            enrich_portfolio_holdings
+    enrich_portfolio_holdings
 )
 
 from data.universe import get_market_universe
@@ -131,6 +126,10 @@ from analysis.investment_score import (
     calculate_investment_score
 )
 
+from analysis.final_portfolio_decision import (
+    generate_final_portfolio_decisions,
+)
+
 
 def main():
 
@@ -138,7 +137,6 @@ def main():
 
     AI_ANALYSIS_LIMIT = 3
     ai_analysis_count = 0
-
 
     # ---------------------------------
     # Initialise database
@@ -156,7 +154,6 @@ def main():
     QUALITY_WEIGHT = calibrated_weights["Quality Weight"]
     GROWTH_WEIGHT = calibrated_weights["Growth Weight"]
 
-
     print(
         "CALIBRATED WEIGHTS:",
         calibrated_weights
@@ -170,8 +167,6 @@ def main():
         "Updating recommendation history"
     )
 
-
-
     # ---------------------------------
     # Evaluate previous recommendations
     # ---------------------------------
@@ -180,7 +175,9 @@ def main():
         "Evaluating previous recommendations"
     )
 
-    recommendations_to_evaluate = get_open_recommendations()
+    recommendations_to_evaluate = (
+        get_open_recommendations()
+    )
 
     print(
         "OPEN RECOMMENDATIONS COUNT:",
@@ -206,14 +203,13 @@ def main():
         ):
 
             print(
-                f"Evaluation records created: {len(evaluations)}"
+                f"Evaluation records created: "
+                f"{len(evaluations)}"
             )
 
             save_recommendation_evaluations(
                 evaluations
             )
-
-            
 
             from data.database import get_connection
 
@@ -246,6 +242,15 @@ def main():
 
     # ---------------------------------
     # Load recommendation learning data
+    #
+    # IMPORTANT:
+    #
+    # These legacy database-query outputs remain in place because
+    # the current recommendation engine uses them during the stock
+    # scanning phase.
+    #
+    # The newer governed AI decision layer uses the separate
+    # recommendation_learning outputs calculated later in main().
     # ---------------------------------
 
     performance_summary = pd.DataFrame()
@@ -256,7 +261,6 @@ def main():
     score_horizon_performance = pd.DataFrame()
     score_bucket_performance = pd.DataFrame()
     component_score_performance = pd.DataFrame()
-
 
     try:
 
@@ -292,11 +296,9 @@ def main():
             get_component_score_performance()
         )
 
-
         print(
             "Recommendation learning data loaded"
         )
-
 
     except Exception as e:
 
@@ -304,19 +306,15 @@ def main():
             f"Learning data unavailable: {e}"
         )
 
-
-
     # ---------------------------------
     # Load universe
     # ---------------------------------
 
-    
     tickers = get_market_universe()
 
     tickers = filter_investable_universe(
         tickers
     )
-
 
     # ---------------------------------
     # Load portfolio holdings for AI filter
@@ -324,26 +322,26 @@ def main():
 
     holdings = get_portfolio()
 
-    portfolio_tickers = holdings["Ticker"].tolist()
-
-    print(
-        f"Portfolio holdings loaded: {portfolio_tickers}"
-    )
-    
-
-    print(
-    f"Scanning universe: {len(tickers)} stocks"
+    portfolio_tickers = (
+        holdings["Ticker"].tolist()
     )
 
+    print(
+        f"Portfolio holdings loaded: "
+        f"{portfolio_tickers}"
+    )
+
+    print(
+        f"Scanning universe: "
+        f"{len(tickers)} stocks"
+    )
 
     candidates = run_market_scan(
         tickers,
         limit=200
     )
 
-
     results = []
-
 
     # ---------------------------------
     # Scan stocks
@@ -351,18 +349,15 @@ def main():
 
     for candidate in candidates:
 
-
         try:
 
             ticker = candidate["Ticker"]
 
             df = candidate["df"]
 
-
             print(
                 f"Scanning {ticker}"
             )
-
 
             # ---------------------------------
             # Technical Scoring Engine
@@ -380,12 +375,11 @@ def main():
                 "Volume_avg"
             ]
 
-
             missing_columns = [
-                col for col in required_columns
+                col
+                for col in required_columns
                 if col not in df.columns
             ]
-
 
             if missing_columns:
 
@@ -396,10 +390,11 @@ def main():
 
                 continue
 
-
-
             try:
-                score_result = candidate["Score Result"]
+
+                score_result = (
+                    candidate["Score Result"]
+                )
 
             except Exception as e:
 
@@ -408,7 +403,6 @@ def main():
                 )
 
                 continue
-
 
             technical_score = score_result.get(
                 "Technical Score",
@@ -424,7 +418,6 @@ def main():
                 "Technical Risks",
                 []
             )
-
 
             trend_score = score_result.get(
                 "Trend Score",
@@ -446,41 +439,45 @@ def main():
                 0
             )
 
-
             print(
                 f"{ticker} SCORE RESULT:",
                 technical_score,
                 technical_reasons[:3]
-)
-
+            )
 
             fundamentals = get_fundamentals(
                 ticker
             )
 
-
-
-            quality_score, quality_reasons = score_quality(
-                fundamentals
+            quality_score, quality_reasons = (
+                score_quality(
+                    fundamentals
+                )
             )
 
-            print("Passed quality")
+            print(
+                "Passed quality"
+            )
 
             growth_results = score_growth(
                 fundamentals
             )
 
-            print("Passed growth")
+            print(
+                "Passed growth"
+            )
 
+            growth_score = (
+                growth_results["Growth Score"]
+            )
 
-            growth_score = growth_results["Growth Score"]
+            growth_reasons = (
+                growth_results["Growth Reasons"]
+            )
 
-            growth_reasons = growth_results["Growth Reasons"]
-
-            growth_risks = growth_results["Growth Risks"]
-
-
-
+            growth_risks = (
+                growth_results["Growth Risks"]
+            )
 
             # ---------------------------------
             # Investment Score
@@ -500,16 +497,17 @@ def main():
             # explicit governance.
             # ---------------------------------
 
-            investment_score = calculate_investment_score(
-                technical_score,
-                quality_score,
-                growth_score
+            investment_score = (
+                calculate_investment_score(
+                    technical_score,
+                    quality_score,
+                    growth_score
+                )
             )
 
             investment_score = round(
                 float(investment_score)
             )
-
 
             signal = generate_signal(
                 investment_score,
@@ -518,32 +516,40 @@ def main():
                 df
             )
 
-
-            recommendation = generate_recommendation(
-                ticker=ticker,
-                signal=signal,
-                investment_score=investment_score,
-                technical_score=technical_score,
-                quality_score=quality_score,
-                growth_score=growth_score,
-                technical_reasons=technical_reasons,
-                quality_reasons=quality_reasons,
-                signal_performance=signal_performance,
-                score_bucket_performance=score_bucket_performance,
-                security_type="STOCK"
+            recommendation = (
+                generate_recommendation(
+                    ticker=ticker,
+                    signal=signal,
+                    investment_score=investment_score,
+                    technical_score=technical_score,
+                    quality_score=quality_score,
+                    growth_score=growth_score,
+                    technical_reasons=technical_reasons,
+                    quality_reasons=quality_reasons,
+                    signal_performance=signal_performance,
+                    score_bucket_performance=(
+                        score_bucket_performance
+                    ),
+                    security_type="STOCK"
+                )
             )
 
-            print("Passed recommendation")
+            print(
+                "Passed recommendation"
+            )
 
             latest = df.iloc[-1]
 
             print(
-                f"ADDING {ticker}: Investment {investment_score}, Quality {quality_score}"
+                f"ADDING {ticker}: "
+                f"Investment {investment_score}, "
+                f"Quality {quality_score}"
             )
 
             ai_decision = generate_ai_decision(
                 {
-                    "Investment Score": investment_score,
+                    "Investment Score":
+                        investment_score,
 
                     "Confidence Score":
                         recommendation.get(
@@ -551,156 +557,347 @@ def main():
                             0
                         ),
 
-                    "Technical Score": technical_score,
-                    "Trend Score": trend_score,
-                    "Momentum Score": momentum_score,
-                    "Volume Score": volume_score,
-                    "Risk Score": risk_score,
-                    "Quality Score": quality_score,
-                    "Growth Score": growth_score,
+                    "Technical Score":
+                        technical_score,
+
+                    "Trend Score":
+                        trend_score,
+
+                    "Momentum Score":
+                        momentum_score,
+
+                    "Volume Score":
+                        volume_score,
+
+                    "Risk Score":
+                        risk_score,
+
+                    "Quality Score":
+                        quality_score,
+
+                    "Growth Score":
+                        growth_score,
                 }
             )
 
             print(
-                f"{ticker} AI DECISION: {ai_decision}"
+                f"{ticker} AI DECISION: "
+                f"{ai_decision}"
             )
 
             ai_analysis = None
 
-            ai_recommendation = generate_ai_recommendation(
-                {
-                    "Ticker": ticker,
-                    "Signal": signal,
-                    "Investment Score": investment_score,
-                    "Technical Score": technical_score,
-                    "Quality Score": quality_score,
-                    "Growth Score": growth_score,
-                    "Confidence Score": recommendation["Confidence Score"],
-                    "RSI": float(latest["RSI"]),
-                    "Revenue Growth": fundamentals.get("Revenue Growth", 0),
-                    "Return on Equity": fundamentals.get("Return on Equity", 0),
-                    "Debt to Equity": fundamentals.get("Debt to Equity", 0),
-                    "Sector": fundamentals.get("Sector", "Unknown")
-                }
+            ai_recommendation = (
+                generate_ai_recommendation(
+                    {
+                        "Ticker":
+                            ticker,
+
+                        "Signal":
+                            signal,
+
+                        "Investment Score":
+                            investment_score,
+
+                        "Technical Score":
+                            technical_score,
+
+                        "Quality Score":
+                            quality_score,
+
+                        "Growth Score":
+                            growth_score,
+
+                        "Confidence Score":
+                            recommendation[
+                                "Confidence Score"
+                            ],
+
+                        "RSI":
+                            float(
+                                latest["RSI"]
+                            ),
+
+                        "Revenue Growth":
+                            fundamentals.get(
+                                "Revenue Growth",
+                                0
+                            ),
+
+                        "Return on Equity":
+                            fundamentals.get(
+                                "Return on Equity",
+                                0
+                            ),
+
+                        "Debt to Equity":
+                            fundamentals.get(
+                                "Debt to Equity",
+                                0
+                            ),
+
+                        "Sector":
+                            fundamentals.get(
+                                "Sector",
+                                "Unknown"
+                            )
+                    }
+                )
             )
 
-            print("About to append")
+            print(
+                "About to append"
+            )
 
             results.append(
                 {
-                    "Ticker": ticker,
-                    "Signal": signal,
+                    "Ticker":
+                        ticker,
+
+                    "Signal":
+                        signal,
 
                     # Core Scores
-                    "Score": technical_score,
-                    "Technical Score": technical_score,
-                    "Quality Score": quality_score,
-                    "Investment Score": investment_score,
-                    "Growth Score": growth_score,
+                    "Score":
+                        technical_score,
+
+                    "Technical Score":
+                        technical_score,
+
+                    "Quality Score":
+                        quality_score,
+
+                    "Investment Score":
+                        investment_score,
+
+                    "Growth Score":
+                        growth_score,
 
                     # Confidence Engine
-                    "Confidence": recommendation["Confidence"],
-                    "Confidence Score": recommendation.get("Confidence Score", 0),
-                    "Confidence Reasons": recommendation.get("Confidence Reasons", []),
+                    "Confidence":
+                        recommendation[
+                            "Confidence"
+                        ],
+
+                    "Confidence Score":
+                        recommendation.get(
+                            "Confidence Score",
+                            0
+                        ),
+
+                    "Confidence Reasons":
+                        recommendation.get(
+                            "Confidence Reasons",
+                            []
+                        ),
 
                     # Price / Technical Data
-                    "Price": round(float(latest["Close"]), 2),
-                    "RSI": round(float(latest["RSI"]), 1),
-                    "SMA50": round(float(latest["SMA50"]), 2),
-                    "SMA200": round(float(latest["SMA200"]), 2),
-                    "3M Return %": round(float(latest["Return_3m"]) * 100, 2),
+                    "Price":
+                        round(
+                            float(
+                                latest["Close"]
+                            ),
+                            2
+                        ),
+
+                    "RSI":
+                        round(
+                            float(
+                                latest["RSI"]
+                            ),
+                            1
+                        ),
+
+                    "SMA50":
+                        round(
+                            float(
+                                latest["SMA50"]
+                            ),
+                            2
+                        ),
+
+                    "SMA200":
+                        round(
+                            float(
+                                latest["SMA200"]
+                            ),
+                            2
+                        ),
+
+                    "3M Return %":
+                        round(
+                            float(
+                                latest[
+                                    "Return_3m"
+                                ]
+                            ) * 100,
+                            2
+                        ),
 
                     # Fundamentals
-                    "Revenue Growth": fundamentals.get("Revenue Growth", 0),
-                    "Profit Margin": fundamentals.get("Profit Margin", 0),
-                    "Return on Equity": fundamentals.get("Return on Equity", 0),
-                    "Debt to Equity": fundamentals.get("Debt to Equity", 0),
-                    "Sector": fundamentals.get("Sector", "Unknown"),
-                    "Industry": fundamentals.get("Industry", "Unknown"),
+                    "Revenue Growth":
+                        fundamentals.get(
+                            "Revenue Growth",
+                            0
+                        ),
+
+                    "Profit Margin":
+                        fundamentals.get(
+                            "Profit Margin",
+                            0
+                        ),
+
+                    "Return on Equity":
+                        fundamentals.get(
+                            "Return on Equity",
+                            0
+                        ),
+
+                    "Debt to Equity":
+                        fundamentals.get(
+                            "Debt to Equity",
+                            0
+                        ),
+
+                    "Sector":
+                        fundamentals.get(
+                            "Sector",
+                            "Unknown"
+                        ),
+
+                    "Industry":
+                        fundamentals.get(
+                            "Industry",
+                            "Unknown"
+                        ),
 
                     # Recommendation Engine
-                    "Recommendation Reasons": recommendation["Reasons"],
-                    "Recommendation Risks": recommendation["Risks"],
+                    "Recommendation Reasons":
+                        recommendation[
+                            "Reasons"
+                        ],
+
+                    "Recommendation Risks":
+                        recommendation[
+                            "Risks"
+                        ],
 
                     # Growth Engine
-                    "Growth Reasons": growth_reasons,
-                    "Growth Risks": growth_risks,
+                    "Growth Reasons":
+                        growth_reasons,
 
+                    "Growth Risks":
+                        growth_risks,
 
                     # ---------------------------------
                     # AI Analyst Layer
                     # ---------------------------------
 
                     "AI Summary":
-                        ai_recommendation["Summary"],
+                        ai_recommendation[
+                            "Summary"
+                        ],
 
                     "AI Investment Thesis":
-                        ai_recommendation["Investment Thesis"],
+                        ai_recommendation[
+                            "Investment Thesis"
+                        ],
 
                     "AI Strengths":
-                        ai_recommendation["Strengths"],
+                        ai_recommendation[
+                            "Strengths"
+                        ],
 
                     "AI Risks":
-                        ai_recommendation["Risks"],
+                        ai_recommendation[
+                            "Risks"
+                        ],
 
                     "AI Catalysts":
-                        ai_recommendation["Catalysts"],
+                        ai_recommendation[
+                            "Catalysts"
+                        ],
 
                     "AI Holding Period":
-                        ai_recommendation["Holding Period"],
+                        ai_recommendation[
+                            "Holding Period"
+                        ],
 
                     "AI Investor Type":
-                        ai_recommendation["Investor Type"],
+                        ai_recommendation[
+                            "Investor Type"
+                        ],
 
                     "AI Probability":
-                        ai_recommendation["Probability"],
-
+                        ai_recommendation[
+                            "Probability"
+                        ],
 
                     # ---------------------------------
                     # AI Decision Layer
                     # ---------------------------------
 
                     "AI Decision":
-                        ai_decision["Decision"],
+                        ai_decision[
+                            "Decision"
+                        ],
 
                     "AI Decision Object":
                         ai_decision,
 
                     "AI Conviction":
-                        ai_decision["Conviction"],
+                        ai_decision[
+                            "Conviction"
+                        ],
 
                     "AI Conviction Score":
-                        ai_decision["Conviction Score"],
+                        ai_decision[
+                            "Conviction Score"
+                        ],
 
                     "AI Decision Thesis":
-                        ai_decision["Investment Thesis"],
+                        ai_decision[
+                            "Investment Thesis"
+                        ],
 
                     "AI Decision Risks":
-                        "; ".join(ai_decision["Risks"])
-                        if ai_decision["Risks"]
-                        else "No material risks identified",
+                        (
+                            "; ".join(
+                                ai_decision[
+                                    "Risks"
+                                ]
+                            )
+                            if ai_decision[
+                                "Risks"
+                            ]
+                            else
+                            "No material risks identified"
+                        ),
 
                     "AI Action":
-                        ai_decision["Recommended Action"],
+                        ai_decision[
+                            "Recommended Action"
+                        ],
 
                     "AI Review Triggers":
-                        ai_decision["Review Triggers"]
+                        ai_decision[
+                            "Review Triggers"
+                        ]
                 }
             )
 
             print(
-                f"RESULTS COUNT NOW: {len(results)}"
+                f"RESULTS COUNT NOW: "
+                f"{len(results)}"
             )
-
-
 
         except Exception as e:
 
-
-            print(f"\nERROR processing {ticker}")
+            print(
+                f"\nERROR processing {ticker}"
+            )
 
             traceback.print_exc()
-
 
     # ---------------------------------
     # Track already analysed stocks
@@ -712,26 +909,18 @@ def main():
         if "Ticker" in r
     }
 
-
     print(
         "SCANNED STOCK COUNT:",
         len(scanned)
     )
 
-
-    
     for ticker in portfolio_tickers:
-
 
         # CASH is a portfolio balance, not an investment candidate.
         if str(ticker).upper() == "CASH":
             continue
 
-
         if ticker not in scanned:
-
-
-
 
             try:
 
@@ -740,18 +929,15 @@ def main():
                     ticker
                 )
 
-
                 holding_analysis = analyse_stock(
                     ticker
                 )
-
 
                 if holding_analysis:
 
                     results.append(
                         holding_analysis
                     )
-
 
             except Exception as e:
 
@@ -760,11 +946,13 @@ def main():
                     ticker,
                     e
                 )
+
     # ---------------------------------
     # Rank stocks
     # ---------------------------------
+
     print(
-    f"RESULTS BEFORE SORT: {len(results)}"
+        f"RESULTS BEFORE SORT: {len(results)}"
     )
 
     results = sorted(
@@ -774,7 +962,7 @@ def main():
     )
 
     print(
-    f"RESULTS AFTER SORT: {len(results)}"
+        f"RESULTS AFTER SORT: {len(results)}"
     )
 
     # ---------------------------------
@@ -803,11 +991,11 @@ def main():
 
             stock["AI Analysis"] = ai_analysis
 
-
         except Exception as e:
 
             print(
-                f"AI Analyst failed for {stock['Ticker']}: {e}"
+                f"AI Analyst failed for "
+                f"{stock['Ticker']}: {e}"
             )
 
             stock["AI Analysis"] = None
@@ -820,12 +1008,9 @@ def main():
         results
     )
 
-
-
     print(
         "\nTOP STOCKS"
     )
-
 
     for stock in results[:20]:
 
@@ -835,8 +1020,6 @@ def main():
             f"Investment: {stock['Investment Score']} | "
             f"Confidence: {stock['Confidence']}"
         )
-
-
 
     # ---------------------------------
     # Portfolio processing
@@ -856,46 +1039,40 @@ def main():
     final_portfolio_decisions = None
     capital_allocation = None
 
-
-
     try:
 
-        
         portfolio_summary = analyse_portfolio(
             holdings,
             results
         )
 
-
-        portfolio_summary = enrich_portfolio_holdings(
-            portfolio_summary,
-            results
+        portfolio_summary = (
+            enrich_portfolio_holdings(
+                portfolio_summary,
+                results
+            )
         )
 
-        portfolio_actions = generate_portfolio_recommendations(
-            holdings,
-            results
+        portfolio_actions = (
+            generate_portfolio_recommendations(
+                holdings,
+                results
+            )
         )
-
-
 
         sector_summary = analyse_sectors(
             portfolio_summary,
             results
         )
 
-
-
         targets = get_targets()
 
-
-
-        portfolio_optimisation = optimise_portfolio(
-            sector_summary,
-            targets
+        portfolio_optimisation = (
+            optimise_portfolio(
+                sector_summary,
+                targets
+            )
         )
-
-
 
         rebalance_recommendations = (
             generate_rebalance_recommendations(
@@ -905,43 +1082,51 @@ def main():
             )
         )
 
-
-
-        portfolio_health = calculate_portfolio_health(
-            portfolio_summary,
-            sector_summary
+        portfolio_health = (
+            calculate_portfolio_health(
+                portfolio_summary,
+                sector_summary
+            )
         )
 
-        
         if results:
-            test_context = evaluate_portfolio_context(
-                results[0],
-                portfolio_summary,
-                sector_summary,
-                portfolio_health
+
+            test_context = (
+                evaluate_portfolio_context(
+                    results[0],
+                    portfolio_summary,
+                    sector_summary,
+                    portfolio_health
+                )
             )
+
         else:
+
             test_context = None
 
-
-        portfolio_decisions = generate_portfolio_decisions(
-            portfolio_summary,
-            pd.DataFrame(results)
+        portfolio_decisions = (
+            generate_portfolio_decisions(
+                portfolio_summary,
+                pd.DataFrame(results)
+            )
         )
-
 
         print(
             "\nPORTFOLIO DECISIONS"
         )
 
         for decision in portfolio_decisions[:10]:
-            print(decision)
 
-
+            print(
+                decision
+            )
 
         # Convert stock results into dataframe for capital allocator
 
-        if isinstance(results, list):
+        if isinstance(
+            results,
+            list
+        ):
 
             opportunities_df = pd.DataFrame(
                 results
@@ -951,21 +1136,22 @@ def main():
 
             opportunities_df = results
 
-
-
-        capital_allocation = generate_capital_allocation(
-
-            portfolio_summary=portfolio_summary,
-
-            opportunities=opportunities_df,
-
-            portfolio_decisions=portfolio_decisions
-
+        capital_allocation = (
+            generate_capital_allocation(
+                portfolio_summary=(
+                    portfolio_summary
+                ),
+                opportunities=(
+                    opportunities_df
+                ),
+                portfolio_decisions=(
+                    portfolio_decisions
+                )
+            )
         )
-    
-
 
         try:
+
             ai_reviews = run_ai_agents(
                 results,
                 portfolio_summary,
@@ -981,14 +1167,11 @@ def main():
 
             ai_reviews = []
 
-
         decisions = generate_decisions(
             portfolio_summary,
             results,
             rebalance_recommendations
         )
-
-
 
         trade_plan = generate_trade_plan(
             portfolio_summary,
@@ -998,35 +1181,49 @@ def main():
 
         growth_plan = generate_growth_plan(
             results,
-            portfolio_value=portfolio_summary["Current Value"].sum(),
-            current_holdings=portfolio_summary.to_dict("records")
+            portfolio_value=(
+                portfolio_summary[
+                    "Current Value"
+                ].sum()
+            ),
+            current_holdings=(
+                portfolio_summary.to_dict(
+                    "records"
+                )
+            )
         )
 
-
-        print("\nPORTFOLIO GROWTH PLAN")
-
-        print(growth_plan.head(10))
-
-        print("ABOUT TO CREATE MANAGER REVIEW")
-
-        portfolio_manager_review = generate_portfolio_manager_review(
-            portfolio_summary,
-            sector_summary,
-            decisions,
-            trade_plan,
-            portfolio_health
+        print(
+            "\nPORTFOLIO GROWTH PLAN"
         )
 
+        print(
+            growth_plan.head(10)
+        )
 
+        print(
+            "ABOUT TO CREATE MANAGER REVIEW"
+        )
 
-        print("MANAGER REVIEW CREATED")
+        portfolio_manager_review = (
+            generate_portfolio_manager_review(
+                portfolio_summary,
+                sector_summary,
+                decisions,
+                trade_plan,
+                portfolio_health
+            )
+        )
+
+        print(
+            "MANAGER REVIEW CREATED"
+        )
 
         print(
             "DEBUG MANAGER REVIEW:",
             portfolio_manager_review
         )
 
-        
         print(
             "\nPORTFOLIO HEALTH"
         )
@@ -1035,7 +1232,6 @@ def main():
             portfolio_health
         )
 
-
         print(
             "\nINVESTMENT DECISIONS"
         )
@@ -1043,7 +1239,6 @@ def main():
         print(
             decisions
         )
-
 
         print(
             "\nTRADE PLAN"
@@ -1061,9 +1256,7 @@ def main():
             portfolio_manager_review
         )
 
-
     except Exception as e:
-
 
         print(
             "PORTFOLIO ANALYSIS ERROR:"
@@ -1073,23 +1266,31 @@ def main():
 
         portfolio_manager_review = None
 
-    
-
     # ---------------------------------
     # AI Portfolio Intelligence
     # ---------------------------------
+
     try:
-        
-        portfolio_ai_review = generate_portfolio_review(
-            portfolio_summary,
-            results
+
+        portfolio_ai_review = (
+            generate_portfolio_review(
+                portfolio_summary,
+                results
+            )
         )
 
-        print("\nAI PORTFOLIO REVIEW")
+        print(
+            "\nAI PORTFOLIO REVIEW"
+        )
 
         for review in portfolio_ai_review:
-            print(review)
+
+            print(
+                review
+            )
+
     except Exception as e:
+
         print(
             f"AI Portfolio Intelligence skipped: {e}"
         )
@@ -1100,13 +1301,22 @@ def main():
     # Final Portfolio Decisions
     # ---------------------------------
 
-    print("\nDEBUG DECISIONS INPUT")
-    print(decisions)
+    print(
+        "\nDEBUG DECISIONS INPUT"
+    )
 
+    print(
+        decisions
+    )
 
-    print("\nDUPLICATE TICKERS")
+    print(
+        "\nDUPLICATE TICKERS"
+    )
 
-    if decisions is not None and not decisions.empty:
+    if (
+        decisions is not None
+        and not decisions.empty
+    ):
 
         print(
             decisions[
@@ -1123,33 +1333,60 @@ def main():
             "No portfolio decisions generated"
         )
 
+    # ---------------------------------
+    # Final Portfolio Decision
+    # ---------------------------------
+    #
+    # This is the final governed decision layer.
+    #
+    # IMPORTANT:
+    # - portfolio_decisions = deterministic governed proposals
+    # - portfolio_ai_review = AI portfolio review
+    # - portfolio_manager_review = portfolio manager review
+    # - portfolio_health = portfolio risk/health context
+    # - capital_allocation = capital constraint/allocation context
+    #
+    # The final decision engine reconciles these inputs and
+    # returns the production Final Decision interface.
+    # ---------------------------------
 
-    final_portfolio_decisions = generate_final_portfolio_decisions(
-        portfolio_summary,
-        pd.DataFrame(portfolio_decisions),
-        portfolio_ai_review,
-        portfolio_manager_review,
-        portfolio_health,
-        capital_allocation
+    print(
+        "\nPORTFOLIO SUMMARY COLUMNS:",
+        portfolio_summary.columns.tolist()
     )
 
-    print("\nFINAL PORTFOLIO DECISIONS")
-    print(final_portfolio_decisions)
-    # ---------------------------------
-    # Alerts
-    # ---------------------------------
-
-    alerts = generate_alerts(
-        portfolio_summary,
-        results
+    print(
+        "\nPORTFOLIO SUMMARY HEAD:"
     )
 
-    if alerts is None:
-        alerts = pd.DataFrame()
+    print(
+        portfolio_summary.head(10).to_string()
+    )
 
+    # ---------------------------------
+    # Recommendation Learning
+    # ---------------------------------
+    #
+    # IMPORTANT:
+    #
+    # This is the current governed learning dataset.
+    #
+    # Unlike the legacy query outputs used earlier by the
+    # recommendation engine, this source is built directly from
+    # the persisted recommendation_evaluations table.
+    #
+    # This learning output is therefore the authoritative source
+    # for Recommendation Intelligence and the governed AI
+    # portfolio decision layer.
+    # ---------------------------------
 
-    recommendation_history = get_learning_history()
+    print(
+        "\nCALCULATING RECOMMENDATION LEARNING"
+    )
 
+    recommendation_history = (
+        get_evaluation_history()
+    )
 
     recommendation_learning = (
         calculate_recommendation_learning(
@@ -1157,7 +1394,10 @@ def main():
         )
     )
 
-    if isinstance(recommendation_learning, dict):
+    if isinstance(
+        recommendation_learning,
+        dict,
+    ):
 
         for key, value in recommendation_learning.items():
 
@@ -1170,39 +1410,41 @@ def main():
         print(
             recommendation_learning
         )
-    
-    # =====================================================
-    # ADAPTIVE WEIGHT OPTIMISATION
-    # =====================================================
 
-    weight_learning = run_weight_optimizer()
+    # ---------------------------------
+    # Current learning outputs
+    # ---------------------------------
+    #
+    # Keep these separate from the legacy performance variables.
+    #
+    # This prevents the newer governed learning data from
+    # accidentally altering the existing recommendation engine.
+    # ---------------------------------
 
-
-    print(
-        "\nOPTIMISED SCORING WEIGHTS"
-    )
-
-    print(
-        weight_learning["Recommended Weights"]
-    )
-
-    signal_performance = (
-    recommendation_learning.get(
-        "Signal Performance",
-        pd.DataFrame()
+    learning_signal_performance = (
+        recommendation_learning.get(
+            "Signal Performance",
+            pd.DataFrame()
         )
     )
 
-    score_bucket_performance = (
+    learning_score_bucket_performance = (
         recommendation_learning.get(
             "Score Bucket Performance",
             pd.DataFrame()
         )
     )
 
-    component_score_performance = (
+    learning_component_score_performance = (
         recommendation_learning.get(
             "Component Score Performance",
+            pd.DataFrame()
+        )
+    )
+
+    learning_horizon_performance = (
+        recommendation_learning.get(
+            "Horizon Learning",
             pd.DataFrame()
         )
     )
@@ -1210,19 +1452,34 @@ def main():
     # ---------------------------------
     # Recommendation Intelligence
     # ---------------------------------
-    recommendation_intelligence = pd.DataFrame()
+    #
+    # IMPORTANT:
+    #
+    # Recommendation Intelligence consumes the CURRENT
+    # recommendation-learning outputs, not the legacy query
+    # outputs used during the stock scan.
+    # ---------------------------------
+
+    recommendation_intelligence = (
+        pd.DataFrame()
+    )
 
     try:
 
         recommendation_intelligence = (
             generate_recommendation_intelligence(
                 results,
-                signal_performance,
-                score_bucket_performance,
-                component_score_performance
+                learning_signal_performance,
+                learning_score_bucket_performance,
+                learning_component_score_performance,
+                learning_horizon_performance,
             )
         )
 
+        print(
+            "\nRECOMMENDATION INTELLIGENCE CREATED:",
+            recommendation_intelligence.shape
+        )
 
     except Exception as e:
 
@@ -1230,54 +1487,191 @@ def main():
             f"Recommendation Intelligence skipped: {e}"
         )
 
-    
-    
-    
+    # ---------------------------------
+    # Final Portfolio Decisions
+    # ---------------------------------
+
+    print(
+        "\nGENERATING FINAL PORTFOLIO DECISIONS"
+    )
+
+    try:
+
+        final_portfolio_decisions = (
+            generate_final_portfolio_decisions(
+                portfolio_summary=portfolio_summary,
+                portfolio_decisions=pd.DataFrame(
+                    portfolio_decisions
+                ),
+                portfolio_ai_review=portfolio_ai_review,
+                portfolio_manager_review=portfolio_manager_review,
+                portfolio_health=portfolio_health,
+                capital_allocation=capital_allocation,
+                recommendation_intelligence=(
+                    recommendation_intelligence
+                )
+            )
+        )
+
+        print(
+            "FINAL PORTFOLIO DECISIONS GENERATED:",
+            type(final_portfolio_decisions)
+        )
+
+    except Exception as e:
+
+        print(
+            "FINAL PORTFOLIO DECISION ERROR:",
+            e
+        )
+
+        traceback.print_exc()
+
+        final_portfolio_decisions = []
+
+    print(
+        "\nFINAL PORTFOLIO DECISIONS"
+    )
+
+    print(
+        final_portfolio_decisions
+    )
+
+    # ---------------------------------
+    # Alerts
+    # ---------------------------------
+
+    alerts = generate_alerts(
+        portfolio_summary,
+        results
+    )
+
+    if alerts is None:
+
+        alerts = pd.DataFrame()
+
+    # =====================================================
+    # ADAPTIVE WEIGHT OPTIMISATION
+    # =====================================================
+
+    weight_learning = (
+        run_weight_optimizer()
+    )
+
+    print(
+        "\nOPTIMISED SCORING WEIGHTS"
+    )
+
+    print(
+        weight_learning[
+            "Recommended Weights"
+        ]
+    )
+
     factor_performance = (
         calculate_factor_performance(
             recommendation_history
         )
     )
 
-    print("\n===== REPORT INPUT CHECK =====")
+    print(
+        "\n===== REPORT INPUT CHECK ====="
+    )
 
-    print("Results:", len(results))
+    print(
+        "Results:",
+        len(results)
+    )
 
-    print("Portfolio Summary:",
+    print(
+        "Portfolio Summary:",
         type(portfolio_summary),
-        getattr(portfolio_summary, "shape", None))
+        getattr(
+            portfolio_summary,
+            "shape",
+            None
+        )
+    )
 
-    print("Sector Summary:",
+    print(
+        "Sector Summary:",
         type(sector_summary),
-        getattr(sector_summary, "shape", None))
+        getattr(
+            sector_summary,
+            "shape",
+            None
+        )
+    )
 
-    print("Portfolio Actions:",
+    print(
+        "Portfolio Actions:",
         type(portfolio_actions),
-        getattr(portfolio_actions, "shape", None))
+        getattr(
+            portfolio_actions,
+            "shape",
+            None
+        )
+    )
 
-    print("Portfolio Optimisation:",
+    print(
+        "Portfolio Optimisation:",
         type(portfolio_optimisation),
-        getattr(portfolio_optimisation, "shape", None))
+        getattr(
+            portfolio_optimisation,
+            "shape",
+            None
+        )
+    )
 
-    print("Rebalance:",
+    print(
+        "Rebalance:",
         type(rebalance_recommendations),
-        getattr(rebalance_recommendations, "shape", None))
+        getattr(
+            rebalance_recommendations,
+            "shape",
+            None
+        )
+    )
 
-    print("Portfolio Health:",
-        portfolio_health)
+    print(
+        "Portfolio Health:",
+        portfolio_health
+    )
 
-    print("Decisions:",
-        type(decisions))
+    print(
+        "Decisions:",
+        type(decisions)
+    )
 
-    print("Trade Plan:",
-        type(trade_plan))
+    print(
+        "Trade Plan:",
+        type(trade_plan)
+    )
 
-    print("AI Review:",
-        type(portfolio_ai_review))
+    print(
+        "AI Review:",
+        type(portfolio_ai_review)
+    )
 
-    print("Manager Review:",
-        type(portfolio_manager_review))
-    
+    print(
+        "Manager Review:",
+        type(portfolio_manager_review)
+    )
+
+    print(
+        "Recommendation Intelligence:",
+        type(recommendation_intelligence),
+        getattr(
+            recommendation_intelligence,
+            "shape",
+            None
+        )
+    )
+
+    print(
+        "Recommendation Learning:",
+        type(recommendation_learning)
+    )
 
     # ---------------------------------
     # Portfolio Growth Plan Safety
@@ -1286,7 +1680,6 @@ def main():
     if "growth_plan" not in locals():
 
         growth_plan = pd.DataFrame()
-
 
     # ---------------------------------
     # Excel report
@@ -1319,23 +1712,10 @@ def main():
         recommendation_learning
     )
 
-
-
-    
-
-
-
-
-
-
-
-
     print(
         "\nReport complete"
     )
 
 
-
 if __name__ == "__main__":
-
     main()
