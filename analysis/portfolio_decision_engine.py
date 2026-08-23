@@ -24,8 +24,27 @@ Portfolio philosophy
 --------------------
 Existing positions are protected by default.
 
-The engine should HOLD unless there is a sufficiently strong
-reason to BUY, BUY MORE or REDUCE.
+The engine should HOLD unless there is sufficiently strong
+evidence to change the position.
+
+For existing STOCK holdings, reductions have explicit severity:
+
+    HOLD
+    REDUCE 25%
+    REDUCE 50%
+    REDUCE 75%
+    SELL
+
+SELL represents a 100% reduction.
+
+There is deliberately no REDUCE 100% action and no arbitrary
+percentage such as REDUCE 70%.
+
+The portfolio decision engine determines the reduction severity.
+
+Capital allocation is handled separately by capital_allocator.py.
+The capital allocator executes the action it receives and must not
+invent the reduction severity.
 
 ETF decisions are NOT recreated here.
 
@@ -35,8 +54,6 @@ ETF decision logic is owned exclusively by:
 
 This module only wires the authoritative ETF decision into the
 portfolio-level decision pipeline.
-
-Capital allocation is handled separately by capital_allocator.py.
 """
 
 import pandas as pd
@@ -45,10 +62,34 @@ from analysis.etf_decisions import decide_etf
 
 
 # ============================================================
+# ACTION CONSTANTS
+# ============================================================
+
+HOLD_ACTION = "HOLD"
+
+REDUCE_25_ACTION = "REDUCE 25%"
+REDUCE_50_ACTION = "REDUCE 50%"
+REDUCE_75_ACTION = "REDUCE 75%"
+SELL_ACTION = "SELL"
+
+REDUCTION_ACTIONS = {
+    REDUCE_25_ACTION,
+    REDUCE_50_ACTION,
+    REDUCE_75_ACTION,
+    SELL_ACTION,
+}
+
+
+# ============================================================
 # HELPERS
 # ============================================================
 
 def safe_float(value, default=0.0):
+    """
+    Safely convert a value to float.
+
+    Invalid, missing or NaN values return the supplied default.
+    """
 
     try:
 
@@ -66,6 +107,9 @@ def safe_float(value, default=0.0):
 
 
 def normalise_text(value, default="UNKNOWN"):
+    """
+    Safely convert a value to normalised uppercase text.
+    """
 
     if value is None:
         return default
@@ -87,6 +131,9 @@ def normalise_text(value, default="UNKNOWN"):
 
 
 def get_value(row, *keys, default=None):
+    """
+    Return the first valid value found under the supplied keys.
+    """
 
     for key in keys:
 
@@ -122,6 +169,9 @@ def get_value(row, *keys, default=None):
 
 
 def clean_ticker(value):
+    """
+    Normalise a ticker symbol.
+    """
 
     if value is None:
         return ""
@@ -150,6 +200,12 @@ def approve_buy(
     portfolio_risk,
     sector_allocation
 ):
+    """
+    Determine whether a new STOCK position is sufficiently
+    attractive to receive a BUY NEW action.
+
+    BUY logic is deliberately conservative.
+    """
 
     investment_score = safe_float(
         investment_score
@@ -193,33 +249,43 @@ def approve_buy(
 
 
 # ============================================================
-# STOCK EXISTING HOLDING
+# STOCK REDUCTION SEVERITY
 # ============================================================
 
-def evaluate_existing_holding(
+def determine_reduction_action(
     investment_score,
     quality_score,
     growth_score,
     signal
 ):
     """
-    Evaluate an existing stock holding.
+    Determine the severity of a STOCK reduction.
 
-    HOLD is the default for moderate or ambiguous situations.
+    Returns
+    -------
+    tuple
+        (action, reason)
 
-    REDUCE is triggered when there is sufficiently strong evidence
-    that the existing position no longer deserves its current
-    allocation.
+    Actions
+    -------
+    HOLD
+    REDUCE 25%
+    REDUCE 50%
+    REDUCE 75%
+    SELL
 
-    The decision deliberately uses multiple levels of evidence:
+    SELL represents a 100% reduction.
 
-        1. Very low Investment Score + bearish signal
-        2. Low Investment Score + materially weak fundamentals
-           + bearish signal
-        3. Extremely weak Investment Score regardless of signal
-
-    This prevents unnecessary turnover while ensuring that clearly
-    deteriorating holdings are not incorrectly retained as HOLD.
+    Design principles
+    -----------------
+    1. HOLD remains the default.
+    2. Investment Score is important but is not used alone.
+    3. Quality, Growth and Momentum Signal provide corroborating
+       evidence.
+    4. Stronger deterioration produces a larger reduction.
+    5. A bearish signal without sufficient underlying evidence does
+       not automatically cause a large reduction.
+    6. SELL is reserved for exceptionally strong deterioration.
     """
 
     investment_score = safe_float(
@@ -238,60 +304,109 @@ def evaluate_existing_holding(
         signal
     )
 
+    bearish_signal = signal in {
+        "SELL",
+        "STRONG SELL",
+    }
+
+    strong_bearish_signal = (
+        signal == "STRONG SELL"
+    )
+
     # ========================================================
-    # STRONG HOLD
+    # SELL / 100% REDUCTION
+    #
+    # Reserved for exceptionally strong evidence.
+    #
+    # This requires either:
+    #
+    #   - extremely low Investment Score + STRONG SELL
+    #
+    # or:
+    #
+    #   - extremely weak Investment Score combined with
+    #     extremely weak Quality and Growth.
     # ========================================================
 
-    if investment_score >= 85:
+    if (
+        investment_score < 20
+        and
+        strong_bearish_signal
+    ):
 
         return (
-            "HOLD",
-            "High investment score supports retaining the existing position"
+            SELL_ACTION,
+            "Extremely low investment score combined with a "
+            "STRONG SELL signal indicates that the position "
+            "should be exited completely"
+        )
+
+    if (
+        investment_score < 25
+        and
+        bearish_signal
+        and
+        quality_score < 30
+        and
+        growth_score < 30
+    ):
+
+        return (
+            SELL_ACTION,
+            "Extremely weak investment score, quality and growth "
+            "combined with a bearish signal justify a complete exit"
+        )
+
+    if (
+        investment_score < 20
+        and
+        quality_score < 25
+        and
+        growth_score < 25
+    ):
+
+        return (
+            SELL_ACTION,
+            "Exceptionally weak investment, quality and growth "
+            "scores justify a complete exit"
         )
 
     # ========================================================
-    # GOOD / MODERATE HOLD
-    # ========================================================
-
-    if investment_score >= 70:
-
-        return (
-            "HOLD",
-            "Moderate-to-strong investment score with no sufficiently "
-            "strong reason to change the existing position"
-        )
-
-    # ========================================================
-    # CLEAR REDUCTION
+    # REDUCE 75%
     #
-    # Very low score + bearish signal is sufficient evidence.
-    #
-    # This is the key rule that protects against retaining clearly
-    # deteriorating positions such as CA.PA.
+    # Severe deterioration.
     # ========================================================
 
     if (
         investment_score < 30
         and
-        signal in {
-            "SELL",
-            "STRONG SELL",
-        }
+        strong_bearish_signal
     ):
 
         return (
-            "REDUCE",
-            "Very low investment score combined with a bearish "
-            "signal indicates that the existing position should "
-            "be reduced"
+            REDUCE_75_ACTION,
+            "Very low investment score combined with a STRONG "
+            "SELL signal indicates severe deterioration"
         )
 
-    # ========================================================
-    # EXTREMELY WEAK FUNDAMENTALS
-    #
-    # Even if the technical signal has not yet become SELL,
-    # exceptionally weak fundamentals justify reducing exposure.
-    # ========================================================
+    if (
+        investment_score < 30
+        and
+        bearish_signal
+        and
+        (
+            quality_score < 40
+            or
+            growth_score < 35
+        )
+    ):
+
+        return (
+            REDUCE_75_ACTION,
+            "Very low investment score, bearish signal and "
+            "material weakness in quality or growth indicate "
+            "severe deterioration"
+        )
 
     if (
         investment_score < 30
@@ -302,57 +417,163 @@ def evaluate_existing_holding(
     ):
 
         return (
-            "REDUCE",
-            "Very low investment score combined with materially "
-            "weak quality and growth"
+            REDUCE_75_ACTION,
+            "Very low investment score combined with extremely "
+            "weak quality and growth indicates severe deterioration"
         )
 
     # ========================================================
-    # LOW SCORE + WEAK FUNDAMENTALS + BEARISH SIGNAL
+    # REDUCE 50%
+    #
+    # Clear deterioration.
     # ========================================================
 
     if (
         investment_score < 45
         and
+        bearish_signal
+        and
         quality_score < 50
         and
         growth_score < 40
-        and
-        signal in {
-            "SELL",
-            "STRONG SELL",
-        }
     ):
 
         return (
-            "REDUCE",
+            REDUCE_50_ACTION,
             "Low investment score combined with weak quality, "
-            "weak growth and bearish signal"
+            "weak growth and a bearish signal indicates clear "
+            "deterioration"
+        )
+
+    if (
+        investment_score < 40
+        and
+        bearish_signal
+    ):
+
+        return (
+            REDUCE_50_ACTION,
+            "Low investment score combined with a bearish signal "
+            "indicates clear deterioration"
+        )
+
+    if (
+        investment_score < 35
+        and
+        (
+            quality_score < 40
+            or
+            growth_score < 35
+        )
+        and
+        bearish_signal
+    ):
+
+        return (
+            REDUCE_50_ACTION,
+            "Low investment score, weak fundamentals and a bearish "
+            "signal justify a substantial reduction"
         )
 
     # ========================================================
-    # MODERATE SCORE
+    # REDUCE 25%
     #
-    # Below the BUY threshold does NOT automatically mean sell.
-    # This preserves the portfolio's HOLD-by-default behaviour.
+    # Mild but credible deterioration.
+    #
+    # This is deliberately the lowest reduction severity.
     # ========================================================
+
+    if (
+        investment_score < 45
+        and
+        bearish_signal
+    ):
+
+        return (
+            REDUCE_25_ACTION,
+            "Investment score has weakened and the bearish signal "
+            "provides sufficient evidence for a modest reduction"
+        )
+
+    if (
+        investment_score < 40
+        and
+        (
+            quality_score < 50
+            or
+            growth_score < 45
+        )
+    ):
+
+        return (
+            REDUCE_25_ACTION,
+            "Low investment score combined with weakening "
+            "fundamentals supports a modest reduction"
+        )
+
+    # ========================================================
+    # HOLD
+    #
+    # Insufficient evidence for a reduction.
+    # ========================================================
+
+    if investment_score >= 70:
+
+        return (
+            HOLD_ACTION,
+            "Investment score remains sufficiently strong to "
+            "retain the existing position"
+        )
 
     if investment_score >= 45:
 
         return (
-            "HOLD",
-            "Below buy threshold but not weak enough to justify "
-            "a reduction in the existing position"
+            HOLD_ACTION,
+            "Investment score is below the buy threshold but "
+            "there is insufficient evidence to reduce the position"
         )
 
-    # ========================================================
-    # LOW SCORE BUT INSUFFICIENT EVIDENCE
-    # ========================================================
-
     return (
-        "HOLD",
-        "Low investment score but insufficient evidence to justify "
-        "reducing the existing position"
+        HOLD_ACTION,
+        "Investment score is weak but the available evidence "
+        "is insufficient to justify a portfolio reduction"
+    )
+
+
+# ============================================================
+# STOCK EXISTING HOLDING
+# ============================================================
+
+def evaluate_existing_holding(
+    investment_score,
+    quality_score,
+    growth_score,
+    signal
+):
+    """
+    Evaluate an existing STOCK holding.
+
+    This is the public stock holding decision wrapper.
+
+    Reduction severity is determined here rather than in the
+    capital allocator.
+
+    Possible actions:
+
+        HOLD
+        REDUCE 25%
+        REDUCE 50%
+        REDUCE 75%
+        SELL
+
+    SELL is equivalent to reducing the position by 100%.
+    """
+
+    return determine_reduction_action(
+        investment_score=investment_score,
+        quality_score=quality_score,
+        growth_score=growth_score,
+        signal=signal
     )
 
 
@@ -364,6 +585,20 @@ def generate_portfolio_decisions(
     portfolio_summary,
     opportunities=None
 ):
+    """
+    Generate portfolio-level decisions.
+
+    Existing holdings:
+        STOCK -> stock decision engine
+        ETF   -> authoritative ETF decision engine
+        CASH  -> HOLD
+
+    New opportunities:
+        STOCK -> BUY NEW / WATCH / HOLD
+        ETF   -> currently excluded from BUY NEW processing
+
+    Capital allocation is deliberately not performed here.
+    """
 
     if portfolio_summary is None:
         portfolio_summary = pd.DataFrame()
@@ -521,11 +756,6 @@ def generate_portfolio_decisions(
 
             # =================================================
             # ETF
-            #
-            # ETF decisioning is delegated entirely to
-            # analysis.etf_decisions.decide_etf().
-            #
-            # No ETF rules are duplicated here.
             # =================================================
 
             if asset_type == "ETF":
@@ -917,14 +1147,6 @@ def generate_portfolio_decisions(
 
     # ========================================================
     # NEW OPPORTUNITIES
-    #
-    # ETF opportunities are deliberately NOT processed here.
-    #
-    # The current ETF requirement is to assess existing ETF
-    # holdings only: BUY MORE / HOLD / REDUCE / SELL.
-    #
-    # Stock opportunities continue to use the existing stock
-    # BUY NEW logic.
     # ========================================================
 
     if not opportunities.empty:
@@ -956,9 +1178,7 @@ def generate_portfolio_decisions(
             # =================================================
             # ETF OPPORTUNITIES
             #
-            # Do not create BUY NEW ETF decisions here.
-            # ETF decisioning is currently limited to existing
-            # ETF holdings.
+            # ETF BUY NEW is deliberately not created here.
             # =================================================
 
             if asset_type == "ETF":
@@ -1170,18 +1390,22 @@ def generate_portfolio_decisions(
 
     # ========================================================
     # DUPLICATES
+    #
+    # More severe portfolio actions take priority.
     # ========================================================
 
     if not result.empty:
 
         action_priority = {
 
-            "REDUCE": 1,
-            "SELL": 1,
-            "BUY MORE": 2,
-            "BUY NEW": 3,
-            "WATCH": 4,
-            "HOLD": 5
+            SELL_ACTION: 1,
+            REDUCE_75_ACTION: 2,
+            REDUCE_50_ACTION: 3,
+            REDUCE_25_ACTION: 4,
+            "BUY MORE": 5,
+            "BUY NEW": 6,
+            "WATCH": 7,
+            "HOLD": 8
         }
 
         result["_Decision Priority"] = (
@@ -1211,16 +1435,20 @@ def generate_portfolio_decisions(
 
     # ========================================================
     # DECISION ORDER
+    #
+    # Most severe reductions first.
     # ========================================================
 
     action_order = {
 
-        "REDUCE": 1,
-        "SELL": 1,
-        "BUY MORE": 2,
-        "BUY NEW": 3,
-        "WATCH": 4,
-        "HOLD": 5
+        SELL_ACTION: 1,
+        REDUCE_75_ACTION: 2,
+        REDUCE_50_ACTION: 3,
+        REDUCE_25_ACTION: 4,
+        "BUY MORE": 5,
+        "BUY NEW": 6,
+        "WATCH": 7,
+        "HOLD": 8
     }
 
     if not result.empty:
@@ -1228,7 +1456,7 @@ def generate_portfolio_decisions(
         result["_Priority"] = (
             result["Action"]
             .map(action_order)
-            .fillna(6)
+            .fillna(9)
         )
 
         result = (

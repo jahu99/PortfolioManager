@@ -742,13 +742,39 @@ def build_eligible_population(
     """
     Build the exact Final Portfolio Decisions population.
 
-    Includes:
+    FD-02 — Population Governance
+    ------------------------------
 
-        - every existing investment holding
-        - every non-owned BUY NEW opportunity
+    The final population contains ONLY:
 
-    Excludes CASH and the non-owned market universe.
+        1. Every currently owned investment holding.
+        2. Every non-owned BUY NEW opportunity from Capital Allocation.
+
+    Explicit exclusions:
+
+        - CASH
+        - non-owned HOLD
+        - non-owned BUY MORE
+        - non-owned REDUCE
+        - non-owned SELL
+        - non-owned WATCH
+        - non-owned REVIEW
+
+    Ownership is authoritative from portfolio_summary.
+
+    Capital Allocation is authoritative for NEW BUY proposals.
+
+    CASH is excluded at source and again immediately before the
+    population is returned.
+
+    This routine does not run the AI decision chain.
+    It only establishes the population that the final decision
+    engine is permitted to review.
     """
+
+    # ============================================================
+    # NORMALISE INPUT DATA
+    # ============================================================
 
     holdings = normalise_tickers(
         safe_dataframe(
@@ -768,40 +794,62 @@ def build_eligible_population(
         )
     )
 
-    # --------------------------------------------------------
-    # Remove CASH from every source.
-    # --------------------------------------------------------
+    # ============================================================
+    # CASH EXCLUSION
+    #
+    # CASH must never enter the Final Portfolio Decisions
+    # population, regardless of which upstream source contains it.
+    #
+    # Do this before constructing any lookup dictionaries.
+    # ============================================================
 
-    for dataframe_name, dataframe in (
-        ("holdings", holdings),
-        ("decisions", decisions),
-        ("capital", capital),
-    ):
+    def remove_cash(
+        dataframe: pd.DataFrame,
+    ) -> pd.DataFrame:
 
-        if (
-            not dataframe.empty
-            and
-            "Ticker" in dataframe.columns
-        ):
+        if dataframe.empty:
+            return dataframe
 
-            dataframe.drop(
-                dataframe[
-                    dataframe[
-                        "Ticker"
-                    ].astype(str)
-                    .str.strip()
-                    .str.upper()
-                    == "CASH"
-                ].index,
-                inplace=True,
-            )
+        if "Ticker" not in dataframe.columns:
+            return dataframe
 
-    # --------------------------------------------------------
-    # Existing holdings are authoritative from holdings_raw.csv
-    # as represented by portfolio_summary.
-    # --------------------------------------------------------
+        ticker_series = (
+            dataframe[
+                "Ticker"
+            ]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
 
-    holding_lookup = {}
+        return dataframe[
+            ticker_series != "CASH"
+        ].copy()
+
+    holdings = remove_cash(
+        holdings
+    )
+
+    decisions = remove_cash(
+        decisions
+    )
+
+    capital = remove_cash(
+        capital
+    )
+
+    # ============================================================
+    # EXISTING HOLDINGS
+    #
+    # portfolio_summary is authoritative for ownership.
+    #
+    # Positive Quantity means the security is currently held.
+    #
+    # Do not use Capital Allocation to determine whether something
+    # is owned.
+    # ============================================================
+
+    holding_lookup: dict[str, dict] = {}
 
     if (
         not holdings.empty
@@ -817,40 +865,67 @@ def build_eligible_population(
                 record
             )
 
-            if not ticker:
+            # Defensive CASH protection.
+            if not ticker or ticker == "CASH":
                 continue
 
-            if get_quantity(
+            quantity = get_quantity(
                 record
-            ) > 0:
+            )
+
+            if quantity > 0:
 
                 holding_lookup[
                     ticker
                 ] = record
 
-    # --------------------------------------------------------
-    # Capital Allocation is authoritative for the transaction
-    # proposal.
-    # --------------------------------------------------------
+    # ============================================================
+    # CAPITAL ALLOCATION LOOKUP
+    # ============================================================
 
-    capital_lookup = build_capital_lookup(
-        capital_allocation
-    )
+    capital_lookup = {}
 
-    population = {}
+    if (
+        not capital.empty
+        and
+        "Ticker" in capital.columns
+    ):
 
-    print(
-        "HOLDING LOOKUP TICKERS:",
-        sorted(
-            holding_lookup.keys()
-        )
-    )
+        for _, row in capital.iterrows():
 
-    # --------------------------------------------------------
-    # First add every existing holding.
-    # --------------------------------------------------------
+            record = row.to_dict()
+
+            ticker = get_ticker(
+                record
+            )
+
+            # Defensive CASH protection.
+            if not ticker or ticker == "CASH":
+                continue
+
+            capital_lookup[
+                ticker
+            ] = record
+
+    # ============================================================
+    # BUILD POPULATION
+    # ============================================================
+
+    population: dict[str, dict] = {}
+
+    # ============================================================
+    # 1. ADD EVERY EXISTING HOLDING
+    #
+    # Existing holdings are always eligible for final portfolio
+    # review, regardless of whether Capital Allocation currently
+    # proposes HOLD, BUY MORE, REDUCE or SELL.
+    # ============================================================
 
     for ticker, holding in holding_lookup.items():
+
+        # Absolute final CASH safety check.
+        if ticker == "CASH":
+            continue
 
         base = dict(
             holding
@@ -860,43 +935,84 @@ def build_eligible_population(
             ticker
         )
 
+        # Merge Capital Allocation fields without allowing the
+        # allocation row to overwrite authoritative holding data.
         if allocation_row:
 
             for key, value in allocation_row.items():
 
-                if (
-                    key not in base
-                    or
-                    pd.isna(
-                        base.get(
-                            key
-                        )
-                    )
-                ):
+                if key not in base:
 
                     base[
                         key
                     ] = value
 
-        # Existing holdings are allowed through regardless of
-        # whether Capital Allocation selected an action.
+                else:
+
+                    try:
+
+                        if pd.isna(
+                            base[
+                                key
+                            ]
+                        ):
+
+                            base[
+                                key
+                            ] = value
+
+                    except Exception:
+
+                        pass
+
+        # Ownership is explicit and authoritative.
+        base[
+            "Existing Holding"
+        ] = True
+
+        base[
+            "Owned"
+        ] = True
+
+        base[
+            "Quantity"
+        ] = get_quantity(
+            holding
+        )
+
         population[
             ticker
         ] = base
 
-    # --------------------------------------------------------
-    # Add ONLY non-owned BUY NEW proposals.
-    # --------------------------------------------------------
+    # ============================================================
+    # 2. ADD ONLY NON-OWNED BUY NEW OPPORTUNITIES
+    #
+    # Capital Allocation determines whether a new candidate is
+    # eligible.
+    #
+    # IMPORTANT:
+    #
+    # Only the exact action "BUY NEW" qualifies.
+    #
+    # Do not use startswith("BUY"), because BUY MORE is not a
+    # valid non-owned population candidate.
+    # ============================================================
 
     for ticker, allocation_row in capital_lookup.items():
 
+        # Existing holdings were already added above.
         if ticker in holding_lookup:
+            continue
+
+        # Absolute CASH protection.
+        if ticker == "CASH":
             continue
 
         action = get_capital_action(
             allocation_row
         )
 
+        # Only genuine BUY NEW candidates enter the population.
         if action != "BUY NEW":
             continue
 
@@ -908,21 +1024,60 @@ def build_eligible_population(
             "Existing Holding"
         ] = False
 
+        base[
+            "Owned"
+        ] = False
+
+        base[
+            "Quantity"
+        ] = 0.0
+
         population[
             ticker
         ] = base
 
-        print(
-            "ELIGIBLE POPULATION TICKERS:",
-            sorted(
-                population.keys()
-            )
+    # ============================================================
+    # FINAL SAFETY FILTER
+    #
+    # Even though CASH has already been removed at source, apply
+    # one final filter immediately before returning.
+    #
+    # This is deliberate defence-in-depth for FD-02.
+    # ============================================================
+
+    population = {
+        ticker: record
+        for ticker, record in population.items()
+        if ticker
+        and ticker != "CASH"
+        and get_ticker(record) != "CASH"
+    }
+
+    # ============================================================
+    # DIAGNOSTICS
+    # ============================================================
+
+    print(
+        "HOLDING LOOKUP TICKERS:",
+        sorted(
+            holding_lookup.keys()
         )
+    )
+
+    print(
+        "ELIGIBLE POPULATION TICKERS:",
+        sorted(
+            population.keys()
+        )
+    )
+
+    # ============================================================
+    # RETURN
+    # ============================================================
 
     return list(
         population.values()
     )
-
 
 # ============================================================
 # CANDIDATE CONTEXT
@@ -1001,6 +1156,15 @@ def build_chain_candidate(
 
     asset_type = get_asset_type(
         base_row
+    )
+
+    print(
+        "FINAL DECISION INPUT:",
+        ticker,
+        "| Action =", base_row.get("Action"),
+        "| Capital Allocation Action =", base_row.get("Capital Allocation Action"),
+        "| Proposed Action =", base_row.get("Proposed Action"),
+        "| Final Action =", base_row.get("Final Action"),
     )
 
     proposed_action = get_capital_action(
@@ -1756,7 +1920,7 @@ def run_governed_chain(
             "Reconciled Action":
                 "HOLD",
 
-            "Status":
+            "Reconciliation Status":
                 "RECONCILIATION ERROR",
 
             "Reason":
@@ -1783,7 +1947,7 @@ def run_governed_chain(
             "Reconciled Action":
                 "HOLD",
 
-            "Status":
+            "Reconciliation Status":
                 "RECONCILIATION ERROR",
 
             "Reason":
@@ -1956,17 +2120,28 @@ def build_final_result(
     Convert the full AI decision chain into the
     Final Portfolio Decisions report contract.
 
-    Important
-    ---------
-    The original proposed action is preserved exactly, including
-    reduction percentages such as REDUCE 25%.
+    FD-FINAL-01
+    -----------
+    Preserve REDUCE percentage variants in the final decision.
 
-    Governance comparisons use a normalised action:
+    Governance operates on the normalised action:
 
         REDUCE 25% -> REDUCE
+        REDUCE 50% -> REDUCE
+        REDUCE 75% -> REDUCE
+        REDUCE 100% -> REDUCE
 
-    This keeps governance logic separate from capital-allocation
-    sizing.
+    The reconciler also operates on the normalised action.
+
+    Therefore:
+
+        Proposed Action: REDUCE 25%
+        Reconciled Action: REDUCE
+        --------------------------
+        Final Decision: REDUCE 25%
+
+    The reconciliation interface and returned result contract
+    remain unchanged.
     """
 
     result = dict(
@@ -2061,14 +2236,22 @@ def build_final_result(
         "HOLD",
     )
 
-    # Preserve REDUCE percentage variants exactly.
+    # ========================================================
+    # Normalised proposed action
     #
-    # Example:
+    # Governance comparisons operate on the base action.
+    #
+    # IMPORTANT:
+    # proposed_action itself is NOT changed.
+    #
+    # This preserves:
+    #
     #     REDUCE 25%
     #     REDUCE 50%
+    #     REDUCE 75%
+    #     REDUCE 100%
     #
-    # The governance engine works with REDUCE, while the original
-    # proposal remains available for reporting/capital allocation.
+    # for the final portfolio output.
     # ========================================================
 
     normalised_proposed_action = (
@@ -2118,15 +2301,74 @@ def build_final_result(
     )
 
     # ========================================================
-    # Final action
+    # Normalise reconciled action for governance comparison.
     #
-    # Governance comparisons use the NORMALISED proposal.
-    # This is critical for:
+    # The reconciler's contract deliberately returns:
     #
-    #     REDUCE 25%
-    #         vs
     #     REDUCE
     #
+    # rather than:
+    #
+    #     REDUCE 25%
+    #
+    # because sizing belongs upstream/downstream of the
+    # governance action.
+    #
+    # Therefore REDUCE 25% and REDUCE must compare equal
+    # at the governance layer.
+    # ========================================================
+
+    normalised_reconciled_action = (
+        reconciled_action
+    )
+
+    if normalised_reconciled_action.startswith(
+        "REDUCE"
+    ):
+
+        normalised_reconciled_action = "REDUCE"
+
+    elif normalised_reconciled_action not in {
+        "BUY NEW",
+        "BUY MORE",
+        "HOLD",
+        "REDUCE",
+        "SELL",
+    }:
+
+        normalised_reconciled_action = "HOLD"
+
+    # ========================================================
+    # Final action
+    #
+    # FD-FINAL-01 FIX
+    #
+    # Before:
+    #
+    #     REDUCE 25%
+    #          |
+    #          v
+    #     normalised -> REDUCE
+    #          |
+    #     reconciler -> REDUCE
+    #          |
+    #     final_action = REDUCE
+    #
+    # The percentage was lost.
+    #
+    # Now:
+    #
+    #     REDUCE 25%
+    #          |
+    #          v
+    #     normalised -> REDUCE
+    #          |
+    #     reconciler -> REDUCE
+    #          |
+    #     final_action = original REDUCE 25%
+    #
+    # Governance still compares REDUCE against REDUCE.
+    # Reporting preserves the original sizing instruction.
     # ========================================================
 
     if normalised_proposed_action == "HOLD":
@@ -2134,28 +2376,40 @@ def build_final_result(
         final_action = "HOLD"
 
     elif (
-        reconciled_action
+        normalised_reconciled_action
         ==
         normalised_proposed_action
     ):
 
-        final_action = (
-            normalised_proposed_action
-        )
+        if normalised_proposed_action == "REDUCE":
 
-    elif (
-        normalised_proposed_action
-        ==
-        "BUY NEW"
-        and
-        not is_owned(
-            base_row
-        )
-    ):
+            # Preserve the original deterministic reduction
+            # percentage exactly.
+            final_action = proposed_action
 
-        final_action = "NO ACTION"
+        else:
+
+            final_action = (
+                normalised_proposed_action
+            )
 
     else:
+
+        # ----------------------------------------------------
+        # FD-06 — BUY NEW governance suppression
+        #
+        # An unowned asset must not automatically be converted
+        # from BUY NEW to NO ACTION simply because reconciliation
+        # did not return BUY NEW.
+        #
+        # If governance explicitly supports BUY NEW, the action
+        # above preserves BUY NEW.
+        #
+        # If governance does not support the proposal, the
+        # conservative result is HOLD.
+        #
+        # Ownership is not itself a governance veto.
+        # ----------------------------------------------------
 
         final_action = "HOLD"
 
@@ -2348,17 +2602,25 @@ def build_final_result(
 
     # ========================================================
     # Decision status
-    # ========================================================
-
-    # --------------------------------------------------------
+    #
     # Compare governed actions, not sizing variants.
     #
     # REDUCE 25%, REDUCE 50%, etc. are all the same governance
     # action: REDUCE.
-    # --------------------------------------------------------
+    # ========================================================
+
+    final_action_for_governance = (
+        "REDUCE"
+        if str(
+            final_action
+        ).upper().startswith(
+            "REDUCE"
+        )
+        else final_action
+    )
 
     decision_changed = (
-        final_action
+        final_action_for_governance
         !=
         normalised_proposed_action
     )
@@ -2380,6 +2642,7 @@ def build_final_result(
         decision_status = (
             "FINAL DECISION CONFIRMED"
         )
+
     # ========================================================
     # Final reason
     # ========================================================
@@ -2419,11 +2682,11 @@ def build_final_result(
                 "sufficiently strong reason to change the portfolio."
             )
 
-    elif final_action == "REDUCE":
+    elif final_action_for_governance == "REDUCE":
 
         final_reason = (
-            f"{ticker} is approved for REDUCE after passing "
-            "the governed AI decision chain."
+            f"{ticker} is approved for {final_action} after "
+            "passing the governed AI decision chain."
         )
 
     elif final_action == "SELL":
@@ -2489,6 +2752,11 @@ def build_final_result(
 
     # ========================================================
     # Build final result
+    #
+    # IMPORTANT:
+    # This is the existing result contract.
+    # No fields have been added, removed, renamed or reordered
+    # in a way that changes the consumer interface.
     # ========================================================
 
     result.update({
@@ -2696,6 +2964,20 @@ def calculate_final_portfolio_decision(
 
     This function does not invoke the entire pipeline. It maps
     already-produced chain outputs into one final decision.
+
+    IMPORTANT
+    ---------
+    The original Proposed Action is preserved, including reduction
+    sizing such as:
+
+        REDUCE 25%
+        REDUCE 50%
+        REDUCE 75%
+        REDUCE 100%
+
+    The downstream build_final_result() function normalises REDUCE
+    variants to REDUCE for governance comparison while preserving
+    the original percentage for the final reported action.
     """
 
     candidate = (
@@ -2752,6 +3034,82 @@ def calculate_final_portfolio_decision(
         else {}
     )
 
+    # ========================================================
+    # Candidate ownership / analysis information
+    # ========================================================
+
+    ownership = candidate.get(
+        "ownership",
+        {},
+    )
+
+    if not isinstance(
+        ownership,
+        dict,
+    ):
+        ownership = {}
+
+    analysis = candidate.get(
+        "analysis",
+        {},
+    )
+
+    if not isinstance(
+        analysis,
+        dict,
+    ):
+        analysis = {}
+
+    # ========================================================
+    # PRESERVE THE ORIGINAL PROPOSED ACTION
+    #
+    # This is important for REDUCE 25% / 50% / 75% / 100%.
+    #
+    # Prefer the original proposal before falling back to the
+    # AI decision layer's generic Action field.
+    # ========================================================
+
+    proposed_action = upper_text(
+        first_value(
+            decision.get(
+                "Proposed Action"
+            ),
+
+            candidate.get(
+                "Proposed Action"
+            ),
+
+            candidate.get(
+                "proposed_action"
+            ),
+
+            candidate.get(
+                "Capital Allocation Action"
+            ),
+
+            candidate.get(
+                "capital_allocation_action"
+            ),
+
+            decision.get(
+                "Action"
+            ),
+
+            default="HOLD",
+        ),
+        "HOLD",
+    )
+
+    # ========================================================
+    # Build the base row consumed by build_final_result().
+    #
+    # DO NOT populate "Final Action" here.
+    #
+    # build_final_result() is responsible for determining the
+    # final governed action. This prevents the compatibility
+    # layer from accidentally replacing REDUCE 50% with REDUCE.
+    # ========================================================
+
     candidate_row = {
         "Ticker":
             candidate.get(
@@ -2778,10 +3136,7 @@ def calculate_final_portfolio_decision(
             ),
 
         "Existing Holding":
-            candidate.get(
-                "ownership",
-                {},
-            ).get(
+            ownership.get(
                 "owned",
                 decision.get(
                     "Existing Holding",
@@ -2789,11 +3144,35 @@ def calculate_final_portfolio_decision(
                 ),
             ),
 
+        "Quantity":
+            ownership.get(
+                "quantity",
+                decision.get(
+                    "Quantity",
+                    0,
+                ),
+            ),
+
+        "Market Value":
+            ownership.get(
+                "market_value",
+                decision.get(
+                    "Market Value",
+                    0,
+                ),
+            ),
+
+        "Allocation %":
+            ownership.get(
+                "allocation_pct",
+                decision.get(
+                    "Allocation %",
+                    0,
+                ),
+            ),
+
         "Investment Score":
-            candidate.get(
-                "analysis",
-                {},
-            ).get(
+            analysis.get(
                 "investment_score",
                 decision.get(
                     "Investment Score",
@@ -2802,32 +3181,49 @@ def calculate_final_portfolio_decision(
             ),
 
         "Sector":
-            candidate.get(
-                "ownership",
-                {},
-            ).get(
+            ownership.get(
                 "sector",
-                "Unknown",
-            ),
-
-        "Final Action":
-            decision.get(
-                "Proposed Action",
-                decision.get(
-                    "Action",
-                    "HOLD",
+                candidate.get(
+                    "Sector",
+                    "Unknown",
                 ),
             ),
 
+        # ----------------------------------------------------
+        # THIS is the important field.
+        #
+        # It retains:
+        #
+        #     REDUCE 25%
+        #     REDUCE 50%
+        #     REDUCE 75%
+        #     REDUCE 100%
+        #
+        # rather than replacing them with generic REDUCE.
+        # ----------------------------------------------------
+
+        "Proposed Action":
+            proposed_action,
+
         "Original Reason":
-            decision.get(
-                "Reason",
-                "",
+            first_value(
+                decision.get(
+                    "Reason"
+                ),
+                candidate.get(
+                    "Reason"
+                ),
+                default="",
             ),
     }
 
+    # ========================================================
+    # Final governed result
+    # ========================================================
+
     return build_final_result(
         base_row=candidate_row,
+
         chain={
             "deterministic":
                 decision,
@@ -2842,7 +3238,6 @@ def calculate_final_portfolio_decision(
                 reconciled_decision,
         },
     )
-
 
 def final_portfolio_decision(
     candidate: dict | None = None,

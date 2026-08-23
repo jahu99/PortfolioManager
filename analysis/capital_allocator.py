@@ -171,43 +171,42 @@ def normalise_action(value):
 
 def get_reduction_percentage(action):
     """
-    Convert reduction action into percentage of existing
-    position to release.
+    Convert an explicit portfolio reduction action into the
+    percentage of the existing position to release.
 
-    Examples
-    --------
+    The portfolio decision engine is authoritative for the
+    reduction level.
+
+    Supported actions
+    -----------------
     REDUCE 25% -> 0.25
     REDUCE 50% -> 0.50
     REDUCE 75% -> 0.75
     SELL       -> 1.00
 
-    A bare REDUCE defaults to 25%.
+    A bare REDUCE is deliberately rejected because the allocator
+    must never invent a reduction percentage.
     """
 
     action = normalise_action(action)
 
-    if "25" in action:
+    if action == "REDUCE 25%":
         return 0.25
 
-    if "50" in action:
+    if action == "REDUCE 50%":
         return 0.50
 
-    if "75" in action:
+    if action == "REDUCE 75%":
         return 0.75
 
-    if action in (
+    if action in {
         "SELL",
-        "SELL 100%",
         "REDUCE 100%",
-        "REDUCE / SELL",
-    ):
+        "SELL 100%",
+    }:
         return 1.00
 
-    if action == "REDUCE":
-        return 0.25
-
     return 0.0
-
 
 # ============================================================
 # ACTUAL HOLDINGS
@@ -727,7 +726,10 @@ def generate_capital_allocation(
         if quantity <= 0:
             continue
 
-        
+        # ====================================================
+        # REDUCTION VALUE
+        # ====================================================
+
         release_amount = round(
             market_value
             *
@@ -736,14 +738,43 @@ def generate_capital_allocation(
         )
 
         # ----------------------------------------------------
-        # If a reduction is economically insignificant,
-        # sell the entire position instead.
+        # ESCALATE SMALL REMAINING POSITIONS TO SELL
         #
-        # A small residual position has little portfolio value
-        # and creates unnecessary complexity.
+        # If a partial reduction would leave a residual
+        # holding below MIN_REDUCTION_VALUE, sell the entire
+        # position instead.
+        #
+        # IMPORTANT:
+        # The comparison is against the VALUE REMAINING,
+        # not the amount being released.
+        #
+        # Example:
+        #
+        # Holding       = £3.47
+        # REDUCE 25%    = £0.87
+        # Remaining     = £2.60
+        # Minimum value  = £5.00
+        #
+        # Therefore:
+        #
+        # REDUCE 25% -> SELL
+        #
+        # This prevents the position from being omitted here
+        # and subsequently falling through to HOLD.
         # ----------------------------------------------------
 
-        if release_amount < MIN_REDUCTION_VALUE:
+        remaining_value = round(
+            market_value
+            -
+            release_amount,
+            2
+        )
+
+        if (
+            reduction_percentage < 1.0
+            and
+            remaining_value < MIN_REDUCTION_VALUE
+        ):
 
             reduction_percentage = 1.0
 
@@ -764,6 +795,13 @@ def generate_capital_allocation(
                 f"{int(reduction_percentage * 100)}%"
             )
 
+        # ----------------------------------------------------
+        # Price
+        #
+        # If the decision row does not contain a usable price,
+        # derive it from the actual holding.
+        # ----------------------------------------------------
+
         price = get_price(
             row
         )
@@ -783,14 +821,6 @@ def generate_capital_allocation(
 
         if price <= 0:
             continue
-
-        reduction_action = (
-            "SELL"
-            if reduction_percentage >= 1
-            else
-            f"REDUCE "
-            f"{int(reduction_percentage * 100)}%"
-        )
 
         allocation_score = get_allocation_score(
             row,
@@ -868,6 +898,7 @@ def generate_capital_allocation(
                 # For ETFs this represents ETF Score for
                 # allocation purposes.
                 # ------------------------------------------------
+
                 "Investment Score":
                     allocation_score,
 
@@ -1117,10 +1148,12 @@ def generate_capital_allocation(
                 # allocation-ranking value while Asset Type
                 # tells us which analytical model produced it.
                 # ------------------------------------------------
+
                 "Investment Score":
                     allocation_score,
 
                 # Internal field used only before final output.
+
                 "_Allocation Score":
                     allocation_score,
             }
@@ -1218,7 +1251,6 @@ def generate_capital_allocation(
                 continue
 
         else:
-
             continue
 
         selected_candidates.append(
@@ -1226,11 +1258,8 @@ def generate_capital_allocation(
         )
 
         if action == "BUY MORE":
-
             buy_more_count += 1
-
         else:
-
             buy_new_count += 1
 
     # ========================================================
@@ -1545,13 +1574,16 @@ def generate_capital_allocation(
             # ------------------------------------------------
             # Do not duplicate positions already represented
             # by a trade action.
+            #
+            # CA.PA will now be present here as SELL when the
+            # reduction has been escalated, so it cannot fall
+            # through to HOLD.
             # ------------------------------------------------
 
             if any(
                 item["Ticker"] == ticker
                 for item in allocations
             ):
-
                 continue
 
             asset_type = get_asset_type(
@@ -1567,7 +1599,6 @@ def generate_capital_allocation(
             )
 
             if asset_type == "ETF":
-           
 
                 allocation_pct = safe_float(
                     row.get(
@@ -1695,6 +1726,7 @@ def generate_capital_allocation(
                     # ETF:
                     #     ETF Score
                     # ------------------------------------------------
+
                     "Investment Score":
                         allocation_score,
                 }

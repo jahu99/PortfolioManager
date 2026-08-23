@@ -1165,6 +1165,8 @@ def _build_result(
     governance_flags: list[str],
     reasons: list[str],
     automatic_approval: bool,
+    governance_reason_code: str = "",
+    governance_reason: str = "",
 ) -> dict:
     """
     Build the standard reconciliation result.
@@ -1216,6 +1218,12 @@ def _build_result(
         "Governance Reasons":
             reasons,
 
+        "Governance Reason Code":
+            governance_reason_code,
+
+        "Governance Reason":
+            governance_reason,
+
         "Automatic Approval":
             automatic_approval,
 
@@ -1238,9 +1246,13 @@ def reconcile_decision(
     """
     Reconcile one deterministic decision with one LLM review.
 
-    The result describes whether the deterministic decision is
-    sufficiently supported to continue through the governed
-    decision process.
+    The deterministic proposal remains authoritative.
+    The LLM provides independent governance evidence but cannot
+    silently override a justified deterministic decision.
+
+    A justified REDUCE is evaluated before the generic
+    deterministic-evidence gate so that a confidence score between
+    65 and 69.99 does not incorrectly convert a valid REDUCE to HOLD.
 
     This function does not make the final portfolio decision.
     """
@@ -1428,8 +1440,7 @@ def reconcile_decision(
         )
 
     # --------------------------------------------------------
-    # Determine whether the BUY NEW immature-history exception
-    # applies BEFORE applying the normal weak deterministic gate.
+    # BUY NEW immature-history exception.
     # --------------------------------------------------------
 
     buy_new_immature_history_override = (
@@ -1440,20 +1451,110 @@ def reconcile_decision(
     )
 
     # --------------------------------------------------------
+    # JUSTIFIED REDUCE WITH LLM ACCEPT.
+    #
+    # IMPORTANT:
+    # This gate deliberately occurs BEFORE the generic
+    # weak-deterministic-evidence gate.
+    #
+    # A justified REDUCE has a lower dedicated deterministic
+    # confidence threshold of 65 rather than the generic 70.
+    #
+    # This prevents cases such as:
+    #
+    #   Evidence Score       = 67.41
+    #   Confidence           = 68.74
+    #   Investment Score     = 39
+    #   Signal               = SELL
+    #
+    # from being incorrectly intercepted by the generic
+    # MIN_DETERMINISTIC_CONFIDENCE = 70 gate.
+    # --------------------------------------------------------
+
+    if (
+        proposed_action == "REDUCE"
+        and
+        llm_review == "ACCEPT"
+        and
+        _reduce_is_strong_enough_to_survive_challenge(
+            decision=decision,
+            existing_holding=existing_holding,
+        )
+    ):
+
+        governance_flags.append(
+            "JUSTIFIED REDUCE"
+        )
+
+        reasons.append(
+            "REDUCE is supported by sufficient deterministic "
+            "evidence and an adequately weak investment case "
+            "for the existing holding."
+        )
+
+        if (
+            get_investment_score(
+                decision
+            )
+            <=
+            REDUCE_CHALLENGE_MAX_INVESTMENT_SCORE
+        ):
+
+            reasons.append(
+                "Investment Score is sufficiently weak to justify "
+                "reducing exposure."
+            )
+
+        if (
+            get_signal(
+                decision
+            )
+            in
+            REDUCE_SUPPORTING_SIGNALS
+        ):
+
+            reasons.append(
+                "The underlying analytical signal is bearish."
+            )
+
+        reasons.append(
+            "The independent LLM review accepts the REDUCE proposal."
+        )
+
+        return _build_result(
+            status="SUPPORTED",
+            reconciled_action="REDUCE",
+            deterministic_action=deterministic_action,
+            proposed_action=proposed_action,
+            llm_review=llm_review,
+            llm_confidence=llm_confidence,
+            evidence_score=evidence_score,
+            evidence_strength=evidence_strength,
+            deterministic_confidence=deterministic_confidence,
+            decision_support=decision_support,
+            existing_holding=existing_holding,
+            asset_type=asset_type,
+            governance_flags=governance_flags,
+            reasons=reasons,
+            automatic_approval=True,
+            governance_reason_code="JUSTIFIED_REDUCE",
+            governance_reason=(
+                "REDUCE approved because the existing holding has "
+                "sufficient deterministic evidence, adequate "
+                "confidence, and a weak investment case and/or "
+                "bearish signal."
+            ),
+        )
+
+    # --------------------------------------------------------
     # Weak deterministic proposal.
     #
-    # Normally weak evidence blocks portfolio change.
+    # This remains the normal governance gate for all other
+    # non-HOLD actions.
     #
-    # Exception:
-    #
-    # BUY NEW may proceed when:
-    #   - the current investment case is strong
-    #   - historical evidence is immature rather than negative
-    #   - the independent LLM review ACCEPTS
-    #   - there is no material contradiction
-    #
-    # This prevents "insufficient historical data" from becoming
-    # equivalent to "negative historical evidence".
+    # The justified REDUCE exception above has already been
+    # evaluated and therefore cannot be incorrectly converted
+    # to HOLD merely because confidence is below 70.
     # --------------------------------------------------------
 
     weak_deterministic = _deterministic_action_is_weak(
@@ -1523,16 +1624,16 @@ def reconcile_decision(
         )
 
     # --------------------------------------------------------
-    # LLM CHALLENGE
+    # LLM CHALLENGE.
     #
     # Normal rule:
     #     Challenge blocks BUY / BUY MORE / SELL.
     #
-    # Exception:
-    #     A strongly-supported REDUCE may proceed.
+    # A justified REDUCE with an LLM ACCEPT has already been
+    # handled above.
     #
-    # BUY NEW with immature evidence is handled separately below
-    # only when the LLM has ACCEPTED the proposal.
+    # A justified REDUCE with an LLM CHALLENGE is handled here
+    # using the existing REDUCE challenge exception.
     # --------------------------------------------------------
 
     if (
@@ -1540,10 +1641,6 @@ def reconcile_decision(
         or
         llm_challenge
     ):
-
-        # ----------------------------------------------------
-        # REDUCE exception.
-        # ----------------------------------------------------
 
         if proposed_action == "REDUCE":
 
@@ -1607,10 +1704,6 @@ def reconcile_decision(
                 reasons=reasons,
                 automatic_approval=False,
             )
-
-        # ----------------------------------------------------
-        # BUY NEW / BUY MORE / SELL.
-        # ----------------------------------------------------
 
         governance_flags.append(
             "LLM CHALLENGE"
@@ -1696,8 +1789,6 @@ def reconcile_decision(
 
     # --------------------------------------------------------
     # LLM ACCEPT.
-    #
-    # Agreement is supporting evidence, not authority.
     # --------------------------------------------------------
 
     if llm_review == "ACCEPT":
@@ -1736,11 +1827,6 @@ def reconcile_decision(
 
         # ----------------------------------------------------
         # BUY NEW with immature historical evidence.
-        #
-        # This must be checked BEFORE the normal 70-point
-        # deterministic-confidence gate.
-        #
-        # This is deliberately NOT used for BUY MORE.
         # ----------------------------------------------------
 
         if buy_new_immature_history_override:
@@ -1812,23 +1898,33 @@ def reconcile_decision(
             )
 
         # ----------------------------------------------------
-        # BUY MORE / REDUCE require strong evidence.
+        # BUY MORE / remaining high-impact actions.
         # ----------------------------------------------------
 
         if (
             _requires_strong_evidence(
                 proposed_action
             )
-            and
-            evidence_score < STRONG_EVIDENCE_SCORE
+            and evidence_score < STRONG_EVIDENCE_SCORE
         ):
 
             governance_flags.append(
                 "STRONG EVIDENCE REQUIRED"
             )
 
+            governance_reason_code = (
+                "DETERMINISTIC_EVIDENCE_THRESHOLD"
+            )
+
+            governance_reason = (
+                f"{proposed_action} was not automatically approved because "
+                f"the deterministic evidence score of {evidence_score:.2f} "
+                f"is below the required strong-evidence threshold of "
+                f"{STRONG_EVIDENCE_SCORE:.2f}."
+            )
+
             reasons.append(
-                "This action requires stronger deterministic evidence before automatic approval."
+                governance_reason
             )
 
             return _build_result(
@@ -1847,6 +1943,8 @@ def reconcile_decision(
                 governance_flags=governance_flags,
                 reasons=reasons,
                 automatic_approval=False,
+                governance_reason_code=governance_reason_code,
+                governance_reason=governance_reason,
             )
 
         # ----------------------------------------------------
@@ -1916,7 +2014,6 @@ def reconcile_decision(
         reasons=reasons,
         automatic_approval=False,
     )
-
 
 # ============================================================
 # Public compatibility API
