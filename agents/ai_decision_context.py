@@ -1329,6 +1329,7 @@ def merge_evidence_value(
 # Candidate context
 # ============================================================
 
+
 def build_candidate_context(
     candidate: Any,
     intelligence_lookup: dict[str, dict] | None = None,
@@ -1412,7 +1413,6 @@ def build_candidate_context(
     )
 
     if holding:
-
         quantity = safe_float(
             holding.get(
                 "quantity",
@@ -1445,7 +1445,6 @@ def build_candidate_context(
         owned = quantity > 0
 
     else:
-
         quantity = safe_float(
             get_value(
                 candidate,
@@ -1520,6 +1519,16 @@ def build_candidate_context(
         )
         if etf_score_value is not None
         else None
+    )
+
+    # FIX: Preserve ETF Signal through the AI context boundary.
+    etf_signal = clean_text(
+        get_value(
+            candidate,
+            "ETF Signal",
+            "etf_signal",
+            default="",
+        )
     )
 
     signal = clean_text(
@@ -1898,7 +1907,6 @@ def build_candidate_context(
     )
 
     return {
-
         "ticker":
             ticker,
 
@@ -1906,7 +1914,6 @@ def build_candidate_context(
             recommendation_id,
 
         "recommendation_evidence": {
-
             "available":
                 evidence_available,
 
@@ -1924,7 +1931,6 @@ def build_candidate_context(
             asset_type,
 
         "ownership": {
-
             "owned":
                 owned,
 
@@ -1939,7 +1945,6 @@ def build_candidate_context(
         },
 
         "analysis": {
-
             "investment_score":
                 (
                     investment_score
@@ -1953,6 +1958,10 @@ def build_candidate_context(
                     if asset_type == "ETF"
                     else None
                 ),
+
+            # FIX: Preserve ETF Signal in returned AI context.
+            "etf_signal":
+                etf_signal,
 
             "signal":
                 signal,
@@ -2060,72 +2069,13 @@ def build_candidate_context(
                 ai_risks,
         },
 
-        "portfolio_fit": {
-
-            "allocation_pct":
-                allocation_pct,
-
-            "sector":
-                sector,
-
-            "existing_holding":
-                owned,
-        },
-
         "rules_based_decision": {
-
             "action":
                 rules_action,
-
-            "reason":
-                clean_text(
-                    get_value(
-                        candidate,
-                        "Reason",
-                        "reason",
-                        default="",
-                    )
-                ),
-
-            "confidence":
-                clean_text(
-                    get_value(
-                        candidate,
-                        "Confidence",
-                        "confidence",
-                        default="",
-                    )
-                ),
         },
 
         "recommendation_intelligence":
             intelligence,
-
-        "capital": {
-
-            "buy_value":
-                safe_float(
-                    get_value(
-                        candidate,
-                        "Buy Value",
-                        "buy_value",
-                        default=0,
-                    )
-                ),
-
-            "released_capital":
-                safe_float(
-                    get_value(
-                        candidate,
-                        "Released Capital",
-                        "released_capital",
-                        default=0,
-                    )
-                ),
-        },
-
-        "ai_assessment":
-            None,
     }
 
 

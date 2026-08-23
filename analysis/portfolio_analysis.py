@@ -45,47 +45,10 @@ import pandas as pd
 
 from analysis.etf_analysis import analyse_etf
 
-
-# ============================================================
-# KNOWN ETF HOLDINGS
-# ============================================================
-
-ETF_TICKERS = {
-    "IWDA",
-    "VUAA",
-    "SEC0",
-    "AEMD"
-}
+from analysis.security_classifier import classify_security
 
 
-# ============================================================
-# SECURITY CLASSIFICATION
-# ============================================================
 
-def classify_security(ticker, name=""):
-
-    ticker = str(ticker).upper().strip()
-    name = str(name).upper().strip()
-
-    if ticker == "CASH":
-        return "CASH"
-
-    if ticker in ETF_TICKERS:
-        return "ETF"
-
-    if "ETF" in name:
-        return "ETF"
-
-    if "ISHARES" in name:
-        return "ETF"
-
-    if "VANGUARD" in name:
-        return "ETF"
-
-    if "AMUNDI" in name:
-        return "ETF"
-
-    return "STOCK"
 
 
 # ============================================================

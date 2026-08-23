@@ -251,6 +251,104 @@ def get_etf_price_data(
     return data.dropna()
 
 
+def test_positive_decision_scenarios():
+    """
+    Test ETF BUY / BUY MORE / HOLD behaviour using synthetic
+    ETF analysis.
+
+    These tests deliberately bypass market-data analysis so that
+    the portfolio-aware positive decision thresholds are tested
+    deterministically.
+    """
+
+    strong_analysis = {
+        "Ticker": "TEST",
+        "Type": "ETF",
+        "ETF Score": 90,
+        "ETF Signal": "BUY",
+        "Current Price": 100,
+        "MA50": 95,
+        "MA200": 90,
+        "6M Return %": 12,
+        "12M Return %": 20,
+        "ETF Reasons": [
+            "Price above 50-day moving average",
+            "Price above 200-day moving average",
+            "Strong positive momentum",
+        ],
+        "ETF Risks": [],
+    }
+
+    # ========================================================
+    # STRONG ETF / NOT OWNED
+    # ========================================================
+
+    decision = decide_etf(
+        etf_analysis=strong_analysis,
+        quantity=0,
+        market_value=0,
+        portfolio_weight=0,
+    )
+
+    assert decision["ETF Decision"] == "BUY"
+    assert decision["ETF Reduction %"] == 0
+    assert decision["ETF Score"] == 90
+    assert decision["ETF Signal"] == "BUY"
+
+    # ========================================================
+    # VERY STRONG ETF / SMALL EXISTING POSITION
+    # ========================================================
+
+    decision = decide_etf(
+        etf_analysis=strong_analysis,
+        quantity=5,
+        market_value=500,
+        portfolio_weight=5,
+    )
+
+    assert decision["ETF Decision"] == "BUY MORE"
+    assert decision["ETF Reduction %"] == 0
+    assert decision["ETF Score"] == 90
+    assert decision["ETF Signal"] == "BUY"
+
+    # ========================================================
+    # STRONG ETF / MEANINGFUL EXISTING POSITION
+    #
+    # Strong ETFs should be protected rather than repeatedly
+    # increased once the position is already meaningful.
+    # ========================================================
+
+    decision = decide_etf(
+        etf_analysis=strong_analysis,
+        quantity=10,
+        market_value=1000,
+        portfolio_weight=8,
+    )
+
+    assert decision["ETF Decision"] == "HOLD"
+    assert decision["ETF Reduction %"] == 0
+    assert decision["ETF Score"] == 90
+    assert decision["ETF Signal"] == "BUY"
+
+    # ========================================================
+    # STRONG ETF / LARGE EXISTING POSITION
+    #
+    # The current rules deliberately do not BUY MORE above 10%.
+    # ========================================================
+
+    decision = decide_etf(
+        etf_analysis=strong_analysis,
+        quantity=20,
+        market_value=2000,
+        portfolio_weight=12,
+    )
+
+    assert decision["ETF Decision"] == "HOLD"
+    assert decision["ETF Reduction %"] == 0
+    assert decision["ETF Score"] == 90
+    assert decision["ETF Signal"] == "BUY"
+
+
 # ============================================================
 # PRINT ANALYSIS
 # ============================================================
@@ -604,8 +702,8 @@ def test_portfolio_scenarios(
         name,
         yahoo_ticker,
         quantity=10,
-        market_value=500,
-        portfolio_weight=5,
+        market_value=800,
+        portfolio_weight=8,
     )
 
     expected = "HOLD"
@@ -711,3 +809,4 @@ def main():
 if __name__ == "__main__":
     main()
     test_negative_decision_scenarios()
+    test_positive_decision_scenarios()

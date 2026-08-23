@@ -19,6 +19,8 @@ FINAL_DECISION_COLUMNS = [
     # Investment
     "Investment Score",
     "Signal",
+    "ETF Score",
+    "ETF Signal",
 
     # Decision
     "Proposed Action",
@@ -56,6 +58,8 @@ FINAL_DECISION_HEADERS = {
     "Allocation %": "Current Allocation %",
     "Investment Score": "Investment Score",
     "Signal": "Signal",
+    "ETF Score": "ETF Score",
+    "ETF Signal": "ETF Signal",
     "Proposed Action": "Proposed Action",
     "Final Decision": "Final Decision",
     "Decision Status": "Decision Status",

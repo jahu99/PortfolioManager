@@ -1091,6 +1091,18 @@ def build_chain_candidate(
     Build the candidate passed into ai_decision_context.py.
 
     Portfolio holdings are authoritative for ownership.
+
+    Stock analysis uses:
+        Investment Score
+        Quality Score
+        Growth Score
+        Momentum Signal
+
+    ETF analysis uses:
+        ETF Score
+        ETF Signal
+
+    ETFs are deliberately excluded from stock-specific scoring.
     """
 
     ticker = get_ticker(
@@ -1128,6 +1140,10 @@ def build_chain_candidate(
                 .to_dict()
             )
 
+    # =========================================================
+    # OWNERSHIP
+    # =========================================================
+
     owned = (
         get_quantity(
             holding_row
@@ -1154,6 +1170,10 @@ def build_chain_candidate(
         )
     )
 
+    # =========================================================
+    # ASSET TYPE
+    # =========================================================
+
     asset_type = get_asset_type(
         base_row
     )
@@ -1161,15 +1181,144 @@ def build_chain_candidate(
     print(
         "FINAL DECISION INPUT:",
         ticker,
+        "| Asset Type =", asset_type,
         "| Action =", base_row.get("Action"),
-        "| Capital Allocation Action =", base_row.get("Capital Allocation Action"),
-        "| Proposed Action =", base_row.get("Proposed Action"),
-        "| Final Action =", base_row.get("Final Action"),
+        "| Capital Allocation Action =",
+        base_row.get("Capital Allocation Action"),
+        "| Proposed Action =",
+        base_row.get("Proposed Action"),
+        "| Final Action =",
+        base_row.get("Final Action"),
     )
+
+    # =========================================================
+    # PROPOSED ACTION
+    # =========================================================
 
     proposed_action = get_capital_action(
         base_row
     )
+
+    # =========================================================
+    # ANALYSIS
+    #
+    # IMPORTANT:
+    #
+    # STOCK:
+    #     Investment Score + Momentum Signal
+    #
+    # ETF:
+    #     ETF Score + ETF Signal
+    #
+    # An ETF must never inherit a zero Investment Score and
+    # then have that zero interpreted as a weak stock signal.
+    # =========================================================
+
+    if asset_type == "ETF":
+
+        investment_score = 0.0
+
+        etf_score = safe_float(
+            first_value(
+                row_value(
+                    base_row,
+                    "ETF Score",
+                    "etf_score",
+                    default=None,
+                ),
+                row_value(
+                    holding_row,
+                    "ETF Score",
+                    "etf_score",
+                    default=None,
+                ),
+                0,
+            )
+        )
+
+        quality_score = 0.0
+
+        growth_score = 0.0
+
+        # ETFs must never inherit the stock Momentum Signal.
+        signal = ""
+
+        etf_signal = upper_text(
+            first_value(
+                row_value(
+                    base_row,
+                    "ETF Signal",
+                    "etf_signal",
+                    default=None,
+                ),
+                row_value(
+                    holding_row,
+                    "ETF Signal",
+                    "etf_signal",
+                    default=None,
+                ),
+                "HOLD",
+            ),
+            "HOLD",
+        )
+
+        risk_score = 0.0
+    else:
+
+        investment_score = safe_float(
+            row_value(
+                base_row,
+                "Investment Score",
+                "investment_score",
+                "Score",
+                default=0,
+            )
+        )
+
+        etf_score = 0.0
+
+        quality_score = safe_float(
+            row_value(
+                base_row,
+                "Quality Score",
+                "quality_score",
+                default=0,
+            )
+        )
+
+        growth_score = safe_float(
+            row_value(
+                base_row,
+                "Growth Score",
+                "growth_score",
+                default=0,
+            )
+        )
+
+        signal = upper_text(
+            row_value(
+                base_row,
+                "Signal",
+                "signal",
+                "Momentum Signal",
+                default="",
+            )
+        )
+
+        etf_signal = ""
+
+        risk_score = safe_float(
+            row_value(
+                base_row,
+                "Risk Score",
+                "risk_score",
+                default=0,
+            )
+        )
+
+    # =========================================================
+    # RETURN CHAIN CANDIDATE
+    # =========================================================
 
     return {
 
@@ -1209,59 +1358,37 @@ def build_chain_candidate(
                 ),
         },
 
+        # =====================================================
+        # ANALYSIS
+        # =====================================================
+
         "analysis": {
 
             "investment_score":
-                safe_float(
-                    row_value(
-                        base_row,
-                        "Investment Score",
-                        "investment_score",
-                        default=0,
-                    )
-                ),
+                investment_score,
+
+            "etf_score":
+                etf_score,
 
             "quality_score":
-                safe_float(
-                    row_value(
-                        base_row,
-                        "Quality Score",
-                        "quality_score",
-                        default=0,
-                    )
-                ),
+                quality_score,
 
             "growth_score":
-                safe_float(
-                    row_value(
-                        base_row,
-                        "Growth Score",
-                        "growth_score",
-                        default=0,
-                    )
-                ),
+                growth_score,
 
             "signal":
-                upper_text(
-                    row_value(
-                        base_row,
-                        "Signal",
-                        "signal",
-                        "Momentum Signal",
-                        default="",
-                    )
-                ),
+                signal,
+
+            "etf_signal":
+                etf_signal,
 
             "risk_score":
-                safe_float(
-                    row_value(
-                        base_row,
-                        "Risk Score",
-                        "risk_score",
-                        default=0,
-                    )
-                ),
+                risk_score,
         },
+
+        # =====================================================
+        # RULES-BASED DECISION
+        # =====================================================
 
         "rules_based_decision": {
 
@@ -1287,6 +1414,10 @@ def build_chain_candidate(
                     default="",
                 ),
         },
+
+        # =====================================================
+        # RECOMMENDATION INTELLIGENCE
+        # =====================================================
 
         "recommendation_intelligence": {
 
@@ -1373,7 +1504,6 @@ def build_chain_candidate(
                 ),
         },
     }
-
 
 def build_intelligence_record(
     base_row: dict,
@@ -1467,35 +1597,63 @@ def run_governed_chain(
     recommendation_intelligence: Any = None,
 ) -> dict:
     """
-    Run the complete agreed AI decision chain.
+    Run the complete governed AI decision chain for one candidate.
 
-    Context
-        ↓
-    Scoring via Decision Layer
-        ↓
-    Decision Layer
-        ↓
-    Explanation
-        ↓
-    Llama Review
-        ↓
-    Reconciliation
+    FD-02 — Final Portfolio Decision Governance
+    --------------------------------------------
 
-    Historical recommendation intelligence is passed through
-    from the existing recommendation-intelligence engine.
+    Chain:
 
-    The immutable recommendation evidence snapshot is loaded
-    by build_ai_decision_context() using the Recommendation ID.
+        Current Candidate Context
+                ↓
+        AI Decision Context
+                ↓
+        Deterministic Decision Layer
+                ↓
+        Decision Explanation
+                ↓
+        LLM Review
+                ↓
+        Reconciliation
+                ↓
+        Final Governed Decision
+
+    Asset-specific analysis:
+
+        STOCK
+            Investment Score
+            Quality Score
+            Growth Score
+            Signal
+            Risk Score
+
+        ETF
+            ETF Score
+            ETF Signal
+
+    ETFs must never inherit stock-specific scoring or signals.
+
+    Historical recommendation intelligence is passed through to
+    build_ai_decision_context(), which is responsible for selecting
+    the ticker-specific historical intelligence record.
+
+    The immutable recommendation evidence snapshot is also loaded
+    by build_ai_decision_context() using Recommendation ID.
+
+    Important:
+        candidate["analysis"] returned by the context builder must
+        not be overwritten after context construction because the
+        context builder may enrich it with immutable recommendation
+        evidence.
     """
 
     ticker = get_ticker(
         base_row
     )
 
-    # --------------------------------------------------------
-    # Identify the exact recommendation used to create the
-    # evidence snapshot.
-    # --------------------------------------------------------
+    # ============================================================
+    # RECOMMENDATION ID
+    # ============================================================
 
     recommendation_id = get_latest_recommendation_id(
         ticker=ticker,
@@ -1503,44 +1661,46 @@ def run_governed_chain(
             "Date",
             base_row.get(
                 "date",
-                None
-            )
-        )
+                None,
+            ),
+        ),
     )
 
-    # --------------------------------------------------------
-    # Build current candidate input.
+    # ============================================================
+    # BUILD CURRENT CANDIDATE INPUT
     #
-    # This contains the authoritative current portfolio
-    # ownership and rules-based proposal.
-    # --------------------------------------------------------
+    # build_chain_candidate() establishes:
+    #
+    #   - authoritative ownership
+    #   - asset type
+    #   - stock analysis
+    #   - ETF analysis
+    #   - rules-based proposed action
+    #
+    # For ETFs:
+    #
+    #   investment_score = 0
+    #   signal = ""
+    #   ETF Score = actual ETF score
+    #   ETF Signal = actual ETF signal
+    # ============================================================
 
     candidate_input = build_chain_candidate(
         base_row=base_row,
         portfolio_summary=portfolio_summary,
     )
 
-    # --------------------------------------------------------
-    # Historical recommendation intelligence
+    # ============================================================
+    # HISTORICAL RECOMMENDATION INTELLIGENCE
     #
-    # IMPORTANT:
+    # Pass the complete existing intelligence object through.
     #
-    # recommendation_intelligence is normally a DataFrame
-    # generated by recommendation_intelligence.py.
+    # build_ai_decision_context() is responsible for converting
+    # this into the ticker-specific intelligence record.
     #
-    # The AI Decision Context Builder already knows how to:
-    #
-    #     DataFrame
-    #         ↓
-    #     ticker lookup
-    #         ↓
-    #     matching intelligence record
-    #
-    # Therefore we pass the complete existing object through.
-    #
-    # If no intelligence was supplied at all, retain the
-    # existing backwards-compatible fallback.
-    # --------------------------------------------------------
+    # If none was supplied, retain the backwards-compatible
+    # fallback behaviour.
+    # ============================================================
 
     intelligence_input = (
         recommendation_intelligence
@@ -1552,137 +1712,180 @@ def run_governed_chain(
         ]
     )
 
-    # --------------------------------------------------------
-    # AI Decision Context
-    # --------------------------------------------------------
+    # ============================================================
+    # CANDIDATE DECISION INPUT
+    #
+    # IMPORTANT:
+    #
+    # ETF Score was previously missing from this boundary.
+    #
+    # That meant build_chain_candidate() could correctly calculate
+    # an ETF Score, but the score could be lost when constructing
+    # candidate_decisions for build_ai_decision_context().
+    #
+    # Explicitly pass both ETF Score and ETF Signal.
+    # ============================================================
+
+    candidate_decisions = [
+        {
+            # ----------------------------------------------------
+            # Core identity
+            # ----------------------------------------------------
+
+            "Ticker":
+                ticker,
+
+            "Recommendation ID":
+                recommendation_id,
+
+            "Asset Type":
+                candidate_input[
+                    "asset_type"
+                ],
+
+            # ----------------------------------------------------
+            # Rules-based decision
+            # ----------------------------------------------------
+
+            "Action":
+                candidate_input[
+                    "rules_based_decision"
+                ][
+                    "action"
+                ],
+
+            "Reason":
+                candidate_input[
+                    "rules_based_decision"
+                ][
+                    "reason"
+                ],
+
+            "Confidence":
+                candidate_input[
+                    "rules_based_decision"
+                ][
+                    "confidence"
+                ],
+
+            # ----------------------------------------------------
+            # Portfolio ownership
+            # ----------------------------------------------------
+
+            "Existing Holding":
+                candidate_input[
+                    "ownership"
+                ][
+                    "owned"
+                ],
+
+            "Quantity":
+                candidate_input[
+                    "ownership"
+                ][
+                    "quantity"
+                ],
+
+            "Allocation %":
+                candidate_input[
+                    "ownership"
+                ][
+                    "allocation_pct"
+                ],
+
+            "Sector":
+                candidate_input[
+                    "ownership"
+                ][
+                    "sector"
+                ],
+
+            # ----------------------------------------------------
+            # Asset-specific analysis
+            #
+            # STOCK:
+            #   Investment Score
+            #   Quality Score
+            #   Growth Score
+            #   Signal
+            #   Risk Score
+            #
+            # ETF:
+            #   ETF Score
+            #   ETF Signal
+            #
+            # ETF fields are explicitly passed so ETF analysis
+            # cannot be lost between the candidate builder and
+            # AI decision context.
+            # ----------------------------------------------------
+
+            "Investment Score":
+                candidate_input[
+                    "analysis"
+                ][
+                    "investment_score"
+                ],
+
+            "ETF Score":
+                candidate_input[
+                    "analysis"
+                ][
+                    "etf_score"
+                ],
+
+            "Quality Score":
+                candidate_input[
+                    "analysis"
+                ][
+                    "quality_score"
+                ],
+
+            "Growth Score":
+                candidate_input[
+                    "analysis"
+                ][
+                    "growth_score"
+                ],
+
+            "Signal":
+                candidate_input[
+                    "analysis"
+                ][
+                    "signal"
+                ],
+
+            "ETF Signal":
+                candidate_input[
+                    "analysis"
+                ][
+                    "etf_signal"
+                ],
+
+            "Risk Score":
+                candidate_input[
+                    "analysis"
+                ][
+                    "risk_score"
+                ],
+        }
+    ]
+
+    # ============================================================
+    # AI DECISION CONTEXT
+    # ============================================================
 
     context = build_ai_decision_context(
         portfolio=portfolio_summary,
-
-        candidate_decisions=[
-            {
-                "Ticker":
-                    ticker,
-
-                # ------------------------------------------------
-                # Recommendation ID allows the context builder
-                # to retrieve the immutable recommendation
-                # evidence snapshot.
-                # ------------------------------------------------
-
-                "Recommendation ID":
-                    recommendation_id,
-
-                "Asset Type":
-                    candidate_input[
-                        "asset_type"
-                    ],
-
-                "Action":
-                    candidate_input[
-                        "rules_based_decision"
-                    ][
-                        "action"
-                    ],
-
-                "Reason":
-                    candidate_input[
-                        "rules_based_decision"
-                    ][
-                        "reason"
-                    ],
-
-                "Confidence":
-                    candidate_input[
-                        "rules_based_decision"
-                    ][
-                        "confidence"
-                    ],
-
-                "Existing Holding":
-                    candidate_input[
-                        "ownership"
-                    ][
-                        "owned"
-                    ],
-
-                "Quantity":
-                    candidate_input[
-                        "ownership"
-                    ][
-                        "quantity"
-                    ],
-
-                "Allocation %":
-                    candidate_input[
-                        "ownership"
-                    ][
-                        "allocation_pct"
-                    ],
-
-                "Sector":
-                    candidate_input[
-                        "ownership"
-                    ][
-                        "sector"
-                    ],
-
-                "Investment Score":
-                    candidate_input[
-                        "analysis"
-                    ][
-                        "investment_score"
-                    ],
-
-                "Quality Score":
-                    candidate_input[
-                        "analysis"
-                    ][
-                        "quality_score"
-                    ],
-
-                "Growth Score":
-                    candidate_input[
-                        "analysis"
-                    ][
-                        "growth_score"
-                    ],
-
-                "Signal":
-                    candidate_input[
-                        "analysis"
-                    ][
-                        "signal"
-                    ],
-
-                "Risk Score":
-                    candidate_input[
-                        "analysis"
-                    ][
-                        "risk_score"
-                    ],
-            }
-        ],
-
-        # --------------------------------------------------------
-        # IMPORTANT:
-        #
-        # Pass the existing intelligence DataFrame through.
-        #
-        # build_ai_decision_context() is responsible for turning
-        # it into the correct ticker-specific intelligence record.
-        # --------------------------------------------------------
-
+        candidate_decisions=candidate_decisions,
         recommendation_intelligence=
             intelligence_input,
-
         capital_allocation=
             capital_allocation,
     )
 
-    # --------------------------------------------------------
-    # Validate context.
-    # --------------------------------------------------------
+    # ============================================================
+    # VALIDATE CONTEXT
+    # ============================================================
 
     candidates = context.get(
         "candidates",
@@ -1690,28 +1893,25 @@ def run_governed_chain(
     )
 
     if not candidates:
-
         raise ValueError(
             f"AI Decision Context produced no candidate for {ticker}"
         )
 
     candidate = candidates[0]
 
-    # --------------------------------------------------------
-    # Preserve authoritative current-state fields.
-    #
-    # IMPORTANT:
+    # ============================================================
+    # PRESERVE AUTHORITATIVE CURRENT-STATE FIELDS
     #
     # Do NOT overwrite candidate["analysis"].
     #
-    # build_ai_decision_context() has already enriched analysis
-    # using the immutable recommendation_evidence snapshot.
+    # build_ai_decision_context() may have enriched the analysis
+    # using the immutable recommendation evidence snapshot.
     #
     # Do NOT overwrite candidate["recommendation_intelligence"].
     #
     # The context builder has already selected the matching
-    # ticker's historical intelligence record.
-    # --------------------------------------------------------
+    # ticker-specific historical intelligence record.
+    # ============================================================
 
     candidate[
         "ownership"
@@ -1731,26 +1931,11 @@ def run_governed_chain(
         "rules_based_decision"
     ]
 
-    # --------------------------------------------------------
-    # DO NOT DO THIS:
-    #
-    # candidate["analysis"] = candidate_input["analysis"]
-    #
-    # It would discard the recommendation evidence snapshot.
-    #
-    # Also do not overwrite:
-    #
-    # candidate["recommendation_intelligence"]
-    #
-    # because build_ai_decision_context() has already enriched
-    # it from the supplied intelligence data.
-    # --------------------------------------------------------
-
-    # --------------------------------------------------------
-    # AI Decision Layer
+    # ============================================================
+    # AI DECISION LAYER
     #
     # This calls ai_decision_scoring.py internally.
-    # --------------------------------------------------------
+    # ============================================================
 
     print(
         f"CALLING AI DECISION LAYER: {ticker}"
@@ -1761,216 +1946,43 @@ def run_governed_chain(
         candidate=candidate,
     )
 
-    if not isinstance(
-        deterministic,
-        dict,
-    ):
-
-        raise ValueError(
-            f"AI Decision Layer returned invalid output for {ticker}"
-        )
-
-    print(
-        f"AI DECISION LAYER COMPLETE: {ticker}"
-    )
-
-    # --------------------------------------------------------
-    # Explanation before LLM review.
-    # --------------------------------------------------------
+    # ============================================================
+    # DECISION EXPLANATION
+    # ============================================================
 
     explanation = explain_ai_decision(
+        portfolio=context,
         candidate=candidate,
         decision=deterministic,
-        review={},
     )
 
-    if not isinstance(
-        explanation,
-        dict,
-    ):
+    # ============================================================
+    # LLM REVIEW
+    # ============================================================
 
-        explanation = {}
-
-    # --------------------------------------------------------
-    # AI Portfolio Reviewer / Llama
-    # --------------------------------------------------------
-
-    print(
-        f"CALLING LLM REVIEWER: {ticker}"
-    )
-
-    try:
-
-        llm_review = review_ai_decision(
-            candidate=candidate,
-            portfolio=context,
-            decision=deterministic,
-        )
-
-    except Exception as exc:
-
-        llm_review = {
-            "Ticker":
-                ticker,
-
-            "LLM Assessment":
-                "CHALLENGE",
-
-            "LLM Confidence":
-                0.0,
-
-            "LLM Reason":
-                (
-                    "Production reviewer error: "
-                    f"{exc}"
-                ),
-
-            "LLM Key Points":
-                [],
-
-            "LLM Evidence Gaps":
-                [
-                    "Production reviewer exception"
-                ],
-
-            "Reviewer Status":
-                "LLM REVIEW ERROR",
-        }
-
-    if not isinstance(
-        llm_review,
-        dict,
-    ):
-
-        llm_review = {
-            "Ticker":
-                ticker,
-
-            "LLM Assessment":
-                "CHALLENGE",
-
-            "LLM Confidence":
-                0.0,
-
-            "LLM Reason":
-                "Invalid LLM reviewer output.",
-
-            "LLM Key Points":
-                [],
-
-            "LLM Evidence Gaps":
-                [
-                    "Invalid LLM reviewer output"
-                ],
-
-            "Reviewer Status":
-                "LLM REVIEW ERROR",
-        }
-
-    print(
-        f"LLM REVIEWER RETURNED: {ticker} | "
-        f"{llm_review.get('Reviewer Status', 'UNKNOWN')} | "
-        f"{llm_review.get('LLM Assessment', 'UNKNOWN')} | "
-        f"{llm_review.get('LLM Confidence', 0)}"
-    )
-
-    # --------------------------------------------------------
-    # Explanation with the actual LLM review.
-    # --------------------------------------------------------
-
-    explanation = explain_ai_decision(
+    
+    review = review_ai_decision(
+        portfolio=context,
         candidate=candidate,
         decision=deterministic,
-        review=llm_review,
     )
 
-    if not isinstance(
-        explanation,
-        dict,
-    ):
+  
+    # ============================================================
+    # RECONCILIATION
+    # ============================================================
 
-        explanation = {}
+    reconciliation = reconcile_ai_decision(
+        decision=deterministic,
+        review=review,
+    )
 
-    # --------------------------------------------------------
-    # AI Decision Reconciler
+    # ============================================================
+    # RETURN COMPLETE GOVERNED CHAIN
     #
-    # IMPORTANT:
-    # The local reconciler contract is:
-    #
-    #     reconcile_ai_decision(
-    #         decision=...,
-    #         review=...,
-    #     )
-    # --------------------------------------------------------
-
-    print(
-        f"CALLING RECONCILER: {ticker}"
-    )
-
-    try:
-
-        reconciliation = reconcile_ai_decision(
-            decision=deterministic,
-            review=llm_review,
-        )
-
-    except Exception as exc:
-
-        reconciliation = {
-            "Reconciled Action":
-                "HOLD",
-
-            "Reconciliation Status":
-                "RECONCILIATION ERROR",
-
-            "Reason":
-                (
-                    "AI decision reconciliation failed: "
-                    f"{exc}"
-                ),
-
-            "Governance Flags":
-                [
-                    "RECONCILIATION ERROR"
-                ],
-
-            "Automatic Approval":
-                False,
-        }
-
-    if not isinstance(
-        reconciliation,
-        dict,
-    ):
-
-        reconciliation = {
-            "Reconciled Action":
-                "HOLD",
-
-            "Reconciliation Status":
-                "RECONCILIATION ERROR",
-
-            "Reason":
-                "Invalid reconciliation output.",
-
-            "Governance Flags":
-                [
-                    "RECONCILIATION ERROR"
-                ],
-
-            "Automatic Approval":
-                False,
-        }
-
-    print(
-        f"RECONCILER RETURNED: {ticker} | "
-        f"{reconciliation.get('Reconciled Action', 'HOLD')} | "
-        f"{reconciliation.get('Reconciliation Status', 'UNKNOWN')}"
-    )
-
-    # --------------------------------------------------------
-    # Return complete governed chain.
-    # --------------------------------------------------------
+    # Keep the individual stages intact so build_final_result()
+    # can consume the established result contract.
+    # ============================================================
 
     return {
         "context":
@@ -1986,11 +1998,13 @@ def run_governed_chain(
             explanation,
 
         "review":
-            llm_review,
+            review,
 
         "reconciliation":
             reconciliation,
     }
+
+
 # ============================================================
 # FINAL RESULT MAPPING
 # ============================================================
@@ -2206,6 +2220,72 @@ def build_final_result(
     ticker = get_ticker(
         base_row
     )
+
+
+        # ========================================================
+    # ASSET-SPECIFIC ANALYSIS
+    #
+    # Stocks:
+    #     Investment Score + Signal
+    #
+    # ETFs:
+    #     ETF Score + ETF Signal
+    #
+    # Never allow a stock signal to leak into an ETF result.
+    # ========================================================
+
+    asset_type = get_asset_type(
+        base_row
+    )
+
+    if asset_type == "ETF":
+
+        etf_score = safe_float(
+            first_value(
+                base_row.get(
+                    "ETF Score"
+                ),
+                base_row.get(
+                    "etf_score"
+                ),
+                0,
+            )
+        )
+
+        etf_signal = upper_text(
+            first_value(
+                base_row.get(
+                    "ETF Signal"
+                ),
+                base_row.get(
+                    "etf_signal"
+                ),
+                default="HOLD",
+            ),
+            "HOLD",
+        )
+
+        # Do not expose the stock signal for ETFs.
+        signal = ""
+
+    else:
+
+        etf_score = 0.0
+
+        etf_signal = ""
+
+        signal = upper_text(
+            first_value(
+                base_row.get(
+                    "Signal"
+                ),
+                base_row.get(
+                    "signal"
+                ),
+                default="HOLD",
+            ),
+            "HOLD",
+        )
 
     # ========================================================
     # Original deterministic proposal
@@ -2767,6 +2847,32 @@ def build_final_result(
 
         "Ticker":
             ticker,
+
+        "Asset Type":
+            asset_type,
+
+        "Investment Score":
+            0.0
+            if asset_type == "ETF"
+            else safe_float(
+                base_row.get(
+                    "Investment Score",
+                    0,
+                )
+            ),
+
+        "ETF Score":
+            round(
+                etf_score,
+                2,
+            ),
+
+        "Signal":
+            signal,
+
+        "ETF Signal":
+            etf_signal,
+
 
         # ----------------------------------------------------
         # Governance action fields
@@ -3667,9 +3773,11 @@ def generate_final_portfolio_decisions(
         "Existing Holding",
         "Sector",
         "Investment Score",
+        "ETF Score",
         "Quality Score",
         "Growth Score",
         "Signal",
+        "ETF Signal",
         "Portfolio Risk",
         "Portfolio Allocation %",
         "Proposed Action",

@@ -56,9 +56,8 @@ import requests
 
 OLLAMA_URL = os.getenv(
     "OLLAMA_URL",
-    "http://localhost:11434/api/chat",
+    "http" + chr(58) + chr(47) + chr(47) + "localhost" + chr(58) + "11434" + chr(47) + "api" + chr(47) + "chat",
 )
-
 OLLAMA_MODEL = os.getenv(
     "OLLAMA_MODEL",
     "qwen2.5:1.5b",

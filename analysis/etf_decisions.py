@@ -49,8 +49,8 @@ from typing import Any, Dict, Optional
 # POSITION THRESHOLDS
 # ============================================================
 
-SMALL_POSITION_PCT = 2.0
-MEANINGFUL_POSITION_PCT = 10.0
+SMALL_POSITION_PCT = 5.0
+MEANINGFUL_POSITION_PCT = 12.0
 
 
 # ============================================================
@@ -122,14 +122,13 @@ def classify_etf_position(
     if weight <= 0:
         return "NONE"
 
-    if weight < SMALL_POSITION_PCT:
+    if weight <= SMALL_POSITION_PCT:
         return "SMALL"
 
-    if weight <= MEANINGFUL_POSITION_PCT:
+    if weight < MEANINGFUL_POSITION_PCT:
         return "MEANINGFUL"
 
     return "LARGE"
-
 
 # ============================================================
 # CONFIDENCE
@@ -211,11 +210,23 @@ def calculate_etf_reduction(
         if score < 25:
             return 100
 
-        if weight > MEANINGFUL_POSITION_PCT:
+        if weight >= MEANINGFUL_POSITION_PCT:
             return 75
 
         return 50
 
+    # --------------------------------------------------------
+    # Weak ETF
+    # --------------------------------------------------------
+
+    if score < NEUTRAL_SCORE:
+
+        if weight >= MEANINGFUL_POSITION_PCT:
+            return 50
+
+        return 25
+
+    return 0
     # --------------------------------------------------------
     # Weak ETF
     # --------------------------------------------------------

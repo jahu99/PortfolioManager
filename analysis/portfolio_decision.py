@@ -114,7 +114,6 @@ def generate_final_portfolio_decision(
     Purpose
     -------
     Combines:
-
         - Investment decision engine
         - AI portfolio review
         - Portfolio manager review
@@ -125,15 +124,12 @@ def generate_final_portfolio_decision(
     IMPORTANT
     ---------
     This function decides WHETHER capital should be deployed.
-
     It does NOT decide the final monetary allocation.
 
     Actual capital allocation is handled by:
-
         capital_allocator.py
 
     That module determines:
-
         BUY NEW
         BUY MORE
         REDUCE
@@ -142,6 +138,12 @@ def generate_final_portfolio_decision(
 
     using actual ownership from holdings_raw.csv and
     Investment Score ranking.
+
+    ETF handling
+    ------------
+    ETFs use ETF Signal rather than the stock Momentum Signal.
+    This prevents an ETF with no stock Signal from being
+    incorrectly interpreted as bearish.
     """
 
     # =====================================================
@@ -149,7 +151,6 @@ def generate_final_portfolio_decision(
     # =====================================================
 
     final_action = "HOLD"
-
     confidence = "Medium"
 
     reasons = []
@@ -186,7 +187,6 @@ def generate_final_portfolio_decision(
     )
 
     if investment_reason:
-
         reasons.extend(
             _normalise_list(
                 investment_reason
@@ -221,14 +221,58 @@ def generate_final_portfolio_decision(
         )
     )
 
-    signal = _normalise_action(
+    # =====================================================
+    # ASSET TYPE
+    #
+    # ETF and stock signals are stored separately.
+    #
+    # This is the only ETF-specific change in this
+    # function.
+    # =====================================================
+
+    asset_type = _normalise_action(
         _get_value(
             investment_decision,
-            "Signal",
-            "Momentum Signal",
-            default=""
+            "Asset Type",
+            "asset_type",
+            "Type",
+            default="STOCK"
         )
     )
+
+    # =====================================================
+    # SIGNAL
+    #
+    # Stocks:
+    #     Signal / Momentum Signal
+    #
+    # ETFs:
+    #     ETF Signal / etf_signal
+    #
+    # Do NOT default an ETF to the stock Signal field.
+    # =====================================================
+
+    if asset_type == "ETF":
+
+        signal = _normalise_action(
+            _get_value(
+                investment_decision,
+                "ETF Signal",
+                "etf_signal",
+                default=""
+            )
+        )
+
+    else:
+
+        signal = _normalise_action(
+            _get_value(
+                investment_decision,
+                "Signal",
+                "Momentum Signal",
+                default=""
+            )
+        )
 
     conviction = _normalise_action(
         _get_value(
@@ -564,71 +608,64 @@ def generate_final_portfolio_decision(
 
     review_trigger = list(
         dict.fromkeys(
-            review_trigger
+            str(x)
+            for x in review_trigger
+            if x
         )
     )
 
     # =====================================================
-    # RETURN
-    #
-    # Existing keys are preserved.
-    # Additional intelligence fields are included so the
-    # capital allocator and reporting layers can use them.
+    # FINAL RESULT
     # =====================================================
 
     return {
+        "Ticker": ticker,
 
-        "Ticker":
-            ticker,
+        "Final Action": final_action,
 
-        "Final Action":
-            final_action,
+        "Action": final_action,
 
-        "Confidence":
-            confidence,
+        "Confidence": confidence,
 
-        "Reasons":
-            reasons,
+        "AI Conviction": conviction,
 
-        "Risks":
-            risks,
+        "Capital Action": capital_action,
 
-        "Actions":
-            actions,
+        "Investment Score": investment_score,
 
-        "Capital Allocation Action":
-            capital_action,
+        "Quality Score": quality_score,
 
-        "Review Triggers":
-            review_trigger,
+        "Growth Score": growth_score,
 
-        "Investment Score":
-            investment_score,
+        "Signal": signal,
 
-        "Quality Score":
-            quality_score,
+        "Asset Type": asset_type,
 
-        "Growth Score":
-            growth_score,
+        "Allocation %": allocation,
 
-        "Signal":
-            signal,
+        "Sector": sector,
 
-        "AI Conviction":
-            conviction,
+        "Sector Allocation %": sector_allocation,
 
-        "Allocation %":
-            allocation,
+        "Portfolio Risk": portfolio_risk,
 
-        "Sector":
-            sector,
+        "Portfolio Health Score": health_score,
 
-        "Sector Allocation %":
-            sector_allocation,
+        "Reasons": reasons,
 
-        "Portfolio Risk":
-            portfolio_risk,
+        "Risks": risks,
 
-        "Existing Holding":
-            "Yes"
+        "Actions": actions,
+
+        "Review Triggers": review_trigger,
+
+        "Reason": "; ".join(
+            reasons
+        ) if reasons else capital_action,
+
+        "Review Trigger": "; ".join(
+            review_trigger
+        ) if review_trigger else "",
+
+        "Ticker": ticker,
     }
