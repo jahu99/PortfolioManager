@@ -1047,58 +1047,272 @@ def extract_intelligence(
     intelligence_lookup: dict[str, dict],
 ) -> dict:
     """
-    Extract historical intelligence for one ticker.
+    Extract historical recommendation intelligence for one ticker.
 
-    Missing historical evidence remains explicit.
+    Historical learning is exposed at both:
+        - generic signal level
+        - 5-day horizon
+        - 10-day horizon
+        - 60-day horizon
+
+    60-day evidence is preferred when sufficiently mature.
+    Missing or immature historical evidence is not treated as
+    negative evidence.
+
+    This function transports and normalises learning evidence.
+    It does not make investment decisions or change scoring weights.
     """
 
-    record = intelligence_lookup.get(
-        ticker
-    )
+    record = intelligence_lookup.get(ticker)
 
     if not record:
+        return {
+            "available": False,
+
+            "historical_signal_observations": 0,
+            "historical_signal_average_return_pct": 0.0,
+            "historical_signal_win_rate_pct": 0.0,
+            "historical_signal_reliability": "INSUFFICIENT DATA",
+
+            "historical_5_day": {
+                "observations": 0,
+                "average_return_pct": 0.0,
+                "win_rate_pct": 0.0,
+                "reliability": "INSUFFICIENT DATA",
+            },
+
+            "historical_10_day": {
+                "observations": 0,
+                "average_return_pct": 0.0,
+                "win_rate_pct": 0.0,
+                "reliability": "INSUFFICIENT DATA",
+            },
+
+            "historical_60_day": {
+                "observations": 0,
+                "average_return_pct": 0.0,
+                "win_rate_pct": 0.0,
+                "reliability": "INSUFFICIENT DATA",
+            },
+
+            "preferred_learning_horizon": None,
+            "preferred_learning_observations": 0,
+            "preferred_learning_average_return_pct": 0.0,
+            "preferred_learning_win_rate_pct": 0.0,
+            "preferred_learning_reliability": "INSUFFICIENT DATA",
+
+            "learning_adjustment": 0.0,
+            "learning_adjusted_score": None,
+
+            "recommendation_strength": "",
+            "score_bucket": "",
+            "score_bucket_observations": 0,
+            "score_bucket_average_return_pct": 0.0,
+            "score_bucket_win_rate_pct": 0.0,
+            "confidence": "",
+        }
+
+    def extract_horizon(horizon: str) -> dict:
+        """
+        Extract one learning horizon.
+
+        Supports both nested dictionaries and flat fields so that
+        the context layer remains compatible with the existing
+        recommendation-intelligence output.
+        """
+
+        horizon_lower = horizon.lower()
+
+        nested = get_value(
+            record,
+            f"historical_{horizon_lower}_day",
+            f"historical_{horizon_lower}",
+            f"Historical {horizon} Day",
+            f"Historical {horizon}-Day",
+            default=None,
+        )
+
+        if not isinstance(nested, dict):
+            nested = {}
+
+        observations = safe_float(
+            get_value(
+                nested,
+                "observations",
+                "Observations",
+                "Historical Observations",
+                default=0,
+            )
+        )
+
+        average_return = safe_float(
+            get_value(
+                nested,
+                "average_return_pct",
+                "Average Return %",
+                "Historical Average Return %",
+                default=0,
+            )
+        )
+
+        win_rate = safe_float(
+            get_value(
+                nested,
+                "win_rate_pct",
+                "Win Rate %",
+                "Historical Win Rate %",
+                default=0,
+            )
+        )
+
+        reliability = clean_text(
+            get_value(
+                nested,
+                "reliability",
+                "Reliability",
+                "Historical Reliability",
+                default="",
+            )
+        )
+
+        # Flat-field fallback.
+        if observations <= 0:
+            observations = safe_float(
+                get_value(
+                    record,
+                    f"Historical {horizon} Day Observations",
+                    f"Historical {horizon}-Day Observations",
+                    f"Historical {horizon}_day_observations",
+                    f"historical_{horizon_lower}_day_observations",
+                    default=0,
+                )
+            )
+
+        if average_return == 0.0:
+            average_return = safe_float(
+                get_value(
+                    record,
+                    f"Historical {horizon} Day Average Return %",
+                    f"Historical {horizon}-Day Average Return %",
+                    f"Historical {horizon}_day_average_return_pct",
+                    default=0,
+                )
+            )
+
+        if win_rate == 0.0:
+            win_rate = safe_float(
+                get_value(
+                    record,
+                    f"Historical {horizon} Day Win Rate %",
+                    f"Historical {horizon}-Day Win Rate %",
+                    f"Historical {horizon}_day_win_rate_pct",
+                    default=0,
+                )
+            )
+
+        if not reliability:
+            reliability = clean_text(
+                get_value(
+                    record,
+                    f"Historical {horizon} Day Reliability",
+                    f"Historical {horizon}-Day Reliability",
+                    f"Historical {horizon}_day_reliability",
+                    default="",
+                )
+            )
+
+        if not reliability:
+            if observations <= 0:
+                reliability = "INSUFFICIENT DATA"
+            elif observations < 30:
+                reliability = "IMMATURE"
+            else:
+                reliability = "VALID"
 
         return {
-
-            "available":
-                False,
-
-            "historical_signal_observations":
-                0,
-
-            "historical_signal_average_return_pct":
-                0.0,
-
-            "historical_signal_win_rate_pct":
-                0.0,
-
-            "historical_signal_reliability":
-                "INSUFFICIENT DATA",
-
-            "learning_adjustment":
-                0.0,
-
-            "learning_adjusted_score":
-                None,
-
-            "recommendation_strength":
-                None,
-
-            "score_bucket":
-                None,
-
-            "score_bucket_observations":
-                0,
-
-            "score_bucket_average_return_pct":
-                0.0,
-
-            "score_bucket_win_rate_pct":
-                0.0,
-
-            "confidence":
-                None,
+            "observations": int(observations),
+            "average_return_pct": average_return,
+            "win_rate_pct": win_rate,
+            "reliability": reliability,
         }
+
+    # --------------------------------------------------------
+    # Extract all learning horizons.
+    # --------------------------------------------------------
+
+    historical_5_day = extract_horizon("5")
+    historical_10_day = extract_horizon("10")
+    historical_60_day = extract_horizon("60")
+
+    # --------------------------------------------------------
+    # Prefer mature 60-day evidence.
+    #
+    # If 60-day is not mature, fall back to 10-day and then
+    # 5-day.
+    # --------------------------------------------------------
+
+    preferred_horizon = None
+    preferred_data = None
+
+    for horizon, data in (
+        ("60-day", historical_60_day),
+        ("10-day", historical_10_day),
+        ("5-day", historical_5_day),
+    ):
+        if data["observations"] >= 30:
+            preferred_horizon = horizon
+            preferred_data = data
+            break
+
+    # --------------------------------------------------------
+    # If no horizon is mature, retain the largest available
+    # sample as immature supporting evidence.
+    # --------------------------------------------------------
+
+    if preferred_data is None:
+        available_horizons = [
+            ("60-day", historical_60_day),
+            ("10-day", historical_10_day),
+            ("5-day", historical_5_day),
+        ]
+
+        available_horizons.sort(
+            key=lambda item: item[1]["observations"],
+            reverse=True,
+        )
+
+        if available_horizons:
+            candidate_horizon, candidate_data = available_horizons[0]
+
+            if candidate_data["observations"] > 0:
+                preferred_horizon = candidate_horizon
+                preferred_data = candidate_data
+
+    if preferred_data is None:
+        preferred_learning_observations = 0
+        preferred_learning_average_return_pct = 0.0
+        preferred_learning_win_rate_pct = 0.0
+        preferred_learning_reliability = "INSUFFICIENT DATA"
+    else:
+        preferred_learning_observations = (
+            preferred_data["observations"]
+        )
+
+        preferred_learning_average_return_pct = (
+            preferred_data["average_return_pct"]
+        )
+
+        preferred_learning_win_rate_pct = (
+            preferred_data["win_rate_pct"]
+        )
+
+        preferred_learning_reliability = (
+            preferred_data["reliability"]
+        )
+
+    # --------------------------------------------------------
+    # Existing generic learning fields.
+    # --------------------------------------------------------
 
     learning_adjusted = get_value(
         record,
@@ -1108,135 +1322,139 @@ def extract_intelligence(
     )
 
     return {
+        "available": True,
 
-        "available":
-            True,
-
-        "historical_signal_observations":
-            int(
-                safe_float(
-                    get_value(
-                        record,
-                        "Historical Signal Observations",
-                        "Signal Observations",
-                        default=0,
-                    )
-                )
-            ),
-
-        "historical_signal_average_return_pct":
+        "historical_signal_observations": int(
             safe_float(
                 get_value(
                     record,
-                    "Historical Signal Average Return %",
-                    "Signal Average Return %",
+                    "Historical Signal Observations",
+                    "Signal Observations",
                     default=0,
                 )
-            ),
+            )
+        ),
 
-        "historical_signal_win_rate_pct":
+        "historical_signal_average_return_pct": safe_float(
+            get_value(
+                record,
+                "Historical Signal Average Return %",
+                "Signal Average Return %",
+                default=0,
+            )
+        ),
+
+        "historical_signal_win_rate_pct": safe_float(
+            get_value(
+                record,
+                "Historical Signal Win Rate %",
+                "Signal Win Rate %",
+                default=0,
+            )
+        ),
+
+        "historical_signal_reliability": clean_text(
+            get_value(
+                record,
+                "Historical Signal Reliability",
+                "Signal Reliability",
+                default="INSUFFICIENT DATA",
+            ),
+            "INSUFFICIENT DATA",
+        ),
+
+        # Horizon-specific learning.
+        "historical_5_day": historical_5_day,
+        "historical_10_day": historical_10_day,
+        "historical_60_day": historical_60_day,
+
+        # Preferred learning evidence.
+        "preferred_learning_horizon": preferred_horizon,
+        "preferred_learning_observations": (
+            preferred_learning_observations
+        ),
+        "preferred_learning_average_return_pct": (
+            preferred_learning_average_return_pct
+        ),
+        "preferred_learning_win_rate_pct": (
+            preferred_learning_win_rate_pct
+        ),
+        "preferred_learning_reliability": (
+            preferred_learning_reliability
+        ),
+
+        # Existing learning adjustment.
+        "learning_adjustment": safe_float(
+            get_value(
+                record,
+                "Learning Adjustment",
+                "learning_adjustment",
+                default=0,
+            )
+        ),
+
+        "learning_adjusted_score": (
+            safe_float(learning_adjusted)
+            if learning_adjusted is not None
+            else None
+        ),
+
+        "recommendation_strength": clean_text(
+            get_value(
+                record,
+                "Recommendation Strength",
+                "recommendation_strength",
+                default="",
+            )
+        ),
+
+        "score_bucket": clean_text(
+            get_value(
+                record,
+                "Score Bucket",
+                "score_bucket",
+                default="",
+            )
+        ),
+
+        "score_bucket_observations": int(
             safe_float(
                 get_value(
                     record,
-                    "Historical Signal Win Rate %",
-                    "Signal Win Rate %",
+                    "Score Bucket Observations",
+                    "Bucket Observations",
                     default=0,
                 )
-            ),
+            )
+        ),
 
-        "historical_signal_reliability":
-            clean_text(
-                get_value(
-                    record,
-                    "Historical Signal Reliability",
-                    "Signal Reliability",
-                    default="INSUFFICIENT DATA",
-                ),
-                "INSUFFICIENT DATA",
-            ),
+        "score_bucket_average_return_pct": safe_float(
+            get_value(
+                record,
+                "Score Bucket Average Return %",
+                "Bucket Average Return %",
+                default=0,
+            )
+        ),
 
-        "learning_adjustment":
-            safe_float(
-                get_value(
-                    record,
-                    "Learning Adjustment",
-                    "learning_adjustment",
-                    default=0,
-                )
-            ),
+        "score_bucket_win_rate_pct": safe_float(
+            get_value(
+                record,
+                "Score Bucket Win Rate %",
+                "Bucket Win Rate %",
+                default=0,
+            )
+        ),
 
-        "learning_adjusted_score":
-            (
-                safe_float(
-                    learning_adjusted
-                )
-                if learning_adjusted is not None
-                else None
-            ),
-
-        "recommendation_strength":
-            clean_text(
-                get_value(
-                    record,
-                    "Recommendation Strength",
-                    "recommendation_strength",
-                    default="",
-                )
-            ),
-
-        "score_bucket":
-            clean_text(
-                get_value(
-                    record,
-                    "Score Bucket",
-                    "score_bucket",
-                    default="",
-                )
-            ),
-
-        "score_bucket_observations":
-            int(
-                safe_float(
-                    get_value(
-                        record,
-                        "Score Bucket Observations",
-                        "Bucket Observations",
-                        default=0,
-                    )
-                )
-            ),
-
-        "score_bucket_average_return_pct":
-            safe_float(
-                get_value(
-                    record,
-                    "Score Bucket Average Return %",
-                    "Bucket Average Return %",
-                    default=0,
-                )
-            ),
-
-        "score_bucket_win_rate_pct":
-            safe_float(
-                get_value(
-                    record,
-                    "Score Bucket Win Rate %",
-                    "Bucket Win Rate %",
-                    default=0,
-                )
-            ),
-
-        "confidence":
-            clean_text(
-                get_value(
-                    record,
-                    "Confidence",
-                    "confidence",
-                    default="",
-                )
-            ),
+        "confidence": clean_text(
+            get_value(
+                record,
+                "Confidence",
+                "confidence",
+                default="",
+            )
+        ),
     }
-
 
 # ============================================================
 # Recommendation evidence snapshot

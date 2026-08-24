@@ -26,3 +26,11 @@ __pycache__/
 # Generated market/fundamental caches
 cache/
 data/cache/
+
+.DS_Store
+__pycache__/
+*.pyc
+*.bak
+backups/
+Documents/
+*.log

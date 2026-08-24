@@ -163,6 +163,63 @@ def safe_median(series):
         2,
     )
 
+def calculate_learning_adjustment(
+    average_return,
+    observations,
+):
+    """
+    Convert mature historical recommendation performance into a
+    bounded learning adjustment.
+
+    The adjustment is supporting evidence for downstream decision
+    layers. It does not modify the core Investment Score.
+
+    Rules
+    -----
+    - Fewer than MIN_RELIABLE_OBSERVATIONS observations -> 0
+    - Positive mature performance -> positive adjustment
+    - Negative mature performance -> negative adjustment
+    - Adjustment is bounded to [-10, +10]
+
+    The return value is deliberately conservative so that historical
+    learning cannot dominate the deterministic scoring model.
+    """
+
+    observations = int(
+        safe_numeric(
+            observations
+        )
+    )
+
+    if observations < MIN_RELIABLE_OBSERVATIONS:
+        return 0.0
+
+    average_return = float(
+        safe_numeric(
+            average_return
+        )
+    )
+
+    if not np.isfinite(
+        average_return
+    ):
+        return 0.0
+
+    adjustment = average_return * 5.0
+
+    adjustment = max(
+        min(
+            adjustment,
+            10.0,
+        ),
+        -10.0,
+    )
+
+    return round(
+        adjustment,
+        2,
+    )
+
 
 def calculate_win_rate(values):
     """

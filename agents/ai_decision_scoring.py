@@ -12,6 +12,9 @@ Architecture
     Existing analysis engines
             |
             v
+    recommendation_intelligence.py
+            |
+            v
     ai_decision_context.py
             |
             v
@@ -53,13 +56,14 @@ Design principles
 - HOLD remains the natural baseline.
 - Strong decisions require stronger evidence.
 - Historical recommendation reliability is supporting evidence.
+- 60-day historical learning is preferred when available.
+- 10-day and 5-day learning provide fallback evidence.
 - Learning-adjusted scores are supporting evidence only.
 - Existing holdings receive additional protection.
 - Concentration and portfolio risk can weaken BUY decisions.
 - REDUCE / SELL require stronger evidence than HOLD.
 - Missing evidence reduces confidence appropriately.
-- Missing historical learning evidence should not automatically
-  make a HOLD or justified REDUCE decision low confidence.
+- Missing historical learning evidence is NOT negative evidence.
 - BUY NEW and BUY MORE are assessed on the same core evidence scale,
   with BUY MORE receiving additional portfolio scrutiny.
 - This module does not allocate capital.
@@ -77,7 +81,6 @@ import math
 # ============================================================
 
 MIN_RELIABILITY_OBSERVATIONS = 30
-
 STRONG_RELIABILITY_OBSERVATIONS = 100
 
 HIGH_CONCENTRATION = 25.0
@@ -94,6 +97,26 @@ STRONG_BUY_EVIDENCE_THRESHOLD = 75.0
 REDUCE_EVIDENCE_THRESHOLD = 65.0
 SELL_EVIDENCE_THRESHOLD = 75.0
 
+# Preferred recommendation-learning horizon.
+#
+# The learning engine may expose several horizons. The scoring
+# layer prefers the longer 60-day evidence because it is more
+# relevant to the project's long-term portfolio-management
+# objective.
+PREFERRED_LEARNING_HORIZON = "60D"
+
+LEARNING_HORIZON_ORDER = (
+    "60D",
+    "10D",
+    "5D",
+)
+
+LEARNING_HORIZON_MIN_OBSERVATIONS = {
+    "60D": 30,
+    "10D": 30,
+    "5D": 30,
+}
+
 
 # ============================================================
 # Generic helpers
@@ -103,9 +126,7 @@ def safe_float(
     value,
     default=0.0,
 ):
-    """
-    Safely convert a value to float.
-    """
+    """Safely convert a value to float."""
 
     try:
 
@@ -143,9 +164,7 @@ def clean_text(
     value,
     default="",
 ):
-    """
-    Safely normalise a text value.
-    """
+    """Safely normalise a text value."""
 
     if value is None:
         return default
@@ -171,9 +190,7 @@ def clamp(
     minimum=0.0,
     maximum=100.0,
 ):
-    """
-    Keep a score inside a defined range.
-    """
+    """Keep a score inside a defined range."""
 
     value = safe_float(
         value
@@ -207,7 +224,7 @@ def get_value(
         return default
 
     # --------------------------------------------------------
-    # Direct lookup
+    # Direct lookup.
     # --------------------------------------------------------
 
     for key in keys:
@@ -222,7 +239,7 @@ def get_value(
                 return value
 
     # --------------------------------------------------------
-    # Structured context lookup
+    # Structured context lookup.
     # --------------------------------------------------------
 
     nested_keys = [
@@ -239,6 +256,7 @@ def get_value(
         "stock",
         "holding",
         "recommendation",
+        "learning",
     ]
 
     for nested_key in nested_keys:
@@ -290,6 +308,187 @@ def get_value(
     return default
 
 
+def _get_horizon_mapping(
+    context,
+    horizon,
+):
+    """
+    Retrieve a nested historical-learning mapping for a horizon.
+
+    Public interface compatibility
+    -------------------------------
+    Consumers may supply horizons as either integers or strings:
+
+        5
+        "5"
+        "5D"
+        "5-day"
+        "5_day"
+
+        10
+        "10"
+        "10D"
+        "10-day"
+        "10_day"
+
+        60
+        "60"
+        "60D"
+        "60-day"
+        "60_day"
+
+    All supported representations are normalised to the canonical
+    internal form:
+
+        5  -> "5D"
+        10 -> "10D"
+        60 -> "60D"
+
+    The normalisation is performed here so that all horizon-specific
+    getters retain their existing public interface.
+    """
+
+    if not isinstance(
+        context,
+        dict,
+    ):
+        return {}
+
+    # ------------------------------------------------------------
+    # Normalise the horizon argument.
+    # ------------------------------------------------------------
+
+    horizon_text = str(
+        horizon
+    ).strip().upper()
+
+    horizon_mapping = {
+        "5": "5D",
+        "5D": "5D",
+        "5-DAY": "5D",
+        "5_DAY": "5D",
+        "5 DAYS": "5D",
+        "5-DAYS": "5D",
+
+        "10": "10D",
+        "10D": "10D",
+        "10-DAY": "10D",
+        "10_DAY": "10D",
+        "10 DAYS": "10D",
+        "10-DAYS": "10D",
+
+        "60": "60D",
+        "60D": "60D",
+        "60-DAY": "60D",
+        "60_DAY": "60D",
+        "60 DAYS": "60D",
+        "60-DAYS": "60D",
+    }
+
+    canonical_horizon = horizon_mapping.get(
+        horizon_text
+    )
+
+    if canonical_horizon is None:
+        return {}
+
+    # ------------------------------------------------------------
+    # Supported nested naming conventions.
+    # ------------------------------------------------------------
+
+    aliases = {
+        "60D": (
+            "60D",
+            "60d",
+            "60-day",
+            "60_day",
+            "historical_60d",
+            "historical_60_day",
+            "historical_60-day",
+            "learning_60d",
+            "learning_60_day",
+        ),
+
+        "10D": (
+            "10D",
+            "10d",
+            "10-day",
+            "10_day",
+            "historical_10d",
+            "historical_10_day",
+            "historical_10-day",
+            "learning_10d",
+            "learning_10_day",
+        ),
+
+        "5D": (
+            "5D",
+            "5d",
+            "5-day",
+            "5_day",
+            "historical_5d",
+            "historical_5_day",
+            "historical_5-day",
+            "learning_5d",
+            "learning_5_day",
+        ),
+    }
+
+    candidates = aliases.get(
+        canonical_horizon,
+        (),
+    )
+
+    # ------------------------------------------------------------
+    # Search supported containers.
+    # ------------------------------------------------------------
+
+    containers = [
+        context,
+
+        context.get(
+            "historical"
+        ),
+
+        context.get(
+            "learning"
+        ),
+
+        context.get(
+            "recommendation_intelligence"
+        ),
+
+        context.get(
+            "recommendation_learning"
+        ),
+    ]
+
+    # ------------------------------------------------------------
+    # Find the first matching nested mapping.
+    # ------------------------------------------------------------
+
+    for container in containers:
+
+        if not isinstance(
+            container,
+            dict,
+        ):
+            continue
+
+        for candidate in candidates:
+
+            value = container.get(
+                candidate
+            )
+
+            if isinstance(
+                value,
+                dict,
+            ):
+                return value
+
+    return {}
+
 # ============================================================
 # Evidence extraction
 # ============================================================
@@ -315,16 +514,33 @@ def get_learning_adjusted_score(
     context,
 ):
     """
-    Retrieve the learning-adjusted score.
+    Retrieve or derive the learning-adjusted investment score.
 
-    If unavailable, fall back to the core investment score.
+    Interface remains unchanged: accepts a single decision context.
 
-    The learning-adjusted score is supporting evidence only.
+    Priority
+    --------
+    1. Use an explicitly supplied upstream Learning Adjusted Score
+       when available.
+    2. Otherwise derive it from the raw Investment Score plus the
+       Recommendation Intelligence learning adjustment.
+
+    The raw Investment Score is never modified.
+
+    The derived score is bounded to 0-100.
     """
 
     investment_score = get_investment_score(
         context
     )
+
+    # ------------------------------------------------------------
+    # 1. Preserve an explicitly supplied upstream value.
+    #
+    # This maintains compatibility with the Recommendation
+    # Intelligence pipeline when it has already calculated the
+    # learning-adjusted score.
+    # ------------------------------------------------------------
 
     value = get_value(
         context,
@@ -333,31 +549,254 @@ def get_learning_adjusted_score(
         default=None,
     )
 
-    if value is None:
-        return investment_score
-
-    return clamp(
-        safe_float(
+    if value is not None:
+        numeric_value = safe_float(
             value,
-            investment_score,
+            default=None,
         )
+
+        if numeric_value is not None:
+            return clamp(
+                numeric_value,
+                0.0,
+                100.0,
+            )
+
+    # ------------------------------------------------------------
+    # 2. No upstream adjusted score was supplied.
+    #
+    # Derive it from:
+    #
+    #     Investment Score + Learning Adjustment
+    #
+    # Learning adjustment is supporting evidence only. The raw
+    # Investment Score itself remains unchanged.
+    # ------------------------------------------------------------
+
+    learning_adjustment = get_learning_adjustment(
+        context
     )
 
+    return clamp(
+        investment_score + learning_adjustment,
+        0.0,
+        100.0,
+    )
 
 def get_learning_adjustment(
     context,
 ):
-    """Retrieve the recommendation-learning adjustment."""
+    """
+    Retrieve or derive the recommendation-learning adjustment.
 
-    return safe_float(
-        get_value(
+    Public interface remains compatible with both integer and string
+    horizon representations.
+
+    Priority
+    --------
+    1. Preserve an explicitly supplied upstream Learning Adjustment.
+    2. Otherwise derive the adjustment from the preferred mature
+       historical-learning horizon.
+
+    Historical learning is supporting evidence only.
+    The raw Investment Score is never modified.
+
+    Adjustment model
+    ----------------
+        average_return × 3.0 × evidence_confidence
+
+    Evidence confidence:
+        <20 observations  -> 0.00
+        20 observations   -> 0.50
+        100+ observations -> 1.00
+
+    The result is bounded to +/-10.
+    """
+
+    # --------------------------------------------------------
+    # 1. Preserve an explicitly supplied upstream adjustment.
+    # --------------------------------------------------------
+
+    existing = get_value(
+        context,
+        "Learning Adjustment",
+        "learning_adjustment",
+        default=None,
+    )
+
+    if existing is not None:
+
+        numeric_existing = safe_float(
+            existing,
+            default=None,
+        )
+
+        if numeric_existing is not None:
+
+            return clamp(
+                numeric_existing,
+                -10.0,
+                10.0,
+            )
+
+    # --------------------------------------------------------
+    # 2. Determine the preferred learning horizon.
+    #
+    # Prefer 60D, then 10D, then 5D when mature.
+    # --------------------------------------------------------
+
+    preferred_horizon = get_value(
+        context,
+        "Preferred Learning Horizon",
+        "preferred_learning_horizon",
+        "Historical Learning Horizon",
+        "historical_learning_horizon",
+        default=None,
+    )
+
+    horizon = None
+
+    if preferred_horizon is not None:
+
+        horizon_text = clean_text(
+            preferred_horizon
+        )
+
+        if horizon_text in {
+            "60",
+            "60D",
+            "60 DAY",
+            "60 DAYS",
+            "60-DAY",
+            "60_DAY",
+        }:
+
+            horizon = 60
+
+        elif horizon_text in {
+            "10",
+            "10D",
+            "10 DAY",
+            "10 DAYS",
+            "10-DAY",
+            "10_DAY",
+        }:
+
+            horizon = 10
+
+        elif horizon_text in {
+            "5",
+            "5D",
+            "5 DAY",
+            "5 DAYS",
+            "5-DAY",
+            "5_DAY",
+        }:
+
+            horizon = 5
+
+    # --------------------------------------------------------
+    # 3. If no explicit horizon exists, select the highest
+    #    mature available horizon.
+    # --------------------------------------------------------
+
+    if horizon is None:
+
+        for candidate in (
+            60,
+            10,
+            5,
+        ):
+
+            observations = get_horizon_observations(
+                context,
+                candidate,
+            )
+
+            reliability = clean_text(
+                get_horizon_reliability(
+                    context,
+                    candidate,
+                )
+            )
+
+            if (
+                observations >= 20
+                and
+                reliability == "VALID"
+            ):
+
+                horizon = candidate
+                break
+
+    # --------------------------------------------------------
+    # 4. No mature evidence = no adjustment.
+    # --------------------------------------------------------
+
+    if horizon is None:
+
+        return 0.0
+
+    observations = get_horizon_observations(
+        context,
+        horizon,
+    )
+
+    reliability = clean_text(
+        get_horizon_reliability(
             context,
-            "Learning Adjustment",
-            "learning_adjustment",
-            default=0,
+            horizon,
         )
     )
 
+    average_return = get_horizon_average_return(
+        context,
+        horizon,
+    )
+
+    # --------------------------------------------------------
+    # 5. Require mature evidence.
+    # --------------------------------------------------------
+
+    if observations < 20:
+        return 0.0
+
+    if reliability != "VALID":
+        return 0.0
+
+    # --------------------------------------------------------
+    # 6. Calculate evidence confidence.
+    #
+    # 20 observations = 0.50
+    # 100 observations = 1.00
+    # --------------------------------------------------------
+
+    evidence_confidence = min(
+        1.0,
+        max(
+            0.0,
+            (
+                observations - 20.0
+            ) / 80.0 * 0.5
+            + 0.5,
+        ),
+    )
+
+    # --------------------------------------------------------
+    # 7. Calculate learning adjustment.
+    # --------------------------------------------------------
+
+    adjustment = (
+        average_return
+        * 3.0
+        * evidence_confidence
+    )
+
+    return clamp(
+        adjustment,
+        -10.0,
+        10.0,
+    )
 
 def get_signal(
     context,
@@ -432,10 +871,18 @@ def get_confidence(
     )
 
 
+# ============================================================
+# Generic historical signal access
+# ============================================================
+
 def get_signal_reliability(
     context,
 ):
-    """Retrieve historical signal reliability."""
+    """
+    Retrieve historical signal reliability.
+
+    This remains the generic/fallback historical reliability field.
+    """
 
     return clean_text(
         get_value(
@@ -480,6 +927,7 @@ def get_signal_win_rate(
             "Signal Win Rate %",
             "historical_signal_win_rate",
             "signal_win_rate",
+            "Win Rate %",
             default=0,
         )
     )
@@ -497,10 +945,597 @@ def get_signal_average_return(
             "Signal Average Return %",
             "historical_signal_average_return",
             "signal_average_return",
+            "Average Return %",
             default=0,
         )
     )
 
+def _normalise_horizon(horizon):
+    """
+    Normalise supported learning-horizon inputs.
+
+    Public consumers may supply either:
+        5
+        10
+        60
+
+    or:
+        "5"
+        "5D"
+        "5 DAY"
+        "5 DAYS"
+        "10"
+        "10D"
+        "10 DAY"
+        "10 DAYS"
+        "60"
+        "60D"
+        "60 DAY"
+        "60 DAYS"
+
+    The canonical internal representation is:
+        "5D"
+        "10D"
+        "60D"
+
+    This preserves the existing consumer interface while ensuring all
+    horizon accessors use identical matching behaviour.
+    """
+
+    if horizon is None:
+        return None
+
+    # Numeric input.
+    try:
+        numeric = float(horizon)
+
+        if numeric == 5:
+            return "5D"
+
+        if numeric == 10:
+            return "10D"
+
+        if numeric == 60:
+            return "60D"
+
+    except (TypeError, ValueError):
+        pass
+
+    text = clean_text(
+        horizon
+    )
+
+    mapping = {
+        "5": "5D",
+        "5D": "5D",
+        "5 DAY": "5D",
+        "5 DAYS": "5D",
+
+        "10": "10D",
+        "10D": "10D",
+        "10 DAY": "10D",
+        "10 DAYS": "10D",
+
+        "60": "60D",
+        "60D": "60D",
+        "60 DAY": "60D",
+        "60 DAYS": "60D",
+    }
+
+    return mapping.get(
+        text
+    )
+
+
+# ============================================================
+# Horizon-specific historical learning
+# ============================================================
+
+def get_horizon_observations(
+    context,
+    horizon,
+):
+    """Retrieve historical observations for a specific horizon."""
+
+    nested = _get_horizon_mapping(
+        context,
+        horizon,
+    )
+
+    value = get_value(
+        nested,
+        "Observations",
+        "Historical Signal Observations",
+        "Signal Observations",
+        "observations",
+        "sample_size",
+        "count",
+        default=None,
+    )
+
+    if value is not None:
+        return safe_float(
+            value
+        )
+
+    # Flat aliases.
+    aliases = {
+        "60D": (
+            "Historical 60-Day Signal Observations",
+            "Historical 60D Signal Observations",
+            "Signal 60-Day Observations",
+            "signal_60d_observations",
+            "historical_60d_observations",
+            "historical_60_day_observations",
+        ),
+        "10D": (
+            "Historical 10-Day Signal Observations",
+            "Historical 10D Signal Observations",
+            "Signal 10-Day Observations",
+            "signal_10d_observations",
+            "historical_10d_observations",
+            "historical_10_day_observations",
+        ),
+        "5D": (
+            "Historical 5-Day Signal Observations",
+            "Historical 5D Signal Observations",
+            "Signal 5-Day Observations",
+            "signal_5d_observations",
+            "historical_5d_observations",
+            "historical_5_day_observations",
+        ),
+    }
+
+    return safe_float(
+        get_value(
+            context,
+            *aliases.get(
+                horizon,
+                (),
+            ),
+            default=0,
+        )
+    )
+
+
+def get_horizon_win_rate(
+    context,
+    horizon,
+):
+    """Retrieve historical win rate for a specific horizon."""
+
+    nested = _get_horizon_mapping(
+        context,
+        horizon,
+    )
+
+    value = get_value(
+        nested,
+        "Win Rate %",
+        "Win Rate",
+        "Historical Signal Win Rate %",
+        "historical_signal_win_rate",
+        "win_rate",
+        default=None,
+    )
+
+    if value is not None:
+        return safe_float(
+            value
+        )
+
+    aliases = {
+        "60D": (
+            "Historical 60-Day Signal Win Rate %",
+            "Historical 60D Signal Win Rate %",
+            "Signal 60-Day Win Rate %",
+            "signal_60d_win_rate",
+            "historical_60d_win_rate",
+            "historical_60_day_win_rate",
+        ),
+        "10D": (
+            "Historical 10-Day Signal Win Rate %",
+            "Historical 10D Signal Win Rate %",
+            "Signal 10-Day Win Rate %",
+            "signal_10d_win_rate",
+            "historical_10d_win_rate",
+            "historical_10_day_win_rate",
+        ),
+        "5D": (
+            "Historical 5-Day Signal Win Rate %",
+            "Historical 5D Signal Win Rate %",
+            "Signal 5-Day Win Rate %",
+            "signal_5d_win_rate",
+            "historical_5d_win_rate",
+            "historical_5_day_win_rate",
+        ),
+    }
+
+    return safe_float(
+        get_value(
+            context,
+            *aliases.get(
+                horizon,
+                (),
+            ),
+            default=0,
+        )
+    )
+
+
+def get_horizon_average_return(
+    context,
+    horizon,
+):
+    """Retrieve historical average return for a specific horizon."""
+
+    nested = _get_horizon_mapping(
+        context,
+        horizon,
+    )
+
+    value = get_value(
+        nested,
+        "Average Return %",
+        "Average Return",
+        "Historical Signal Average Return %",
+        "historical_signal_average_return",
+        "average_return",
+        "return",
+        default=None,
+    )
+
+    if value is not None:
+        return safe_float(
+            value
+        )
+
+    aliases = {
+        "60D": (
+            "Historical 60-Day Signal Average Return %",
+            "Historical 60D Signal Average Return %",
+            "Signal 60-Day Average Return %",
+            "signal_60d_average_return",
+            "historical_60d_average_return",
+            "historical_60_day_average_return",
+        ),
+        "10D": (
+            "Historical 10-Day Signal Average Return %",
+            "Historical 10D Signal Average Return %",
+            "Signal 10-Day Average Return %",
+            "signal_10d_average_return",
+            "historical_10d_average_return",
+            "historical_10_day_average_return",
+        ),
+        "5D": (
+            "Historical 5-Day Signal Average Return %",
+            "Historical 5D Signal Average Return %",
+            "Signal 5-Day Average Return %",
+            "signal_5d_average_return",
+            "historical_5d_average_return",
+            "historical_5_day_average_return",
+        ),
+    }
+
+    return safe_float(
+        get_value(
+            context,
+            *aliases.get(
+                horizon,
+                (),
+            ),
+            default=0,
+        )
+    )
+
+
+def get_horizon_reliability(
+    context,
+    horizon,
+):
+    """
+    Retrieve historical reliability for a specific learning horizon.
+
+    Interface compatibility
+    -----------------------
+    Accepts either integer or string horizons:
+
+        5
+        "5"
+        "5D"
+        "5-day"
+        "5_day"
+
+        10
+        "10"
+        "10D"
+        "10-day"
+        "10_day"
+
+        60
+        "60"
+        "60D"
+        "60-day"
+        "60_day"
+
+    The horizon is normalised by _get_horizon_mapping(), so callers using
+    either the legacy integer interface or the newer D-suffixed interface
+    receive the same result.
+    """
+
+    # ------------------------------------------------------------
+    # Retrieve the nested horizon mapping.
+    # ------------------------------------------------------------
+
+    nested = _get_horizon_mapping(
+        context,
+        horizon,
+    )
+
+    # ------------------------------------------------------------
+    # Read reliability from the nested learning record.
+    # ------------------------------------------------------------
+
+    value = get_value(
+        nested,
+        "Reliability",
+        "Signal Reliability",
+        "Historical Signal Reliability",
+        "historical_signal_reliability",
+        "historical_reliability",
+        "reliability",
+        default=None,
+    )
+
+    if value is not None:
+        text = clean_text(
+            value
+        )
+
+        if text:
+            return text
+
+    # ------------------------------------------------------------
+    # Normalise the requested horizon.
+    #
+    # This preserves the public integer/string interface even when
+    # the supplied context uses flat fields rather than nested data.
+    # ------------------------------------------------------------
+
+    horizon_text = str(
+        horizon
+    ).strip().upper()
+
+    horizon_mapping = {
+        "5": "5D",
+        "5D": "5D",
+        "5-DAY": "5D",
+        "5_DAY": "5D",
+
+        "10": "10D",
+        "10D": "10D",
+        "10-DAY": "10D",
+        "10_DAY": "10D",
+
+        "60": "60D",
+        "60D": "60D",
+        "60-DAY": "60D",
+        "60_DAY": "60D",
+    }
+
+    canonical_horizon = horizon_mapping.get(
+        horizon_text
+    )
+
+    # ------------------------------------------------------------
+    # Flat-field aliases.
+    # ------------------------------------------------------------
+
+    aliases = {
+        "60D": (
+            "Historical 60-Day Signal Reliability",
+            "Historical 60D Signal Reliability",
+            "Signal 60-Day Reliability",
+            "historical_60d_reliability",
+            "historical_60_day_reliability",
+            "signal_60d_reliability",
+            "signal_60_day_reliability",
+        ),
+
+        "10D": (
+            "Historical 10-Day Signal Reliability",
+            "Historical 10D Signal Reliability",
+            "Signal 10-Day Reliability",
+            "historical_10d_reliability",
+            "historical_10_day_reliability",
+            "signal_10d_reliability",
+            "signal_10_day_reliability",
+        ),
+
+        "5D": (
+            "Historical 5-Day Signal Reliability",
+            "Historical 5D Signal Reliability",
+            "Signal 5-Day Reliability",
+            "historical_5d_reliability",
+            "historical_5_day_reliability",
+            "signal_5d_reliability",
+            "signal_5_day_reliability",
+        ),
+    }
+
+    if canonical_horizon is not None:
+
+        value = get_value(
+            context,
+            *aliases.get(
+                canonical_horizon,
+                (),
+            ),
+            default=None,
+        )
+
+        if value is not None:
+            text = clean_text(
+                value
+            )
+
+            if text:
+                return text
+
+    # ------------------------------------------------------------
+    # Final fallback.
+    #
+    # Do not fabricate reliability. An empty value means that the
+    # upstream learning layer did not provide one.
+    # ------------------------------------------------------------
+
+    return ""
+
+def get_preferred_learning_horizon(
+    context,
+):
+    """
+    Select the preferred available historical learning horizon.
+
+    Preference:
+        60D -> 10D -> 5D
+
+    A horizon is considered usable when it has at least one
+    observation. Mature evidence is preferred automatically when
+    available.
+
+    This prevents the scoring layer from inventing negative
+    evidence merely because a preferred horizon is unavailable.
+    """
+
+    for horizon in LEARNING_HORIZON_ORDER:
+
+        observations = get_horizon_observations(
+            context,
+            horizon,
+        )
+
+        if observations > 0:
+
+            return horizon
+
+    # --------------------------------------------------------
+    # If horizon-specific fields are absent, use the legacy
+    # generic historical signal fields.
+    # --------------------------------------------------------
+
+    if get_signal_observations(
+        context
+    ) > 0:
+
+        return "LEGACY"
+
+    return "NONE"
+
+
+def get_preferred_learning_observations(
+    context,
+):
+    """Retrieve observations from the selected learning horizon."""
+
+    horizon = get_preferred_learning_horizon(
+        context
+    )
+
+    if horizon == "LEGACY":
+
+        return get_signal_observations(
+            context
+        )
+
+    if horizon == "NONE":
+
+        return 0.0
+
+    return get_horizon_observations(
+        context,
+        horizon,
+    )
+
+
+def get_preferred_learning_win_rate(
+    context,
+):
+    """Retrieve win rate from the selected learning horizon."""
+
+    horizon = get_preferred_learning_horizon(
+        context
+    )
+
+    if horizon == "LEGACY":
+
+        return get_signal_win_rate(
+            context
+        )
+
+    if horizon == "NONE":
+
+        return 0.0
+
+    return get_horizon_win_rate(
+        context,
+        horizon,
+    )
+
+
+def get_preferred_learning_average_return(
+    context,
+):
+    """Retrieve average return from the selected learning horizon."""
+
+    horizon = get_preferred_learning_horizon(
+        context
+    )
+
+    if horizon == "LEGACY":
+
+        return get_signal_average_return(
+            context
+        )
+
+    if horizon == "NONE":
+
+        return 0.0
+
+    return get_horizon_average_return(
+        context,
+        horizon,
+    )
+
+
+def get_preferred_learning_reliability(
+    context,
+):
+    """Retrieve reliability from the selected learning horizon."""
+
+    horizon = get_preferred_learning_horizon(
+        context
+    )
+
+    if horizon == "LEGACY":
+
+        return get_signal_reliability(
+            context
+        )
+
+    if horizon == "NONE":
+
+        return ""
+
+    return get_horizon_reliability(
+        context,
+        horizon,
+    )
+
+
+# ============================================================
+# Score bucket evidence
+# ============================================================
 
 def get_score_bucket_observations(
     context,
@@ -546,6 +1581,10 @@ def get_score_bucket_return(
         )
     )
 
+
+# ============================================================
+# Portfolio / decision context
+# ============================================================
 
 def get_action(
     context,
@@ -702,11 +1741,7 @@ def get_sector_allocation(
 def get_concentration(
     context,
 ):
-    """
-    Retrieve portfolio concentration.
-
-    Current position allocation is the primary measure.
-    """
+    """Retrieve portfolio concentration."""
 
     explicit = get_value(
         context,
@@ -735,8 +1770,6 @@ def get_risk_score(
     Retrieve an existing portfolio/asset risk score.
 
     Higher score means greater risk.
-
-    This is deliberately not recreated here.
     """
 
     return clamp(
@@ -760,9 +1793,7 @@ def get_risk_score(
 def score_investment_quality(
     context,
 ):
-    """
-    Convert the existing investment score into evidence strength.
-    """
+    """Convert the existing investment score into evidence strength."""
 
     score = get_investment_score(
         context
@@ -783,7 +1814,6 @@ def score_investment_quality(
     return 10.0
 
 
-
 def score_learning_evidence(
     context,
 ):
@@ -791,163 +1821,273 @@ def score_learning_evidence(
     Assess whether recommendation learning provides useful
     supporting evidence.
 
-    Historical learning is supporting evidence rather than a
-    replacement for the underlying analytical score.
+    Learning evidence is selected using the preferred historical
+    horizon supplied by the AI Decision Context.
+
+    Preference order
+    ----------------
+    1. Mature 60-day evidence
+    2. Mature 10-day evidence
+    3. Mature 5-day evidence
+    4. Largest available immature sample
+
+    Historical learning is supporting evidence only. It does not
+    replace the underlying Investment Score.
 
     Important
     ---------
-    Immature historical evidence is NOT treated as negative
-    evidence.
+    Missing or immature historical evidence is NOT treated as
+    negative evidence.
 
-    For example:
+    Therefore:
 
-        2 observations
-        -6.79% average return
+        0 observations
+        or
         INSUFFICIENT DATA
+        or
+        IMMATURE
 
-    should be interpreted as:
+    produces neutral learning evidence rather than a penalty.
 
-        "There is not enough evidence yet to know whether this
-         signal is reliable."
-
-    It should NOT be interpreted as:
-
-        "The signal is demonstrably poor."
-
-    Mature historical evidence is allowed to influence the
-    evidence score according to its observed win rate and
-    average return.
+    Public interface
+    ----------------
+    The function signature is deliberately unchanged because it is
+    consumed by calculate_buy_evidence(), calculate_reduction_evidence()
+    and the wider AI decision-scoring chain.
     """
 
-    observations = get_signal_observations(
-        context
+    # --------------------------------------------------------
+    # Preferred learning horizon
+    # --------------------------------------------------------
+
+    preferred_horizon = clean_text(
+        get_preferred_learning_horizon(
+            context
+        )
     )
 
-    win_rate = get_signal_win_rate(
-        context
+    preferred_observations = (
+        get_preferred_learning_observations(
+            context
+        )
     )
 
-    average_return = get_signal_average_return(
-        context
+    preferred_win_rate = (
+        get_preferred_learning_win_rate(
+            context
+        )
     )
 
-    reliability = get_signal_reliability(
-        context
+    preferred_average_return = (
+        get_preferred_learning_average_return(
+            context
+        )
+    )
+
+    preferred_reliability = (
+        get_preferred_learning_reliability(
+            context
+        )
     )
 
     # --------------------------------------------------------
-    # No historical observations.
+    # If the context already identified a preferred horizon,
+    # use it.
+    # --------------------------------------------------------
+
+    observations = preferred_observations
+    win_rate = preferred_win_rate
+    average_return = preferred_average_return
+    reliability = preferred_reliability
+
+    # --------------------------------------------------------
+    # Defensive fallback.
+    #
+    # This protects compatibility with older contexts that do
+    # not yet contain preferred-learning fields.
     # --------------------------------------------------------
 
     if observations <= 0:
 
-        return 0.0
+        observations = get_signal_observations(
+            context
+        )
+
+        win_rate = get_signal_win_rate(
+            context
+        )
+
+        average_return = get_signal_average_return(
+            context
+        )
+
+        reliability = get_signal_reliability(
+            context
+        )
+
+    # --------------------------------------------------------
+    # No historical evidence.
+    #
+    # IMPORTANT:
+    # Missing learning is neutral, not negative.
+    # --------------------------------------------------------
+
+    if observations <= 0:
+
+        return 50.0
 
     # --------------------------------------------------------
     # Sample-size assessment.
     #
-    # < 30 observations = immature evidence.
-    # 30-99             = valid evidence.
-    # 100+              = strong evidence.
+    # 0-29:
+    #     immature
+    #
+    # 30-99:
+    #     valid
+    #
+    # 100+:
+    #     strong
     # --------------------------------------------------------
 
-    if observations >= STRONG_RELIABILITY_OBSERVATIONS:
+    if (
+        observations
+        >=
+        STRONG_RELIABILITY_OBSERVATIONS
+    ):
 
         sample_score = 100.0
         immature_history = False
 
-    elif observations >= MIN_RELIABILITY_OBSERVATIONS:
+    elif (
+        observations
+        >=
+        MIN_RELIABILITY_OBSERVATIONS
+    ):
 
         sample_score = 70.0
         immature_history = False
 
     else:
 
-        sample_score = 35.0
+        sample_score = 50.0
+        immature_history = True
+
+    # --------------------------------------------------------
+    # Reliability classification.
+    #
+    # Explicit immature / insufficient classifications always
+    # remain neutral regardless of the observed return.
+    # --------------------------------------------------------
+
+    reliability = clean_text(
+        reliability,
+        default="",
+    )
+
+    if reliability in {
+        "INSUFFICIENT DATA",
+        "NO DATA",
+        "IMMATURE",
+        "INSUFFICIENT",
+    }:
+
         immature_history = True
 
     # --------------------------------------------------------
     # Win-rate evidence.
     #
-    # During the immature phase, avoid interpreting the observed
-    # win rate as statistically established.
+    # Immature samples do not receive positive or negative
+    # interpretation from their observed win rate.
     # --------------------------------------------------------
 
     if immature_history:
 
         win_score = 50.0
 
-    elif win_rate >= 60:
+    elif win_rate >= 60.0:
 
         win_score = 100.0
 
-    elif win_rate >= 55:
+    elif win_rate >= 55.0:
 
         win_score = 80.0
 
-    elif win_rate >= 50:
+    elif win_rate >= 50.0:
 
         win_score = 60.0
 
-    elif win_rate > 0:
+    elif win_rate > 0.0:
 
         win_score = 35.0
 
     else:
 
-        win_score = 0.0
+        win_score = 50.0
 
     # --------------------------------------------------------
-    # Return evidence.
+    # Average-return evidence.
     #
-    # During the immature phase, the observed return is treated
-    # as neutral rather than negative because the sample is too
-    # small to establish reliability.
+    # Again, immature samples are neutral.
     # --------------------------------------------------------
 
     if immature_history:
 
         return_score = 50.0
 
+    elif average_return >= 5.0:
+
+        return_score = 100.0
+
+    elif average_return > 0.0:
+
+        return_score = 70.0
+
+    elif average_return == 0.0:
+
+        return_score = 50.0
+
     else:
 
-        if average_return >= 5:
-
-            return_score = 100.0
-
-        elif average_return > 0:
-
-            return_score = 70.0
-
-        elif average_return == 0:
-
-            return_score = 50.0
-
-        else:
-
-            return_score = 20.0
+        return_score = 20.0
 
     # --------------------------------------------------------
-    # Reliability classification.
+    # Reliability contribution.
+    #
+    # Valid mature evidence receives a modest bonus.
+    # Insufficient/immature evidence receives NO penalty.
     # --------------------------------------------------------
 
     reliability_bonus = 0.0
 
     if reliability == "VALID":
 
+        reliability_bonus = 5.0
+
+    elif reliability in {
+        "STRONG",
+        "RELIABLE",
+        "HIGH",
+    }:
+
         reliability_bonus = 10.0
 
-    elif reliability == "INVALID":
+    elif reliability in {
+        "INSUFFICIENT DATA",
+        "NO DATA",
+        "IMMATURE",
+        "INSUFFICIENT",
+        "",
+    }:
 
-        reliability_bonus = -10.0
-
-    elif reliability == "INSUFFICIENT DATA":
-
-        # Insufficient data is not negative evidence.
         reliability_bonus = 0.0
 
     # --------------------------------------------------------
-    # Final learning evidence score.
+    # Final learning evidence.
+    #
+    # This remains deliberately bounded.
+    #
+    # Learning contributes evidence; it does not become the
+    # investment score.
     # --------------------------------------------------------
 
     evidence = (
@@ -965,9 +2105,6 @@ def score_learning_evidence(
     return clamp(
         evidence
     )
-
-
-
 
 def score_score_bucket_evidence(
     context,
@@ -1002,37 +2139,49 @@ def score_score_bucket_evidence(
 
         sample_score = 35.0
 
-    if win_rate >= 60:
+    if observations < MIN_RELIABILITY_OBSERVATIONS:
 
-        win_score = 100.0
-
-    elif win_rate >= 55:
-
-        win_score = 80.0
-
-    elif win_rate >= 50:
-
-        win_score = 60.0
-
-    else:
-
-        win_score = 30.0
-
-    if average_return >= 5:
-
-        return_score = 100.0
-
-    elif average_return > 0:
-
-        return_score = 70.0
-
-    elif average_return == 0:
+        win_score = 50.0
 
         return_score = 50.0
 
     else:
 
-        return_score = 20.0
+        if win_rate >= 60:
+
+            win_score = 100.0
+
+        elif win_rate >= 55:
+
+            win_score = 80.0
+
+        elif win_rate >= 50:
+
+            win_score = 60.0
+
+        elif win_rate > 0:
+
+            win_score = 35.0
+
+        else:
+
+            win_score = 0.0
+
+        if average_return >= 5:
+
+            return_score = 100.0
+
+        elif average_return > 0:
+
+            return_score = 70.0
+
+        elif average_return == 0:
+
+            return_score = 50.0
+
+        else:
+
+            return_score = 20.0
 
     return clamp(
         sample_score * 0.35
@@ -1046,9 +2195,7 @@ def score_score_bucket_evidence(
 def score_portfolio_fit(
     context,
 ):
-    """
-    Assess whether the proposed action fits the portfolio.
-    """
+    """Assess whether the proposed action fits the portfolio."""
 
     action = get_action(
         context
@@ -1121,9 +2268,7 @@ def score_portfolio_fit(
 def score_risk_fit(
     context,
 ):
-    """
-    Assess whether portfolio risk supports the proposed action.
-    """
+    """Assess whether portfolio risk supports the proposed action."""
 
     action = get_action(
         context
@@ -1393,9 +2538,7 @@ def calculate_sell_evidence(
 def calculate_evidence_score(
     context,
 ):
-    """
-    Calculate the evidence score for the proposed action.
-    """
+    """Calculate the evidence score for the proposed action."""
 
     action = get_action(
         context
@@ -1455,11 +2598,7 @@ def determine_decision_support(
     context,
     evidence_score,
 ):
-    """
-    Determine whether the evidence supports the proposed action.
-
-    This does not replace the final governed decision layer.
-    """
+    """Determine whether the evidence supports the proposed action."""
 
     action = get_action(
         context
@@ -1509,7 +2648,7 @@ def determine_decision_support(
 
 
 # ============================================================
-# NEW CONFIDENCE MODEL
+# Evidence completeness
 # ============================================================
 
 def _score_evidence_completeness(
@@ -1519,12 +2658,11 @@ def _score_evidence_completeness(
     Measure completeness of the evidence relevant to the proposed
     action.
 
-    This is deliberately NOT treated as decision confidence by
-    itself.
+    Historical learning is more important for BUY decisions than
+    for HOLD or REDUCE.
 
-    Historical learning receives less influence for HOLD and
-    justified REDUCE decisions because those decisions can be
-    valid from current portfolio / analytical evidence alone.
+    The selected learning horizon is explicitly exposed through
+    the scoring result.
     """
 
     action = get_action(
@@ -1534,47 +2672,37 @@ def _score_evidence_completeness(
     components = []
 
     # --------------------------------------------------------
-    # Core investment evidence
+    # Core investment evidence.
     # --------------------------------------------------------
 
-    investment_score = get_investment_score(
+    if get_investment_score(
         context
-    )
-
-    if investment_score > 0:
+    ) > 0:
 
         components.append(
             25.0
         )
 
     # --------------------------------------------------------
-    # Current signal
+    # Current signal.
     # --------------------------------------------------------
 
-    signal = get_signal(
+    if get_signal(
         context
-    )
-
-    if signal:
+    ):
 
         components.append(
             15.0
         )
 
     # --------------------------------------------------------
-    # Portfolio context
+    # Portfolio context.
     # --------------------------------------------------------
 
-    allocation = get_allocation(
-        context
-    )
-
-    sector_allocation = get_sector_allocation(
-        context
-    )
-
     if (
-        allocation > 0
+        get_allocation(
+            context
+        ) > 0
         or
         get_existing_holding(
             context
@@ -1585,16 +2713,16 @@ def _score_evidence_completeness(
             10.0
         )
 
-    if (
-        sector_allocation > 0
-    ):
+    if get_sector_allocation(
+        context
+    ) > 0:
 
         components.append(
             5.0
         )
 
     # --------------------------------------------------------
-    # Risk evidence
+    # Risk evidence.
     # --------------------------------------------------------
 
     if get_risk_score(
@@ -1606,51 +2734,91 @@ def _score_evidence_completeness(
         )
 
     # --------------------------------------------------------
-    # Historical evidence.
+    # Historical learning.
     #
-    # It is more important for BUY decisions than for HOLD.
+    # Mature 60D evidence receives the strongest completeness
+    # contribution.
     # --------------------------------------------------------
 
-    observations = get_signal_observations(
+    horizon = get_preferred_learning_horizon(
         context
     )
+
+    observations = get_preferred_learning_observations(
+        context
+    )
+
+    if horizon == "60D":
+
+        if observations >= STRONG_RELIABILITY_OBSERVATIONS:
+
+            components.append(
+                20.0
+            )
+
+        elif observations >= MIN_RELIABILITY_OBSERVATIONS:
+
+            components.append(
+                15.0
+            )
+
+        elif observations > 0:
+
+            components.append(
+                8.0
+            )
+
+    elif horizon in {
+        "10D",
+        "5D",
+    }:
+
+        if observations >= MIN_RELIABILITY_OBSERVATIONS:
+
+            components.append(
+                12.0
+            )
+
+        elif observations > 0:
+
+            components.append(
+                8.0
+            )
+
+    elif horizon == "LEGACY":
+
+        if observations >= MIN_RELIABILITY_OBSERVATIONS:
+
+            components.append(
+                12.0
+            )
+
+        elif observations > 0:
+
+            components.append(
+                8.0
+            )
+
+    elif action in {
+        "HOLD",
+        "REDUCE",
+    }:
+
+        # Missing historical evidence does not destroy confidence
+        # in HOLD or a justified reduction.
+        components.append(
+            5.0
+        )
+
+    # --------------------------------------------------------
+    # Score-bucket evidence.
+    # --------------------------------------------------------
 
     bucket_observations = (
         get_score_bucket_observations(
             context
         )
     )
-
-    if observations >= MIN_RELIABILITY_OBSERVATIONS:
-
-        components.append(
-            15.0
-        )
-
-    elif observations > 0:
-
-        components.append(
-            8.0
-        )
-
-    elif action in {
-        "BUY NEW",
-        "BUY MORE",
-    }:
-
-        # Missing historical evidence matters more for a new
-        # capital deployment decision.
-        components.append(
-            0.0
-        )
-
-    else:
-
-        # Lack of historical evidence does not destroy confidence
-        # in a HOLD or justified reduction.
-        components.append(
-            5.0
-        )
 
     if bucket_observations >= MIN_RELIABILITY_OBSERVATIONS:
 
@@ -1673,16 +2841,18 @@ def _score_evidence_completeness(
             5.0
         )
 
-    completeness = sum(
-        components
-    )
-
     return clamp(
-        completeness,
+        sum(
+            components
+        ),
         0.0,
         100.0,
     )
 
+
+# ============================================================
+# Confidence model
+# ============================================================
 
 def calculate_confidence(
     context,
@@ -1692,19 +2862,11 @@ def calculate_confidence(
     """
     Calculate confidence in the proposed action.
 
-    This is the key distinction from the previous implementation.
+    Evidence score carries the largest weight.
 
-    Previous behaviour:
-        Confidence primarily represented evidence completeness.
-
-    New behaviour:
-        Confidence represents how strongly the supplied evidence
-        supports the proposed action, with evidence completeness
-        acting as a secondary modifier.
-
-    The model deliberately avoids making historical learning
-    availability a prerequisite for confidence in HOLD or a
-    strongly justified REDUCE.
+    Historical learning contributes through both the evidence
+    score and completeness, but missing learning does not become
+    negative evidence.
     """
 
     if evidence_score is None:
@@ -1732,10 +2894,6 @@ def calculate_confidence(
         context
     )
 
-    # --------------------------------------------------------
-    # Evidence score carries the largest weight.
-    # --------------------------------------------------------
-
     confidence = (
         evidence_score * 0.70
         +
@@ -1759,7 +2917,7 @@ def calculate_confidence(
         confidence -= 15.0
 
     # --------------------------------------------------------
-    # Action-specific safeguards.
+    # BUY safeguards.
     # --------------------------------------------------------
 
     if action in {
@@ -1767,15 +2925,17 @@ def calculate_confidence(
         "BUY MORE",
     }:
 
-        observations = get_signal_observations(
+        observations = get_preferred_learning_observations(
             context
         )
 
-        # Missing historical evidence should materially reduce
-        # confidence for new capital deployment.
         if observations <= 0:
 
             confidence -= 10.0
+
+    # --------------------------------------------------------
+    # BUY MORE concentration safeguard.
+    # --------------------------------------------------------
 
     if action == "BUY MORE":
 
@@ -1787,6 +2947,10 @@ def calculate_confidence(
 
             confidence -= 10.0
 
+    # --------------------------------------------------------
+    # REDUCE safeguard.
+    # --------------------------------------------------------
+
     if action == "REDUCE":
 
         investment_score = get_investment_score(
@@ -1797,9 +2961,6 @@ def calculate_confidence(
             context
         )
 
-        # Strong current bearish evidence should increase
-        # confidence in risk reduction even without historical
-        # learning evidence.
         if (
             investment_score <= 40
             or
@@ -1810,6 +2971,10 @@ def calculate_confidence(
         ):
 
             confidence += 5.0
+
+    # --------------------------------------------------------
+    # SELL safeguard.
+    # --------------------------------------------------------
 
     if action == "SELL":
 
@@ -1829,8 +2994,7 @@ def calculate_confidence(
             confidence -= 10.0
 
     # --------------------------------------------------------
-    # Existing upstream confidence can be used as a secondary
-    # reference, not as the primary score.
+    # Existing upstream confidence is secondary.
     # --------------------------------------------------------
 
     upstream_confidence = get_confidence(
@@ -1862,8 +3026,6 @@ def score_ai_decision(
 ):
     """
     Score the evidence surrounding a proposed AI portfolio decision.
-
-    Returns evidence, confidence and decision-support information.
 
     This remains an evidence-assessment layer only.
     """
@@ -1902,6 +3064,36 @@ def score_ai_decision(
         )
     )
 
+    learning_horizon = (
+        get_preferred_learning_horizon(
+            context
+        )
+    )
+
+    learning_observations = (
+        get_preferred_learning_observations(
+            context
+        )
+    )
+
+    learning_win_rate = (
+        get_preferred_learning_win_rate(
+            context
+        )
+    )
+
+    learning_average_return = (
+        get_preferred_learning_average_return(
+            context
+        )
+    )
+
+    learning_reliability = (
+        get_preferred_learning_reliability(
+            context
+        )
+    )
+
     evidence_score = calculate_evidence_score(
         context
     )
@@ -1929,9 +3121,7 @@ def score_ai_decision(
     )
 
     # --------------------------------------------------------
-    # Data quality
-    #
-    # This remains separate from decision confidence.
+    # Data quality.
     # --------------------------------------------------------
 
     data_quality_items = []
@@ -1942,12 +3132,10 @@ def score_ai_decision(
             "Investment Score"
         )
 
-    if get_signal_observations(
-        context
-    ) > 0:
+    if learning_observations > 0:
 
         data_quality_items.append(
-            "Historical Signal Evidence"
+            "Historical Learning Evidence"
         )
 
     if get_score_bucket_observations(
@@ -2030,25 +3218,108 @@ def score_ai_decision(
                 context
             ),
 
+        # ----------------------------------------------------
+        # Preferred historical learning evidence.
+        # ----------------------------------------------------
+
+        "Historical Learning Horizon":
+            learning_horizon,
+
         "Historical Signal Observations":
-            get_signal_observations(
-                context
-            ),
+            learning_observations,
 
         "Historical Signal Win Rate %":
-            get_signal_win_rate(
-                context
-            ),
+            learning_win_rate,
 
         "Historical Signal Average Return %":
-            get_signal_average_return(
-                context
+            learning_average_return,
+
+        "Historical Signal Reliability":get_signal_reliability(context),
+
+
+        # ----------------------------------------------------
+        # Explicit horizon fields.
+        #
+        # These make the selected learning evidence visible to
+        # downstream explanation/reviewer layers.
+        # ----------------------------------------------------
+
+        "Historical 60-Day Observations":
+            get_horizon_observations(
+                context,
+                "60D",
             ),
 
-        "Historical Signal Reliability":
-            get_signal_reliability(
-                context
+        "Historical 60-Day Win Rate %":
+            get_horizon_win_rate(
+                context,
+                "60D",
             ),
+
+        "Historical 60-Day Average Return %":
+            get_horizon_average_return(
+                context,
+                "60D",
+            ),
+
+        "Historical 60-Day Reliability":
+            get_horizon_reliability(
+                context,
+                60,
+            ),
+
+        "Historical 10-Day Observations":
+            get_horizon_observations(
+                context,
+                "10D",
+            ),
+
+        "Historical 10-Day Win Rate %":
+            get_horizon_win_rate(
+                context,
+                "10D",
+            ),
+
+        "Historical 10-Day Average Return %":
+            get_horizon_average_return(
+                context,
+                "10D",
+            ),
+
+        "Historical 10-Day Reliability":
+            get_horizon_reliability(
+                context,
+                10,
+            ),
+
+
+        "Historical 5-Day Observations":
+            get_horizon_observations(
+                context,
+                "5D",
+            ),
+
+        "Historical 5-Day Win Rate %":
+            get_horizon_win_rate(
+                context,
+                "5D",
+            ),
+
+        "Historical 5-Day Average Return %":
+            get_horizon_average_return(
+                context,
+                "5D",
+            ),
+
+        "Historical 5-Day Reliability":
+            get_horizon_reliability(
+                context,
+                5,
+            ),
+
+        # ----------------------------------------------------
+        # Score-bucket evidence.
+        # ----------------------------------------------------
 
         "Score Bucket Observations":
             get_score_bucket_observations(
@@ -2065,6 +3336,10 @@ def score_ai_decision(
                 context
             ),
 
+        # ----------------------------------------------------
+        # Portfolio evidence.
+        # ----------------------------------------------------
+
         "Portfolio Allocation %":
             get_allocation(
                 context
@@ -2079,6 +3354,10 @@ def score_ai_decision(
             get_risk_score(
                 context
             ),
+
+        # ----------------------------------------------------
+        # Component evidence scores.
+        # ----------------------------------------------------
 
         "Investment Quality Evidence":
             round(
@@ -2128,6 +3407,10 @@ def score_ai_decision(
                 2,
             ),
 
+        # ----------------------------------------------------
+        # Final evidence assessment.
+        # ----------------------------------------------------
+
         "Evidence Score":
             round(
                 evidence_score,
@@ -2139,10 +3422,6 @@ def score_ai_decision(
 
         "Decision Support":
             decision_support,
-
-        # ----------------------------------------------------
-        # NEW SEMANTICS
-        # ----------------------------------------------------
 
         "Confidence":
             decision_confidence,
@@ -2175,9 +3454,7 @@ def score_ai_decision(
 def score_ai_decisions(
     contexts,
 ):
-    """
-    Score multiple decision contexts.
-    """
+    """Score multiple decision contexts."""
 
     if contexts is None:
 
@@ -2206,7 +3483,7 @@ def score_ai_decisions(
 
 
 # ============================================================
-# PUBLIC COMPATIBILITY API
+# Public compatibility API
 # ============================================================
 
 def calculate_ai_decision_score(

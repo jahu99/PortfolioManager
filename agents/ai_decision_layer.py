@@ -137,7 +137,6 @@ def safe_float(
     """Safely convert a scalar value to float."""
 
     try:
-
         if value is None:
             return default
 
@@ -151,7 +150,6 @@ def safe_float(
             value,
             pd.Series,
         ):
-
             if value.empty:
                 return default
 
@@ -161,7 +159,6 @@ def safe_float(
             value,
             pd.DataFrame,
         ):
-
             if value.empty:
                 return default
 
@@ -176,7 +173,6 @@ def safe_float(
         TypeError,
         ValueError,
     ):
-
         return default
 
 
@@ -190,19 +186,14 @@ def normalise_text(
         return default
 
     try:
-
         if pd.isna(value):
             return default
-
     except Exception:
         pass
 
     try:
-
         result = str(value).strip()
-
     except Exception:
-
         return default
 
     return result if result else default
@@ -228,10 +219,8 @@ def clean_ticker(
         return ""
 
     try:
-
         if pd.isna(value):
             return ""
-
     except Exception:
         pass
 
@@ -252,14 +241,11 @@ def get_value(
         return default
 
     for name in names:
-
         try:
-
             if isinstance(
                 source,
                 dict,
             ):
-
                 if name in source:
                     value = source[name]
                 else:
@@ -269,14 +255,12 @@ def get_value(
                 source,
                 pd.Series,
             ):
-
                 if name in source.index:
                     value = source[name]
                 else:
                     continue
 
             else:
-
                 if hasattr(
                     source,
                     name,
@@ -292,10 +276,8 @@ def get_value(
                 continue
 
             try:
-
                 if pd.isna(value):
                     continue
-
             except Exception:
                 pass
 
@@ -316,10 +298,8 @@ def clean_value(
         return None
 
     try:
-
         if pd.isna(value):
             return None
-
     except Exception:
         pass
 
@@ -333,7 +313,6 @@ def clean_value(
         value,
         (list, tuple),
     ):
-
         return [
             clean_value(item)
             for item in value
@@ -343,7 +322,6 @@ def clean_value(
         value,
         dict,
     ):
-
         return {
             str(key): clean_value(item)
             for key, item in value.items()
@@ -353,7 +331,6 @@ def clean_value(
         value,
         pd.Series,
     ):
-
         return {
             str(key): clean_value(item)
             for key, item in value.to_dict().items()
@@ -371,7 +348,6 @@ def clean_dict(
         value,
         dict,
     ):
-
         return {
             str(key): clean_value(item)
             for key, item in value.items()
@@ -381,7 +357,6 @@ def clean_dict(
         value,
         pd.Series,
     ):
-
         return {
             str(key): clean_value(item)
             for key, item in value.to_dict().items()
@@ -423,7 +398,6 @@ def _portfolio_value(
         nested,
         dict,
     ):
-
         value = get_value(
             nested,
             *names,
@@ -440,56 +414,19 @@ def _portfolio_allocation(
     portfolio: Any,
     candidate: Any,
 ) -> float:
-    """Determine the candidate's portfolio allocation percentage."""
+    """
+    Determine the candidate's portfolio allocation percentage.
 
-    candidate_value = get_value(
-        candidate,
-        "Allocation %",
-        "Portfolio Allocation %",
-        "allocation_pct",
-        "allocation",
-        "Position %",
-        "Position Weight %",
-        default=None,
-    )
+    Allocation is deliberately resolved from the most authoritative
+    source available.
 
-    if candidate_value is not None:
+    Priority:
 
-        return safe_float(
-            candidate_value
-        )
-
-    # --------------------------------------------------------
-    # Structured ownership context
-    # --------------------------------------------------------
-
-    if isinstance(
-        candidate,
-        dict,
-    ):
-
-        ownership = candidate.get(
-            "ownership",
-            {},
-        )
-
-        if isinstance(
-            ownership,
-            dict,
-        ) and "allocation_pct" in ownership:
-
-            return safe_float(
-                ownership.get(
-                    "allocation_pct",
-                    0,
-                )
-            )
-
-    holdings = get_value(
-        portfolio,
-        "holdings",
-        default=None,
-    )
+        1. Structured candidate ownership
+        2. Candidate-level allocation
+        3. Portfolio holdings
+        4. Zero fallback
+    """
 
     ticker = clean_ticker(
         get_value(
@@ -502,11 +439,85 @@ def _portfolio_allocation(
         )
     )
 
+    # --------------------------------------------------------
+    # Structured ownership context
+    # --------------------------------------------------------
+
+    if isinstance(
+        candidate,
+        dict,
+    ):
+        ownership = candidate.get(
+            "ownership",
+            {},
+        )
+
+        if isinstance(
+            ownership,
+            dict,
+        ):
+            if "allocation_pct" in ownership:
+
+                allocation = safe_float(
+                    ownership.get(
+                        "allocation_pct",
+                        0,
+                    )
+                )
+
+                print(
+                    f"ALLOCATION TRACE: {ticker} | "
+                    f"SOURCE=structured ownership | "
+                    f"allocation_pct={allocation}"
+                )
+
+                return allocation
+
+    # --------------------------------------------------------
+    # Candidate-level allocation
+    # --------------------------------------------------------
+
+    candidate_value = get_value(
+        candidate,
+        "Allocation %",
+        "Portfolio Allocation %",
+        "allocation_pct",
+        "allocation_percent",
+        "allocation",
+        "Position %",
+        "Position Weight %",
+        default=None,
+    )
+
+    if candidate_value is not None:
+
+        allocation = safe_float(
+            candidate_value
+        )
+
+        print(
+            f"ALLOCATION TRACE: {ticker} | "
+            f"SOURCE=candidate | "
+            f"raw={candidate_value!r} | "
+            f"allocation={allocation}"
+        )
+
+        return allocation
+
+    # --------------------------------------------------------
+    # Portfolio holdings
+    # --------------------------------------------------------
+
+    holdings = get_value(
+        portfolio,
+        "holdings",
+        default=None,
+    )
+
     if isinstance(
         holdings,
         list,
     ):
-
         for holding in holdings:
 
             holding_ticker = clean_ticker(
@@ -522,21 +533,30 @@ def _portfolio_allocation(
 
             if holding_ticker == ticker:
 
-                return safe_float(
+                allocation = safe_float(
                     get_value(
                         holding,
                         "Allocation %",
+                        "Portfolio Allocation %",
                         "allocation_pct",
+                        "allocation_percent",
                         "Allocation",
                         default=0,
                     )
                 )
 
+                print(
+                    f"ALLOCATION TRACE: {ticker} | "
+                    f"SOURCE=portfolio holdings list | "
+                    f"allocation={allocation}"
+                )
+
+                return allocation
+
     if isinstance(
         holdings,
         dict,
     ):
-
         holding = holdings.get(
             ticker,
             {},
@@ -547,15 +567,30 @@ def _portfolio_allocation(
             dict,
         ):
 
-            return safe_float(
+            allocation = safe_float(
                 get_value(
                     holding,
                     "Allocation %",
+                    "Portfolio Allocation %",
                     "allocation_pct",
+                    "allocation_percent",
                     "Allocation",
                     default=0,
                 )
             )
+
+            print(
+                f"ALLOCATION TRACE: {ticker} | "
+                f"SOURCE=portfolio holdings dict | "
+                f"allocation={allocation}"
+            )
+
+            return allocation
+
+    print(
+        f"ALLOCATION TRACE: {ticker} | "
+        f"SOURCE=NONE | allocation=0.0"
+    )
 
     return 0.0
 
@@ -578,7 +613,6 @@ def _existing_holding(
         candidate,
         dict,
     ):
-
         ownership = candidate.get(
             "ownership",
             {},
@@ -612,7 +646,6 @@ def _existing_holding(
             explicit,
             str,
         ):
-
             return explicit.strip().lower() in {
                 "true",
                 "yes",
@@ -632,7 +665,6 @@ def _existing_holding(
     )
 
     if quantity is not None:
-
         return safe_float(
             quantity
         ) > 0
@@ -752,6 +784,14 @@ def _normalise_candidate(
         recommendation_intelligence.*
 
     Legacy flattened dictionaries remain supported.
+
+    Allocation is deliberately exposed under BOTH:
+
+        "Allocation %"
+        "Portfolio Allocation %"
+
+    This prevents the allocation value being lost at an interface
+    boundary between context, scoring and reconciliation.
     """
 
     # ========================================================
@@ -978,12 +1018,26 @@ def _normalise_candidate(
             )
         )
 
+        allocation_source = (
+            "structured ownership"
+        )
+
     else:
 
         allocation = _portfolio_allocation(
             portfolio,
             candidate,
         )
+
+        allocation_source = (
+            "portfolio/candidate fallback"
+        )
+
+    print(
+        f"ALLOCATION TRACE: {ticker} | "
+        f"SOURCE={allocation_source} | "
+        f"NORMALISED Allocation %={allocation}"
+    )
 
     # ========================================================
     # Analysis
@@ -1241,7 +1295,7 @@ def _normalise_candidate(
     # Flattened scoring context
     # ========================================================
 
-    return {
+    result = {
         "Ticker":
             ticker,
 
@@ -1278,7 +1332,21 @@ def _normalise_candidate(
         "Market Value":
             market_value,
 
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Keep BOTH allocation names.
+        # ----------------------------------------------------
+
         "Allocation %":
+            allocation,
+
+        "Portfolio Allocation %":
+            allocation,
+
+        "allocation_pct":
+            allocation,
+
+        "allocation_percent":
             allocation,
 
         "Historical Signal Observations":
@@ -1321,6 +1389,17 @@ def _normalise_candidate(
             risk_score,
     }
 
+    print(
+        f"ALLOCATION TRACE: {ticker} | "
+        f"CONTEXT Allocation %={result.get('Allocation %')} | "
+        f"CONTEXT Portfolio Allocation %="
+        f"{result.get('Portfolio Allocation %')} | "
+        f"CONTEXT allocation_percent="
+        f"{result.get('allocation_percent')}"
+    )
+
+    return result
+
 
 # ============================================================
 # Scoring
@@ -1333,13 +1412,112 @@ def _score_candidate(
     """
     Pass the normalised candidate to the existing AI scoring layer.
 
-    This function does not calculate analytical scores itself.
+    The normalised candidate is authoritative for portfolio context,
+    particularly:
+
+        - Quantity
+        - Allocation %
+        - Portfolio Allocation %
+        - Existing Holding
+        - Investment Score
+        - Signal
+        - Proposed Action
+
+    The scoring layer calculates evidence and confidence but must not
+    overwrite or lose the authoritative portfolio context.
     """
+
+    # ------------------------------------------------------------
+    # Normalise the candidate first.
+    # ------------------------------------------------------------
 
     scoring_context = _normalise_candidate(
         candidate,
         portfolio,
     )
+
+    ticker = clean_ticker(
+        scoring_context.get(
+            "Ticker",
+            "",
+        )
+    )
+
+    # ------------------------------------------------------------
+    # Capture authoritative portfolio context BEFORE scoring.
+    #
+    # These values must survive the scoring-layer boundary even if
+    # score_ai_decision() returns a reduced dictionary.
+    # ------------------------------------------------------------
+
+    authoritative_allocation = safe_float(
+        scoring_context.get(
+            "Allocation %",
+            scoring_context.get(
+                "Portfolio Allocation %",
+                scoring_context.get(
+                    "allocation_pct",
+                    0.0,
+                ),
+            ),
+        ),
+        0.0,
+    )
+
+    authoritative_quantity = scoring_context.get(
+        "Quantity",
+        0,
+    )
+
+    authoritative_owned = bool(
+        scoring_context.get(
+            "Existing Holding",
+            False,
+        )
+    )
+
+    authoritative_investment_score = safe_float(
+        scoring_context.get(
+            "Investment Score",
+            0.0,
+        ),
+        0.0,
+    )
+
+    authoritative_signal = normalise_text(
+        scoring_context.get(
+            "Signal",
+            "",
+        ),
+        "",
+    )
+
+    authoritative_action = normalise_action(
+        scoring_context.get(
+            "Action",
+            "HOLD",
+        )
+    )
+
+    authoritative_asset_type = normalise_text(
+        scoring_context.get(
+            "Asset Type",
+            "STOCK",
+        ),
+        "STOCK",
+    ).upper()
+
+    print(
+        f"ALLOCATION TRACE: {ticker} | "
+        f"BEFORE SCORING | "
+        f"Allocation %={authoritative_allocation} | "
+        f"Quantity={authoritative_quantity} | "
+        f"Owned={authoritative_owned}"
+    )
+
+    # ------------------------------------------------------------
+    # Run the existing deterministic scoring layer.
+    # ------------------------------------------------------------
 
     try:
 
@@ -1349,79 +1527,253 @@ def _score_candidate(
 
     except Exception as exc:
 
+        print(
+            f"AI DECISION TRACE: {ticker} | "
+            f"SCORING ERROR={exc}"
+        )
+
         return {
-            "Action":
-                scoring_context.get(
-                    "Action",
-                    "HOLD",
-                ),
+            "Ticker": ticker,
+            "Action": authoritative_action,
+            "Proposed Action": authoritative_action,
+            "Deterministic Action": authoritative_action,
+            "Deterministic Confidence": 0.0,
+            "Confidence": 0.0,
+            "Evidence Score": 0.0,
+            "Evidence Strength": "VERY WEAK",
+            "Decision Support": "NOT SUPPORTED",
 
-            "Asset Type":
-                scoring_context.get(
-                    "Asset Type",
-                    "STOCK",
-                ),
+            # Preserve authoritative portfolio context.
+            "Quantity": authoritative_quantity,
+            "Allocation %": authoritative_allocation,
+            "Portfolio Allocation %": authoritative_allocation,
+            "allocation_pct": authoritative_allocation,
+            "allocation_percent": authoritative_allocation,
+            "Existing Holding": authoritative_owned,
+            "Investment Score": authoritative_investment_score,
+            "Signal": authoritative_signal,
+            "Asset Type": authoritative_asset_type,
 
-            "Existing Holding":
-                scoring_context.get(
-                    "Existing Holding",
-                    False,
-                ),
-
-            "Portfolio Allocation %":
-                scoring_context.get(
-                    "Allocation %",
-                    0,
-                ),
-
-            "Evidence Score":
-                0.0,
-
-            "Evidence Strength":
-                "VERY WEAK",
-
-            "Decision Support":
-                "NOT SUPPORTED",
-
-            "Confidence":
-                0.0,
-
-            "_scoring_error":
-                str(exc),
+            "_scoring_error": str(exc),
         }
 
     if not isinstance(
         result,
         dict,
     ):
+        result = {}
 
-        return {
-            "Action":
-                scoring_context.get(
-                    "Action",
-                    "HOLD",
-                ),
+    # ------------------------------------------------------------
+    # Start with the scoring result so all scoring evidence is
+    # preserved.
+    # ------------------------------------------------------------
 
-            "Evidence Score":
-                0.0,
-
-            "Evidence Strength":
-                "VERY WEAK",
-
-            "Decision Support":
-                "NOT SUPPORTED",
-
-            "Confidence":
-                0.0,
-
-            "_scoring_error":
-                "AI scoring returned a non-dictionary result",
-        }
-
-    return clean_dict(
+    decision = dict(
         result
     )
 
+    # ------------------------------------------------------------
+    # Canonical scoring fields.
+    # ------------------------------------------------------------
+
+    proposed_action = normalise_action(
+        result.get(
+            "Proposed Action",
+            result.get(
+                "proposed_action",
+                result.get(
+                    "Action",
+                    result.get(
+                        "action",
+                        authoritative_action,
+                    ),
+                ),
+            ),
+        )
+    )
+
+    deterministic_action = normalise_action(
+        result.get(
+            "Deterministic Action",
+            result.get(
+                "deterministic_action",
+                proposed_action,
+            ),
+        )
+    )
+
+    deterministic_confidence = safe_float(
+        result.get(
+            "Deterministic Confidence",
+            result.get(
+                "deterministic_confidence",
+                result.get(
+                    "Confidence",
+                    result.get(
+                        "confidence",
+                        0.0,
+                    ),
+                ),
+            ),
+        ),
+        0.0,
+    )
+
+    evidence_score = safe_float(
+        result.get(
+            "Evidence Score",
+            result.get(
+                "evidence_score",
+                0.0,
+            ),
+        ),
+        0.0,
+    )
+
+    evidence_strength = normalise_text(
+        result.get(
+            "Evidence Strength",
+            result.get(
+                "evidence_strength",
+                "VERY WEAK",
+            ),
+        ),
+        "VERY WEAK",
+    ).upper()
+
+    decision_support = normalise_text(
+        result.get(
+            "Decision Support",
+            result.get(
+                "decision_support",
+                "NOT SUPPORTED",
+            ),
+        ),
+        "NOT SUPPORTED",
+    ).upper()
+
+    # ------------------------------------------------------------
+    # Write the canonical reconciler contract.
+    #
+    # IMPORTANT:
+    # Portfolio context below deliberately comes from the
+    # pre-scoring authoritative context, NOT from `result`.
+    # ------------------------------------------------------------
+
+    decision["Ticker"] = ticker
+
+    decision["Action"] = proposed_action
+    decision["Proposed Action"] = proposed_action
+    decision["Deterministic Action"] = deterministic_action
+
+    decision["Deterministic Confidence"] = (
+        deterministic_confidence
+    )
+
+    decision["Confidence"] = (
+        deterministic_confidence
+    )
+
+    decision["Evidence Score"] = evidence_score
+
+    decision["Evidence Strength"] = (
+        evidence_strength
+    )
+
+    decision["Decision Support"] = (
+        decision_support
+    )
+
+    # ------------------------------------------------------------
+    # AUTHORITATIVE PORTFOLIO CONTEXT
+    #
+    # Do not take these values from the scoring result.
+    # ------------------------------------------------------------
+
+    decision["Quantity"] = authoritative_quantity
+
+    decision["Allocation %"] = (
+        authoritative_allocation
+    )
+
+    decision["Portfolio Allocation %"] = (
+        authoritative_allocation
+    )
+
+    decision["allocation_pct"] = (
+        authoritative_allocation
+    )
+
+    decision["allocation_percent"] = (
+        authoritative_allocation
+    )
+
+    decision["Existing Holding"] = (
+        authoritative_owned
+    )
+
+    decision["Investment Score"] = (
+        authoritative_investment_score
+    )
+
+    decision["Signal"] = (
+        authoritative_signal
+    )
+
+    decision["Asset Type"] = (
+        authoritative_asset_type
+    )
+
+    # ------------------------------------------------------------
+    # Preserve historical intelligence from the normalised
+    # context rather than allowing the scoring boundary to lose it.
+    # ------------------------------------------------------------
+
+    for field in (
+        "Historical Signal Reliability",
+        "Historical Signal Observations",
+        "Historical Signal Win Rate %",
+        "Historical Signal Average Return %",
+        "Learning Adjustment",
+        "Learning Adjusted Score",
+        "Score Bucket",
+        "Score Bucket Observations",
+        "Score Bucket Win Rate %",
+        "Score Bucket Average Return %",
+        "Largest Position %",
+        "Largest Position Ticker",
+        "Risk Score",
+    ):
+        if field in scoring_context:
+            decision[field] = scoring_context[field]
+
+    # ------------------------------------------------------------
+    # Preserve scoring errors if the scoring layer returned one.
+    # ------------------------------------------------------------
+
+    if "_scoring_error" in result:
+        decision["_scoring_error"] = result[
+            "_scoring_error"
+        ]
+
+    # ------------------------------------------------------------
+    # Final trace.
+    # ------------------------------------------------------------
+
+    print(
+        f"ALLOCATION TRACE: {ticker} | "
+        f"AFTER SCORING | "
+        f"Allocation %={decision['Allocation %']} | "
+        f"Portfolio Allocation %="
+        f"{decision['Portfolio Allocation %']} | "
+        f"Quantity={decision['Quantity']} | "
+        f"Owned={decision['Existing Holding']} | "
+        f"Investment Score="
+        f"{decision['Investment Score']} | "
+        f"Action={decision['Action']}"
+    )
+
+    return decision
 
 # ============================================================
 # Governance
@@ -1719,6 +2071,20 @@ def generate_ai_decision(
             reason="Candidate has no ticker"
         )
 
+    ticker = normalised_candidate[
+        "Ticker"
+    ]
+
+    print(
+        f"AI DECISION TRACE: {ticker} | "
+        f"PROPOSED ACTION="
+        f"{normalised_candidate.get('Action')} | "
+        f"OWNED="
+        f"{normalised_candidate.get('Existing Holding')} | "
+        f"ALLOCATION="
+        f"{normalised_candidate.get('Allocation %')}"
+    )
+
     # ========================================================
     # Score evidence
     # ========================================================
@@ -1736,7 +2102,7 @@ def generate_ai_decision(
 
         return {
             "Ticker":
-                normalised_candidate["Ticker"],
+                ticker,
 
             "Final Decision":
                 "HOLD",
@@ -1765,6 +2131,9 @@ def generate_ai_decision(
             "Portfolio Allocation %":
                 normalised_candidate["Allocation %"],
 
+            "Allocation %":
+                normalised_candidate["Allocation %"],
+
             "Governance Reasons":
                 [
                     f"AI decision scoring failed: {scoring_error}",
@@ -1782,10 +2151,6 @@ def generate_ai_decision(
 
     # ========================================================
     # Extract scored evidence
-    #
-    # IMPORTANT:
-    # Proposed Action comes from the normalised candidate,
-    # not from the scoring layer's evidence assessment.
     # ========================================================
 
     proposed_action = normalise_action(
@@ -1826,7 +2191,7 @@ def generate_ai_decision(
     )
 
     # --------------------------------------------------------
-    # Ownership is authoritative from the candidate context.
+    # Ownership is authoritative from candidate context.
     # --------------------------------------------------------
 
     existing_holding = bool(
@@ -1850,13 +2215,6 @@ def generate_ai_decision(
         ),
         "STOCK",
     ).upper()
-
-    ticker = clean_ticker(
-        normalised_candidate.get(
-            "Ticker",
-            "",
-        )
-    )
 
     # ========================================================
     # Governance
@@ -2010,7 +2368,7 @@ def generate_ai_decision(
     # Final result
     # ========================================================
 
-    return {
+    final_result = {
         "Ticker":
             ticker,
 
@@ -2050,6 +2408,16 @@ def generate_ai_decision(
                 2,
             ),
 
+        # ----------------------------------------------------
+        # Preserve both allocation names at final boundary.
+        # ----------------------------------------------------
+
+        "Allocation %":
+            round(
+                allocation,
+                2,
+            ),
+
         "Governance Reasons":
             governance_reasons,
 
@@ -2064,6 +2432,18 @@ def generate_ai_decision(
         "Evidence Assessment":
             evidence,
     }
+
+    print(
+        f"AI DECISION TRACE: {ticker} | "
+        f"FINAL={final_decision} | "
+        f"PROPOSED={proposed_action} | "
+        f"ALLOCATION={final_result.get('Allocation %')} | "
+        f"OWNED={existing_holding} | "
+        f"EVIDENCE={evidence_score} | "
+        f"CONFIDENCE={final_confidence}"
+    )
+
+    return final_result
 
 
 # ============================================================

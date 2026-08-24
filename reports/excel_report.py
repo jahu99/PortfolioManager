@@ -1467,6 +1467,10 @@ def create_report(
         # RECOMMENDATION INTELLIGENCE
         # =====================================================
 
+        # =====================================================
+        # RECOMMENDATION INTELLIGENCE
+        # =====================================================
+
         print(
             "Creating Recommendation Intelligence"
         )
@@ -1475,7 +1479,7 @@ def create_report(
             "Recommendation Intelligence"
         )
 
-        # Always create the sheet
+        # Always create the sheet with a simple report title.
         pd.DataFrame(
             {
                 "Status": [
@@ -1488,45 +1492,80 @@ def create_report(
             index=False
         )
 
+        # -----------------------------------------------------
+        # Write the main Recommendation Intelligence table
+        # first. This is the primary output of the intelligence
+        # engine and should be easy to inspect in Excel.
+        # -----------------------------------------------------
+
         intelligence_row = 2
 
-        intelligence_sections = [
+        if (
+            isinstance(
+                recommendation_intelligence,
+                pd.DataFrame
+            )
+            and not recommendation_intelligence.empty
+        ):
+            pd.DataFrame(
+                [
+                    [
+                        "Recommendation Intelligence"
+                    ]
+                ]
+            ).to_excel(
+                writer,
+                sheet_name=intelligence_sheet,
+                startrow=intelligence_row,
+                index=False,
+                header=False
+            )
 
+            intelligence_row += 1
+
+            recommendation_intelligence.to_excel(
+                writer,
+                sheet_name=intelligence_sheet,
+                startrow=intelligence_row,
+                index=False
+            )
+
+            intelligence_row += (
+                len(
+                    recommendation_intelligence
+                )
+                + 3
+            )
+
+        # -----------------------------------------------------
+        # Additional learning diagnostics
+        # -----------------------------------------------------
+
+        intelligence_sections = [
             (
                 "Signal Performance",
                 signal_performance
             ),
-
             (
                 "Horizon Performance",
                 horizon_performance
             ),
-
-            (
-                "Recommendation Intelligence",
-                recommendation_intelligence
-            ),
-
             (
                 "Score Performance",
                 score_performance
             ),
-
             (
                 "Score Bucket Performance",
                 score_bucket_performance
             ),
-
             (
                 "Component Score Performance",
                 component_score_performance
             ),
-
             (
                 "Signal Horizon Performance",
                 signal_horizon_performance
             )
-
         ]
 
         for title, dataframe in intelligence_sections:

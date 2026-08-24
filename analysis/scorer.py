@@ -1,4 +1,3 @@
-from analysis.adaptive_learning import get_adaptive_adjustments
 from analysis.investment_score import calculate_investment_score
 
 

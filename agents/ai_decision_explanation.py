@@ -579,7 +579,6 @@ def get_learning_adjusted_score(
         )
     )
 
-
 def get_historical_observations(
     candidate: dict,
     decision: dict,

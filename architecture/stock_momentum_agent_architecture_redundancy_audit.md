@@ -230,7 +230,7 @@ The following are **candidates for investigation only**. They are not deletion r
 | `analysis.recommendations.py` | Stock recommendations | CORE / INVESTIGATE | Appears to sit upstream of portfolio decisions |
 | `analysis.recommendation_intelligence.py` | Recommendation intelligence | SUPPORTING | Likely learning/measurement rather than live decision authority |
 | `analysis.recommendation_learning.py` | Recommendation learning | SUPPORTING | Historical/adaptive learning |
-| `analysis.adaptive_learning.py` | Adaptive learning | SUPPORTING / INVESTIGATE | Potential overlap with recommendation learning |
+| `analysis.adaptive_learning.py` | Adaptive learning | REMOVED / LEGACY | Superseded by governed `analysis.recommendation_learning.py`; unused legacy implementation removed |
 | `analysis/rebalance.py` | Rebalance recommendations | LEGACY / SECONDARY CANDIDATE | Appears to generate actions outside Capital Allocation |
 | `analysis/trade_sizing.py` | Trade sizing | LEGACY / SECONDARY CANDIDATE | Potential overlap with Capital Allocation |
 | `analysis/weight_optimizer.py` | Weight optimisation | SUPPORTING / INVESTIGATE | Potential overlap with portfolio optimiser |
@@ -350,7 +350,6 @@ Potential cluster:
 ```text
 recommendation_intelligence.py
 recommendation_learning.py
-adaptive_learning.py
 recommendation_evaluator.py
 learning_calibration.py
 score_calibration.py

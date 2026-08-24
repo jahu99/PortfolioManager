@@ -1977,6 +1977,23 @@ def run_governed_chain(
         review=review,
     )
 
+    print(
+        f"RECONCILIATION DETAIL: {ticker} | "
+        f"Status={reconciliation.get('Reconciliation Status')} | "
+        f"Deterministic={reconciliation.get('Deterministic Action')} | "
+        f"Proposed={reconciliation.get('Proposed Action')} | "
+        f"Reconciled={reconciliation.get('Reconciled Action')} | "
+        f"Evidence={reconciliation.get('Evidence Score')} | "
+        f"Deterministic Confidence={reconciliation.get('Deterministic Confidence')} | "
+        f"LLM Review={reconciliation.get('LLM Review')} | "
+        f"LLM Confidence={reconciliation.get('LLM Confidence')} | "
+        f"Existing Holding={reconciliation.get('Existing Holding')} | "
+        f"Flags={reconciliation.get('Governance Flags')} | "
+        f"Reason Code={reconciliation.get('Governance Reason Code')} | "
+        f"Reasons={reconciliation.get('Governance Reasons')} | "
+        f"Reason={reconciliation.get('Governance Reason')}"
+    )
+
     # ============================================================
     # RETURN COMPLETE GOVERNED CHAIN
     #
