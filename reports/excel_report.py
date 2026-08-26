@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 from datetime import datetime
-
+import sqlite3
 
 # ============================================================
 # Final Portfolio Decisions - Executive Report Contract
@@ -1667,9 +1667,111 @@ def create_report(
 
     return filename
 
+def _load_persisted_audit_reasons_by_ticker():
+    """
+    Load persisted audit reconciliation reasons for the latest
+    completed audit run.
+
+    The audit database is the authoritative source for audit
+    reasons. This reporting helper deliberately does not rely on
+    in-memory audit state or require audit_run_id to be carried
+    inside the final portfolio decision dataframe.
+
+    Returns
+    -------
+    dict
+        Mapping of ticker -> combined persisted audit reason text.
+    """
+
+    database_path = (
+        "/Users/jameshulin/Documents/"
+        "stock-momentum-agent/data/portfolio_manager.db"
+    )
+
+    reasons_by_ticker = {}
+
+    try:
+
+        conn = sqlite3.connect(
+            database_path
+        )
+
+        conn.row_factory = sqlite3.Row
+
+        rows = conn.execute(
+            """
+            SELECT
+                ad.ticker,
+                ar.reason_code,
+                ar.reason_category,
+                ar.reason_description,
+                ar.severity,
+                ar.source_layer
+            FROM audit_runs AS run
+            INNER JOIN audit_decisions AS ad
+                ON ad.audit_run_id = run.id
+            INNER JOIN audit_reasons AS ar
+                ON ar.audit_decision_id = ad.id
+            WHERE run.id = (
+                SELECT id
+                FROM audit_runs
+                WHERE status = 'COMPLETED'
+                ORDER BY id DESC
+                LIMIT 1
+            )
+            ORDER BY
+                ad.ticker,
+                ar.id
+            """
+        ).fetchall()
+
+        conn.close()
+
+        grouped_reasons = {}
+
+        for row in rows:
+
+            ticker = str(
+                row["ticker"] or ""
+            ).strip().upper()
+
+            description = str(
+                row["reason_description"] or ""
+            ).strip()
+
+            if not ticker or not description:
+                continue
+
+            grouped_reasons.setdefault(
+                ticker,
+                []
+            )
+
+            if description not in grouped_reasons[ticker]:
+
+                grouped_reasons[ticker].append(
+                    description
+                )
+
+        for ticker, reasons in grouped_reasons.items():
+
+            reasons_by_ticker[ticker] = (
+                " | ".join(reasons)
+            )
+
+    except Exception as exc:
+
+        print(
+            "WARNING: Failed to load persisted "
+            f"audit reasons: {exc}"
+        )
+
+    return reasons_by_ticker
+
 # ============================================================
 # Final Portfolio Decisions - Executive Report Preparation
 # ============================================================
+
 
 def prepare_final_portfolio_decisions_report(
     final_portfolio_decisions,
@@ -1685,7 +1787,9 @@ def prepare_final_portfolio_decisions_report(
     - Enrich non-owned BUY NEW candidates with Name / Sector.
     - Normalise Existing Holding to True / False.
     - Force non-owned allocation to 0%.
-    - Populate missing reconciliation reasons.
+    - Prefer persisted audit reasons when available.
+    - Populate missing reconciliation reasons only when no
+      persisted audit reason exists.
     - Remove upstream / duplicate columns.
     - Return the final executive-report dataframe.
 
@@ -1726,51 +1830,28 @@ def prepare_final_portfolio_decisions_report(
     required_defaults = {
 
         "Ticker": "",
-
         "Name": "",
-
         "Asset Type": "STOCK",
-
         "Existing Holding": False,
-
         "Sector": "",
-
         "Allocation %": 0.0,
-
         "Investment Score": 0.0,
-
         "Signal": "",
-
         "Proposed Action": "HOLD",
-
         "Final Decision": "HOLD",
-
         "Decision Status": "",
-
         "Evidence Score": 0.0,
-
         "Evidence Strength": "UNKNOWN",
-
         "Decision Support": "UNKNOWN",
-
         "Deterministic Confidence": 0.0,
-
         "LLM Assessment": "CHALLENGE",
-
         "LLM Confidence": 0.0,
-
         "LLM Reason": "",
-
         "Reconciliation Status": "",
-
         "Reconciliation Reason": "",
-
         "Reduction %": 0.0,
-
         "Released Capital": 0.0,
-
         "Buy Value": 0.0,
-
     }
 
     for column, default_value in required_defaults.items():
@@ -1825,6 +1906,21 @@ def prepare_final_portfolio_decisions_report(
                 ] = row.to_dict()
 
     # --------------------------------------------------------
+    # Load persisted audit reasons.
+    #
+    # The audit run is created once for the complete daily
+    # final-decision population, so the latest completed run
+    # represents the same production decision cycle.
+    #
+    # final_portfolio_decisions does not need to carry the
+    # audit_run_id.
+    # --------------------------------------------------------
+
+    persisted_audit_reasons = (
+        _load_persisted_audit_reasons_by_ticker()
+    )
+
+    # --------------------------------------------------------
     # Process each final decision row.
     # --------------------------------------------------------
 
@@ -1837,131 +1933,82 @@ def prepare_final_portfolio_decisions_report(
             ]
         ).strip().upper()
 
+        result_record = results_lookup.get(
+            ticker,
+            {}
+        )
+
         # ----------------------------------------------------
-        # Existing holding
+        # Enrich Name.
         # ----------------------------------------------------
 
-        holding_value = final_report.at[
+        current_name = final_report.at[
             index,
-            "Existing Holding"
+            "Name"
         ]
 
-        if isinstance(
-            holding_value,
-            bool,
+        if (
+            pd.isna(current_name)
+            or
+            str(current_name).strip() == ""
         ):
-
-            owned = holding_value
-
-        else:
-
-            holding_text = str(
-                holding_value
-            ).strip().upper()
-
-            owned = (
-                holding_text
-                in {
-                    "TRUE",
-                    "YES",
-                    "Y",
-                    "1",
-                    "OWNED",
-                    "EXISTING",
-                }
-            )
-
-        final_report.at[
-            index,
-            "Existing Holding"
-        ] = owned
-
-        # ----------------------------------------------------
-        # Existing holdings keep their portfolio allocation.
-        # Non-owned candidates have zero current allocation.
-        # ----------------------------------------------------
-
-        if not owned:
 
             final_report.at[
                 index,
-                "Allocation %"
-            ] = 0.0
-
-        # ----------------------------------------------------
-        # Enrich Name / Sector for BUY NEW candidates.
-        # ----------------------------------------------------
-
-        result_record = results_lookup.get(
-            ticker
-        )
-
-        if result_record:
-
-            current_name = final_report.at[
-                index,
                 "Name"
-            ]
-
-            if (
-                pd.isna(
-                    current_name
+            ] = (
+                result_record.get(
+                    "Name"
                 )
                 or
-                str(
-                    current_name
-                ).strip()
-                == ""
-            ):
-
-                final_report.at[
-                    index,
-                    "Name"
-                ] = (
-                    result_record.get(
-                        "Name"
-                    )
-                    or
-                    result_record.get(
-                        "Company"
-                    )
-                    or
-                    ""
+                result_record.get(
+                    "Company"
                 )
+                or
+                ""
+            )
 
-            current_sector = final_report.at[
+        # ----------------------------------------------------
+        # Enrich Sector.
+        # ----------------------------------------------------
+
+        current_sector = final_report.at[
+            index,
+            "Sector"
+        ]
+
+        if (
+            pd.isna(current_sector)
+            or
+            str(current_sector).strip() == ""
+        ):
+
+            final_report.at[
                 index,
                 "Sector"
-            ]
-
-            if (
-                pd.isna(
-                    current_sector
+            ] = (
+                result_record.get(
+                    "Sector"
                 )
                 or
-                str(
-                    current_sector
-                ).strip()
-                == ""
-            ):
-
-                final_report.at[
-                    index,
-                    "Sector"
-                ] = (
-                    result_record.get(
-                        "Sector"
-                    )
-                    or
-                    result_record.get(
-                        "Sector_Scanner"
-                    )
-                    or
-                    ""
+                result_record.get(
+                    "Sector_Scanner"
                 )
+                or
+                ""
+            )
 
         # ----------------------------------------------------
         # Populate missing reconciliation reason.
+        #
+        # Priority:
+        #
+        # 1. Persisted audit reason
+        # 2. Existing reconciliation reason
+        # 3. Existing deterministic fallback text
+        #
+        # A persisted audit reason therefore takes precedence
+        # over the generic reporting fallback.
         # ----------------------------------------------------
 
         reconciliation_reason = (
@@ -1971,81 +2018,97 @@ def prepare_final_portfolio_decisions_report(
             ]
         )
 
-        if (
-            pd.isna(
-                reconciliation_reason
+        persisted_reason = (
+            persisted_audit_reasons.get(
+                ticker,
+                ""
             )
-            or
-            str(
-                reconciliation_reason
-            ).strip()
-            == ""
-        ):
+        )
 
-            final_decision = str(
-                final_report.at[
-                    index,
-                    "Final Decision"
-                ]
-            ).strip().upper()
+        if persisted_reason:
 
-            if final_decision == "NO ACTION":
+            reconciliation_reason = (
+                persisted_reason
+            )
 
-                reconciliation_reason = (
-                    "BUY NEW proposal did not pass the "
-                    "governed decision process; no position "
-                    "should be established."
+        else:
+
+            if (
+                pd.isna(
+                    reconciliation_reason
                 )
+                or
+                str(
+                    reconciliation_reason
+                ).strip()
+                == ""
+            ):
 
-            elif final_decision == "HOLD":
+                final_decision = str(
+                    final_report.at[
+                        index,
+                        "Final Decision"
+                    ]
+                ).strip().upper()
 
-                reconciliation_reason = (
-                    "No sufficiently strong evidence justified "
-                    "a change to the existing position."
-                )
+                if final_decision == "NO ACTION":
 
-            elif final_decision == "REDUCE":
+                    reconciliation_reason = (
+                        "BUY NEW proposal did not pass the "
+                        "governed decision process; no position "
+                        "should be established."
+                    )
 
-                reconciliation_reason = (
-                    "REDUCE proposal passed the governed "
-                    "decision and reconciliation checks."
-                )
+                elif final_decision == "HOLD":
 
-            elif final_decision == "SELL":
+                    reconciliation_reason = (
+                        "No sufficiently strong evidence justified "
+                        "a change to the existing position."
+                    )
 
-                reconciliation_reason = (
-                    "SELL proposal passed the governed "
-                    "decision and reconciliation checks."
-                )
+                elif final_decision == "REDUCE":
 
-            elif final_decision == "BUY NEW":
+                    reconciliation_reason = (
+                        "REDUCE proposal passed the governed "
+                        "decision and reconciliation checks."
+                    )
 
-                reconciliation_reason = (
-                    "BUY NEW proposal passed the governed "
-                    "decision and reconciliation checks."
-                )
+                elif final_decision == "SELL":
 
-            elif final_decision == "BUY MORE":
+                    reconciliation_reason = (
+                        "SELL proposal passed the governed "
+                        "decision and reconciliation checks."
+                    )
 
-                reconciliation_reason = (
-                    "BUY MORE proposal passed the governed "
-                    "decision and reconciliation checks."
-                )
+                elif final_decision == "BUY NEW":
 
-            else:
+                    reconciliation_reason = (
+                        "BUY NEW proposal passed the governed "
+                        "decision and reconciliation checks."
+                    )
 
-                reconciliation_reason = ""
+                elif final_decision == "BUY MORE":
 
-            final_report.at[
-                index,
-                "Reconciliation Reason"
-            ] = reconciliation_reason
+                    reconciliation_reason = (
+                        "BUY MORE proposal passed the governed "
+                        "decision and reconciliation checks."
+                    )
+
+                else:
+
+                    reconciliation_reason = ""
+
+        final_report.at[
+            index,
+            "Reconciliation Reason"
+        ] = reconciliation_reason
 
     # --------------------------------------------------------
     # Numeric normalisation.
     # --------------------------------------------------------
 
     numeric_columns = [
+
         "Allocation %",
         "Investment Score",
         "Evidence Score",
@@ -2054,6 +2117,7 @@ def prepare_final_portfolio_decisions_report(
         "Reduction %",
         "Released Capital",
         "Buy Value",
+
     ]
 
     for column in numeric_columns:
@@ -2074,9 +2138,11 @@ def prepare_final_portfolio_decisions_report(
     # --------------------------------------------------------
 
     available_columns = [
+
         column
         for column in FINAL_DECISION_COLUMNS
         if column in final_report.columns
+
     ]
 
     final_report = final_report[
@@ -2111,4 +2177,18 @@ def prepare_final_portfolio_decisions_report(
             "No"
         )
 
+    if "Current Allocation %" in final_report.columns:
+
+        final_report[
+            "Current Allocation %"
+        ] = pd.to_numeric(
+            final_report[
+                "Current Allocation %"
+            ],
+            errors="coerce",
+        ).fillna(
+            0.0
+        )
+
     return final_report
+
