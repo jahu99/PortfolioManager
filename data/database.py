@@ -44,6 +44,225 @@ def get_connection():
         DATABASE_PATH
     )
 
+# =====================================================
+# AUDIT DATABASE
+# =====================================================
+
+def initialise_audit_database():
+    """
+    Initialise the Epic 1 decision audit tables.
+
+    Responsibilities:
+
+        - Store audit execution/run records.
+        - Store one audit decision record per security.
+        - Store all reasons contributing to an action change.
+        - Preserve quantitative actual/threshold values where
+          available.
+        - Maintain indexes used by audit reporting.
+
+    Audit data is historical and should not be overwritten when
+    decision logic is subsequently corrected.
+    """
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # -------------------------------------------------
+    # Audit runs
+    # -------------------------------------------------
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_runs
+        (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            run_id TEXT NOT NULL UNIQUE,
+
+            run_date TEXT NOT NULL,
+
+            environment TEXT NOT NULL
+                CHECK (
+                    environment IN (
+                        'pre-production',
+                        'production'
+                    )
+                ),
+
+            code_version TEXT,
+
+            status TEXT NOT NULL DEFAULT 'RUNNING'
+                CHECK (
+                    status IN (
+                        'RUNNING',
+                        'COMPLETED',
+                        'FAILED'
+                    )
+                ),
+
+            total_decisions INTEGER DEFAULT 0,
+
+            changed_decisions INTEGER DEFAULT 0,
+
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+    # -------------------------------------------------
+    # Audit decisions
+    # -------------------------------------------------
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_decisions
+        (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            audit_run_id INTEGER NOT NULL,
+
+            ticker TEXT NOT NULL,
+
+            asset_type TEXT,
+
+            original_action TEXT,
+
+            proposed_action TEXT,
+
+            reconciled_action TEXT,
+
+            final_action TEXT NOT NULL,
+
+            action_changed INTEGER NOT NULL DEFAULT 0
+                CHECK (
+                    action_changed IN (0, 1)
+                ),
+
+            original_signal TEXT,
+
+            investment_score REAL,
+
+            technical_score REAL,
+
+            quality_score REAL,
+
+            growth_score REAL,
+
+            confidence_score REAL,
+
+            evidence_score REAL,
+
+            original_allocation_pct REAL,
+
+            final_allocation_pct REAL,
+
+            reconciliation_status TEXT,
+
+            decision_stage TEXT,
+
+            source_module TEXT,
+
+            created_at TEXT NOT NULL,
+
+            FOREIGN KEY (audit_run_id)
+                REFERENCES audit_runs(id)
+        )
+        """
+    )
+
+    # -------------------------------------------------
+    # Audit reasons
+    # -------------------------------------------------
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_reasons
+        (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            audit_decision_id INTEGER NOT NULL,
+
+            reason_code TEXT NOT NULL,
+
+            reason_category TEXT NOT NULL,
+
+            reason_description TEXT,
+
+            actual_value TEXT,
+
+            threshold_value TEXT,
+
+            unit TEXT,
+
+            severity TEXT DEFAULT 'MATERIAL'
+                CHECK (
+                    severity IN (
+                        'INFO',
+                        'WARNING',
+                        'MATERIAL'
+                    )
+                ),
+
+            source_layer TEXT,
+
+            created_at TEXT NOT NULL,
+
+            FOREIGN KEY (audit_decision_id)
+                REFERENCES audit_decisions(id)
+        )
+        """
+    )
+
+    # -------------------------------------------------
+    # Audit indexes
+    # -------------------------------------------------
+
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_runs_run_id
+        ON audit_runs(run_id)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decisions_run
+        ON audit_decisions(audit_run_id)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decisions_ticker
+        ON audit_decisions(ticker)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decisions_changed
+        ON audit_decisions(action_changed)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_reasons_decision
+        ON audit_reasons(audit_decision_id)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_reasons_code
+        ON audit_reasons(reason_code)
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
 
 # =====================================================
 # INITIALISE DATABASE
@@ -1087,6 +1306,13 @@ def save_recommendations(
         # -------------------------------------------------
         # Commit recommendation/evidence changes together
         # -------------------------------------------------
+
+
+        # -------------------------------------------------
+        # Epic 1: Decision audit database
+        # -------------------------------------------------
+
+        initialise_audit_database()
 
         conn.commit()
 

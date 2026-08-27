@@ -1398,6 +1398,7 @@ def _build_result(
     existing_holding: bool,
     asset_type: str,
     governance_flags: list[str],
+    failed_checks: list[dict],
     reasons: list[str],
     automatic_approval: bool,
     governance_reason_code: str = "",
@@ -1449,6 +1450,9 @@ def _build_result(
 
         "Governance Flags":
             governance_flags,
+
+        "Governance Failed Checks":
+            failed_checks,
 
         "Governance Reasons":
             reasons,
@@ -1550,6 +1554,7 @@ def reconcile_decision(
     )
 
     governance_flags: list[str] = []
+    failed_checks: list[dict] = []
     reasons: list[str] = []
 
     # --------------------------------------------------------
@@ -1604,6 +1609,7 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
+            failed_checks=failed_checks,
             reasons=reasons,
             automatic_approval=False,
         )
@@ -1664,6 +1670,7 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
+            failed_checks=failed_checks,
             reasons=reasons,
             automatic_approval=(
                 status == "SUPPORTED"
@@ -1739,14 +1746,44 @@ def reconcile_decision(
                     "BUY MORE REQUIRES EXISTING HOLDING"
                 )
 
-                reasons.append(
-                    "BUY MORE is only valid when the asset is already held."
+                failed_checks.append(
+                    {
+                        "check_code":
+                            "BUY_MORE_REQUIRES_EXISTING_HOLDING",
+                        "reason":
+                            "BUY MORE REQUIRES EXISTING HOLDING",
+                        "actual_value":
+                            existing_holding,
+                        "threshold_value":
+                            True,
+                        "unit":
+                            "boolean",
+                        "source_layer":
+                            "reconciliation",
+                    }
                 )
 
             if evidence_score < BUY_MORE_MIN_EVIDENCE:
 
                 governance_flags.append(
                     "BUY MORE EVIDENCE BELOW THRESHOLD"
+                )
+
+                failed_checks.append(
+                    {
+                        "check_code":
+                            "BUY_MORE_EVIDENCE_BELOW_THRESHOLD",
+                        "reason":
+                            "BUY MORE EVIDENCE BELOW THRESHOLD",
+                        "actual_value":
+                            evidence_score,
+                        "threshold_value":
+                            BUY_MORE_MIN_EVIDENCE,
+                        "unit":
+                            "score",
+                        "source_layer":
+                            "reconciliation",
+                    }
                 )
 
             if (
@@ -1759,6 +1796,23 @@ def reconcile_decision(
                     "BUY MORE CONFIDENCE BELOW THRESHOLD"
                 )
 
+                failed_checks.append(
+                    {
+                        "check_code":
+                            "BUY_MORE_CONFIDENCE_BELOW_THRESHOLD",
+                        "reason":
+                            "BUY MORE CONFIDENCE BELOW THRESHOLD",
+                        "actual_value":
+                            deterministic_confidence,
+                        "threshold_value":
+                            BUY_MORE_MIN_CONFIDENCE,
+                        "unit":
+                            "score",
+                        "source_layer":
+                            "reconciliation",
+                    }
+                )
+
             if (
                 get_investment_score(decision)
                 <
@@ -1769,10 +1823,44 @@ def reconcile_decision(
                     "BUY MORE INVESTMENT SCORE BELOW THRESHOLD"
                 )
 
+                failed_checks.append(
+                    {
+                        "check_code":
+                            "BUY_MORE_INVESTMENT_SCORE_BELOW_THRESHOLD",
+                        "reason":
+                            "BUY MORE INVESTMENT SCORE BELOW THRESHOLD",
+                        "actual_value":
+                            get_investment_score(decision),
+                        "threshold_value":
+                            BUY_MORE_MIN_INVESTMENT_SCORE,
+                        "unit":
+                            "score",
+                        "source_layer":
+                            "reconciliation",
+                    }
+                )
+
             if get_signal(decision) not in BUY_MORE_SUPPORTING_SIGNALS:
 
                 governance_flags.append(
                     "BUY MORE SIGNAL NOT SUPPORTIVE"
+                )
+
+                failed_checks.append(
+                    {
+                        "check_code":
+                            "BUY_MORE_SIGNAL_NOT_SUPPORTIVE",
+                        "reason":
+                            "BUY MORE SIGNAL NOT SUPPORTIVE",
+                        "actual_value":
+                            get_signal(decision),
+                        "threshold_value":
+                            "BUY / STRONG BUY",
+                        "unit":
+                            "signal",
+                        "source_layer":
+                            "reconciliation",
+                    }
                 )
 
             if llm_review != "ACCEPT":
@@ -1781,10 +1869,44 @@ def reconcile_decision(
                     "BUY MORE LLM REVIEW NOT ACCEPTED"
                 )
 
+                failed_checks.append(
+                    {
+                        "check_code":
+                            "BUY_MORE_LLM_REVIEW_NOT_ACCEPTED",
+                        "reason":
+                            "BUY MORE LLM REVIEW NOT ACCEPTED",
+                        "actual_value":
+                            llm_review,
+                        "threshold_value":
+                            "ACCEPT",
+                        "unit":
+                            "review",
+                        "source_layer":
+                            "reconciliation",
+                    }
+                )
+
             if llm_confidence < BUY_MORE_MIN_LLM_CONFIDENCE:
 
                 governance_flags.append(
                     "BUY MORE LLM CONFIDENCE BELOW THRESHOLD"
+                )
+
+                failed_checks.append(
+                    {
+                        "check_code":
+                            "BUY_MORE_LLM_CONFIDENCE_BELOW_THRESHOLD",
+                        "reason":
+                            "BUY MORE LLM CONFIDENCE BELOW THRESHOLD",
+                        "actual_value":
+                            llm_confidence,
+                        "threshold_value":
+                            BUY_MORE_MIN_LLM_CONFIDENCE,
+                        "unit":
+                            "score",
+                        "source_layer":
+                            "reconciliation",
+                    }
                 )
 
             if review_indicates_material_contradiction(
@@ -1793,6 +1915,23 @@ def reconcile_decision(
 
                 governance_flags.append(
                     "BUY MORE MATERIAL CONTRADICTION"
+                )
+
+                failed_checks.append(
+                    {
+                        "check_code":
+                            "BUY_MORE_MATERIAL_CONTRADICTION",
+                        "reason":
+                            "BUY MORE MATERIAL CONTRADICTION",
+                        "actual_value":
+                            True,
+                        "threshold_value":
+                            False,
+                        "unit":
+                            "boolean",
+                        "source_layer":
+                            "reconciliation",
+                    }
                 )
 
             return _build_result(
@@ -1809,6 +1948,7 @@ def reconcile_decision(
                 existing_holding=existing_holding,
                 asset_type=asset_type,
                 governance_flags=governance_flags,
+                failed_checks=failed_checks,
                 reasons=reasons,
                 automatic_approval=False,
                 governance_reason_code="BUY_MORE_GOVERNANCE_THRESHOLD",
@@ -1845,6 +1985,7 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
+            failed_checks=failed_checks,
             reasons=reasons,
             automatic_approval=True,
             governance_reason_code="QUALIFIED_BUY_MORE",
@@ -1931,6 +2072,7 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
+            failed_checks=failed_checks,
             reasons=reasons,
             automatic_approval=True,
             governance_reason_code="JUSTIFIED_REDUCE",
@@ -1976,6 +2118,44 @@ def reconcile_decision(
         and
         not reduce_challenge_override
     ):
+
+        # Persist each underlying deterministic governance failure
+        # so the audit layer can report the actual value and threshold.
+        if evidence_score < MIN_EVIDENCE_SCORE:
+            failed_checks.append(
+                {
+                    "check_code": "WEAK_DETERMINISTIC_EVIDENCE",
+                    "reason": "Deterministic evidence is insufficient.",
+                    "actual_value": evidence_score,
+                    "threshold_value": MIN_EVIDENCE_SCORE,
+                    "unit": "score",
+                    "source_layer": "reconciliation",
+                }
+            )
+
+        if deterministic_confidence < MIN_DETERMINISTIC_CONFIDENCE:
+            failed_checks.append(
+                {
+                    "check_code": "WEAK_DETERMINISTIC_CONFIDENCE",
+                    "reason": "Deterministic confidence is below the minimum threshold.",
+                    "actual_value": deterministic_confidence,
+                    "threshold_value": MIN_DETERMINISTIC_CONFIDENCE,
+                    "unit": "score",
+                    "source_layer": "reconciliation",
+                }
+            )
+
+        if decision_support == "NOT SUPPORTED":
+            failed_checks.append(
+                {
+                    "check_code": "DETERMINISTIC_DECISION_NOT_SUPPORTED",
+                    "reason": "Deterministic decision is not supported.",
+                    "actual_value": decision_support,
+                    "threshold_value": "SUPPORTED",
+                    "unit": "decision support",
+                    "source_layer": "reconciliation",
+                }
+            )
 
         governance_flags.append(
             "WEAK DETERMINISTIC EVIDENCE"
@@ -2029,6 +2209,7 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
+            failed_checks=failed_checks,
             reasons=reasons,
             automatic_approval=False,
         )
@@ -2083,6 +2264,7 @@ def reconcile_decision(
                     existing_holding=existing_holding,
                     asset_type=asset_type,
                     governance_flags=governance_flags,
+                    failed_checks=failed_checks,
                     reasons=reasons,
                     automatic_approval=True,
                     governance_reason_code="REDUCE_CHALLENGE_EXCEPTION",
@@ -2115,6 +2297,7 @@ def reconcile_decision(
                 existing_holding=existing_holding,
                 asset_type=asset_type,
                 governance_flags=governance_flags,
+                failed_checks=failed_checks,
                 reasons=reasons,
                 automatic_approval=False,
             )
@@ -2161,6 +2344,7 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
+            failed_checks=failed_checks,
             reasons=reasons,
             automatic_approval=False,
         )
@@ -2197,6 +2381,7 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
+            failed_checks=failed_checks,
             reasons=reasons,
             automatic_approval=False,
         )
@@ -2235,6 +2420,7 @@ def reconcile_decision(
                 existing_holding=existing_holding,
                 asset_type=asset_type,
                 governance_flags=governance_flags,
+                failed_checks=failed_checks,
                 reasons=reasons,
                 automatic_approval=False,
             )
@@ -2271,6 +2457,7 @@ def reconcile_decision(
                 existing_holding=existing_holding,
                 asset_type=asset_type,
                 governance_flags=governance_flags,
+                failed_checks=failed_checks,
                 reasons=reasons,
                 automatic_approval=True,
                 governance_reason_code="BUY_NEW_IMMATURE_HISTORY",
@@ -2313,6 +2500,7 @@ def reconcile_decision(
                 existing_holding=existing_holding,
                 asset_type=asset_type,
                 governance_flags=governance_flags,
+                failed_checks=failed_checks,
                 reasons=reasons,
                 automatic_approval=False,
             )
@@ -2365,6 +2553,7 @@ def reconcile_decision(
                 existing_holding=existing_holding,
                 asset_type=asset_type,
                 governance_flags=governance_flags,
+                failed_checks=failed_checks,
                 reasons=reasons,
                 automatic_approval=False,
                 governance_reason_code=governance_reason_code,
@@ -2405,6 +2594,7 @@ def reconcile_decision(
                 existing_holding=existing_holding,
                 asset_type=asset_type,
                 governance_flags=governance_flags,
+                failed_checks=failed_checks,
                 reasons=reasons,
                 automatic_approval=True,
             )

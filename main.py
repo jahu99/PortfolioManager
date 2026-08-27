@@ -1518,6 +1518,18 @@ def main():
             type(final_portfolio_decisions)
         )
 
+        audit_run_id = None
+
+        if isinstance(
+            final_portfolio_decisions,
+            pd.DataFrame
+        ):
+            audit_run_id = (
+                final_portfolio_decisions.attrs.get(
+                    "audit_run_id"
+                )
+            )
+
     except Exception as e:
 
         print(

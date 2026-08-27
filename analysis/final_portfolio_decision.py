@@ -119,6 +119,15 @@ from data.database import (
     get_latest_recommendation_id,
 )
 
+from analysis.audit import (
+    get_connection,
+    start_audit_run,
+    record_decision_audit,
+    get_audit_run_counts,
+    complete_audit_run,
+    fail_audit_run,
+)
+
 
 # ============================================================
 # CONSTANTS
@@ -3485,6 +3494,28 @@ def generate_final_portfolio_decisions(
     results = []
 
     # --------------------------------------------------------
+    # Start one audit run for the complete production decision
+    # population.
+    #
+    # The audit layer is observational and must never alter
+    # the decision produced by the governed AI chain.
+    # --------------------------------------------------------
+
+    audit_run = start_audit_run(
+        environment="pre-production",
+        code_version="final_portfolio_decision",
+    )
+
+    audit_run_id = int(
+        audit_run["id"]
+    )
+
+    audit_conn = get_connection()
+
+    audited_decisions = 0
+    audited_changed_decisions = 0
+
+    # --------------------------------------------------------
     # Run the complete AI chain per candidate.
     # --------------------------------------------------------
 
@@ -3571,6 +3602,36 @@ def generate_final_portfolio_decisions(
                 base_row=base_row,
                 chain=chain,
             )
+
+            # ------------------------------------------------
+            # Record the exact governed decision chain.
+            #
+            # Audit capture is observational only. It does
+            # not modify result or influence the decision.
+            # ------------------------------------------------
+
+            try:
+                print(
+                    f"AUDIT CAPTURE: {ticker} | "
+                    f"Proposed={result.get('Proposed Action')} | "
+                    f"Final={result.get('Final Action')}"
+                )
+
+                record_decision_audit(
+                    conn=audit_conn,
+                    audit_run_id=audit_run_id,
+                    base_row=base_row,
+                    chain=chain,
+                    final_result=result,
+                )
+
+                audited_decisions += 1
+
+            except Exception as audit_exc:
+                print(
+                    f"WARNING: Audit capture failed for "
+                    f"{ticker}: {audit_exc}"
+                )
 
         except Exception as exc:
 
@@ -3914,6 +3975,47 @@ def generate_final_portfolio_decisions(
         "Final action counts:",
         final_counts,
     )
+
+    # --------------------------------------------------------
+    # Complete the audit run after the full decision population
+    # has been processed.
+    #
+    # record_decision_audit() uses the shared audit connection.
+    # Close it before complete_audit_run(), which opens its own
+    # connection, to avoid SQLite database-lock contention.
+    # --------------------------------------------------------
+
+    try:
+        audit_conn.close()
+    except Exception as audit_close_exc:
+        print(
+            f"WARNING: Audit connection close failed: "
+            f"{audit_close_exc}"
+        )
+
+    try:
+        audited_total_decisions, audited_changed_decisions = (
+            get_audit_run_counts(audit_run_id)
+        )
+
+        complete_audit_run(
+            audit_run_id=audit_run_id,
+            total_decisions=audited_total_decisions,
+            changed_decisions=audited_changed_decisions,
+        )
+    except Exception as audit_exc:
+        print(
+            f"WARNING: Audit run completion failed: {audit_exc}"
+        )
+
+    # --------------------------------------------------------
+    # Propagate the audit run ID to the report layer.
+    #
+    # This allows Excel reporting to retrieve the exact audit
+    # records belonging to this portfolio decision execution.
+    # --------------------------------------------------------
+
+    result_df.attrs["audit_run_id"] = audit_run_id
 
     return result_df
 
