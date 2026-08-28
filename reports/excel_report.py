@@ -46,6 +46,7 @@ FINAL_DECISION_COLUMNS = [
     "Reduction %",
     "Released Capital",
     "Buy Value",
+    "Ticker Horizon Learning Commentary",
 ]
 
 
@@ -1852,6 +1853,7 @@ def prepare_final_portfolio_decisions_report(
         "Reduction %": 0.0,
         "Released Capital": 0.0,
         "Buy Value": 0.0,
+        "Ticker Horizon Learning Commentary": "",
     }
 
     for column, default_value in required_defaults.items():

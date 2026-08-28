@@ -1640,6 +1640,136 @@ def calculate_confidence_performance(
 
 
 # ============================================================
+# TICKER + HORIZON PERFORMANCE
+# ============================================================
+
+def calculate_ticker_horizon_performance(
+    df,
+):
+    """
+    Calculate realised recommendation performance for each ticker
+    at each governed learning horizon.
+
+    This is the authoritative input for ticker-specific learning
+    commentary.
+
+    Horizons:
+        5D
+        10D
+        60D
+
+    A row is produced even when there are zero completed observations.
+    This is important because downstream reporting must be able to
+    distinguish:
+
+        no observations
+        insufficient observations
+        mature evidence
+
+    Learning remains informational. This function does not modify
+    Investment Score, confidence, evidence or portfolio actions.
+    """
+
+    required_columns = {
+        "ticker",
+        "days_after",
+        "directional_return",
+    }
+
+    columns = [
+        "Ticker",
+        "Horizon",
+        "Recommendations",
+        "Average Return %",
+        "Median Return %",
+        "Win Rate %",
+        "Reliability",
+    ]
+
+    if (
+        df is None
+        or df.empty
+        or not required_columns.issubset(df.columns)
+    ):
+        return pd.DataFrame(
+            columns=columns
+        )
+
+    temp = df.copy()
+
+    temp["ticker"] = (
+        temp["ticker"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    temp["days_after"] = safe_numeric(
+        temp["days_after"]
+    )
+
+    rows = []
+
+    for ticker in sorted(
+        temp["ticker"].dropna().unique()
+    ):
+        ticker_df = temp[
+            temp["ticker"] == ticker
+        ]
+
+        for horizon in LEARNING_HORIZONS:
+
+            group = ticker_df[
+                ticker_df["days_after"] == horizon
+            ]
+
+            returns = (
+                group["directional_return"]
+                .dropna()
+            )
+
+            count = len(returns)
+
+            rows.append(
+                {
+                    "Ticker":
+                        ticker,
+
+                    "Horizon":
+                        horizon,
+
+                    "Recommendations":
+                        count,
+
+                    "Average Return %":
+                        safe_mean(
+                            returns
+                        ),
+
+                    "Median Return %":
+                        safe_median(
+                            returns
+                        ),
+
+                    "Win Rate %":
+                        calculate_win_rate(
+                            returns
+                        ),
+
+                    "Reliability":
+                        reliability_label(
+                            count
+                        ),
+                }
+            )
+
+    return pd.DataFrame(
+        rows,
+        columns=columns,
+    )
+
+
+# ============================================================
 # SIGNAL + HORIZON
 # ============================================================
 
@@ -2695,6 +2825,8 @@ def calculate_recommendation_learning(
         )
     )
 
+    ticker_horizon_performance = calculate_ticker_horizon_performance(df)
+
     signal_performance = (
         calculate_signal_performance(
             df
@@ -2829,6 +2961,9 @@ def calculate_recommendation_learning(
 
         "Horizon Learning":
             horizon_learning,
+
+         "Ticker Horizon Performance": 
+            ticker_horizon_performance,
 
         "Signal Performance":
             signal_performance,

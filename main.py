@@ -1449,6 +1449,33 @@ def main():
         )
     )
 
+    learning_ticker_horizon_performance = (
+        recommendation_learning.get(
+            "Ticker Horizon Performance",
+            pd.DataFrame()
+        )
+    )
+
+    print(
+        "\nTICKER HORIZON LEARNING:",
+        learning_ticker_horizon_performance.shape
+    )
+
+    if not learning_ticker_horizon_performance.empty:
+        print(
+            "TICKER HORIZON COLUMNS:",
+            learning_ticker_horizon_performance.columns.tolist()
+        )
+        print(
+            learning_ticker_horizon_performance.head(10).to_string(
+                index=False
+            )
+        )
+    else:
+        print(
+            "TICKER HORIZON LEARNING IS EMPTY"
+        )
+
     # ---------------------------------
     # Recommendation Intelligence
     # ---------------------------------
@@ -1509,6 +1536,9 @@ def main():
                 capital_allocation=capital_allocation,
                 recommendation_intelligence=(
                     recommendation_intelligence
+                ),
+                learning_ticker_horizon_performance=(
+                    learning_ticker_horizon_performance
                 )
             )
         )

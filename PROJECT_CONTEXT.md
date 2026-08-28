@@ -1,6 +1,6 @@
-# Stock Momentum Agent — Project Context
+**# Stock Momentum Agent — Project Context**
 
-## 1. Purpose
+**## 1. Purpose**
 
 The Stock Momentum Agent is a Python-based portfolio analysis and decision system.
 
@@ -18,7 +18,7 @@ The system is intended primarily for **long-term portfolio management**, not sho
 
 ---
 
-## 2. Core Portfolio Philosophy
+**## 2. Core Portfolio Philosophy**
 
 These principles are fundamental and should not be changed casually:
 
@@ -34,29 +34,47 @@ These principles are fundamental and should not be changed casually:
 
 ---
 
-## 3. High-Level Production Pipeline
+**## 3. High-Level Production Pipeline**
 
 The intended production flow is:
 
 ```text
 Market Universe
+
     ↓
+
 Universe Filtering
+
     ↓
+
 Market Scan
+
     ↓
+
 Stock / ETF Analysis
+
     ↓
+
 Portfolio Analysis
+
     ↓
+
 Recommendation / Investment Scoring
+
     ↓
+
 Portfolio Decision Engine
+
     ↓
+
 Final Portfolio Decision
+
     ↓
+
 Capital Allocation
+
     ↓
+
 Portfolio / Excel Reporting
 ```
 
@@ -66,9 +84,9 @@ Capital allocation must not silently erase an upstream REDUCE or SELL decision.
 
 ---
 
-## 4. Stocks vs ETFs vs Cash
+**## 4. Stocks vs ETFs vs Cash**
 
-### Stocks
+**### Stocks**
 
 Stocks use the stock analytical model, including:
 
@@ -79,7 +97,7 @@ Stocks use the stock analytical model, including:
 * Investment Score;
 * stock recommendation/signal.
 
-### ETFs
+**### ETFs**
 
 ETFs are treated separately from stocks.
 
@@ -96,13 +114,13 @@ Examples of ETFs encountered in the portfolio include:
 
 Ticker classification must therefore be reliable, particularly for European UCITS ETFs.
 
-### Cash
+**### Cash**
 
 Cash is not an investment candidate and must never receive BUY / BUY MORE / SELL investment actions.
 
 ---
 
-## 5. Portfolio Ownership
+**## 5. Portfolio Ownership**
 
 Actual ownership is determined from:
 
@@ -123,7 +141,7 @@ The capital allocator should not infer ownership from opportunity data alone.
 
 ---
 
-## 6. Final Portfolio Decision Layer
+**## 6. Final Portfolio Decision Layer**
 
 The governed final portfolio decision layer combines:
 
@@ -141,14 +159,17 @@ The governed final portfolio decision layer combines:
 
 The final decision should be explainable and should preserve valid upstream decisions.
 
-### Critical handoff rule
+**### Critical handoff rule**
 
 An explicit upstream:
 
 ```text
 REDUCE 25%
+
 REDUCE 50%
+
 REDUCE 75%
+
 SELL
 ```
 
@@ -160,20 +181,23 @@ The decision pipeline must reconcile these actions deliberately.
 
 ---
 
-## 7. Reduction / Sell Rules
+**## 7. Reduction / Sell Rules**
 
 The reduction framework is:
 
 ```text
 REDUCE 25% → release 25% of position
+
 REDUCE 50% → release 50% of position
+
 REDUCE 75% → release 75% of position
+
 SELL       → release 100% of position
 ```
 
 The allocator must never invent a reduction percentage for a bare REDUCE action.
 
-### Minimum meaningful reduction rule
+**### Minimum meaningful reduction rule**
 
 A reduction that would release less than the configured minimum meaningful reduction value is not useful as a partial trade.
 
@@ -181,11 +205,17 @@ Therefore:
 
 ```text
 REDUCE X%
+
     ↓
+
 released value below minimum meaningful reduction value?
+
     ↓
+
 YES
+
     ↓
+
 SELL / 100% reduction
 ```
 
@@ -193,7 +223,7 @@ It must **not** become HOLD.
 
 This rule was identified and regression-tested using the real `CA.PA` position.
 
-### CA.PA regression
+**### CA.PA regression**
 
 Carrefour (`CA.PA`) is an existing stock holding.
 
@@ -201,11 +231,17 @@ The required behaviour is:
 
 ```text
 CA.PA
+
 Investment Score = 18
+
 Signal = SELL
+
 Proposed Action = SELL
+
 Final Decision = SELL
+
 Reduction = 100%
+
 Released Capital = £3.47
 ```
 
@@ -213,7 +249,7 @@ The previous defect caused an explicit reduction/sell decision to become HOLD. T
 
 ---
 
-## 8. Capital Allocation
+**## 8. Capital Allocation**
 
 The production capital allocator is:
 
@@ -233,6 +269,7 @@ Priority is based on allocation opportunity/conviction:
 
 ```text
 Stock → Investment Score
+
 ETF   → ETF Score
 ```
 
@@ -250,7 +287,7 @@ The allocator should:
 
 ---
 
-## 9. Evidence and AI Governance
+**## 9. Evidence and AI Governance**
 
 AI is an advisory/governance layer, not a replacement for the deterministic portfolio rules.
 
@@ -268,7 +305,7 @@ Where an AI review disagrees with the proposed action, the disagreement should b
 
 ---
 
-## 10. Recommendation Reliability
+**## 10. Recommendation Reliability**
 
 A longer-term objective is to calibrate recommendation reliability using historical outcomes.
 
@@ -284,7 +321,7 @@ Calibration is evidence for governance, not an uncontrolled feedback loop.
 
 ---
 
-## 11. Portfolio Risk and Allocation
+**## 11. Portfolio Risk and Allocation**
 
 The portfolio decision layer should ultimately consider:
 
@@ -305,7 +342,7 @@ The objective is portfolio-aware capital management rather than isolated stock r
 
 ---
 
-## 12. Coding / Engineering Principles
+**## 12. Coding / Engineering Principles**
 
 When changing the project:
 
@@ -322,7 +359,7 @@ Tests should validate both individual functions and important production-path be
 
 ---
 
-## 13. Current Stable Release
+**## 13. Current Stable Release**
 
 Current Git rollback point:
 
@@ -342,25 +379,39 @@ The ChatGPT Project is a development/context workspace and should not be treated
 
 ---
 
-## 14. Current Key Production Modules
+**## 14. Current Key Production Modules**
 
 Important modules include:
 
 ```text
 analysis/scorer.py
+
 analysis/quality.py
+
 analysis/growth.py
+
 analysis/investment_score.py
+
 analysis/recommendations.py
+
 analysis/portfolio_analysis.py
+
 analysis/portfolio_enrichment.py
+
 analysis/portfolio_decision_engine.py
+
 analysis/final_portfolio_decision.py
+
 analysis/capital_allocator.py
+
 analysis/portfolio_manager_rules.py
+
 agents/ai_decision_reconciler.py
+
 agents/ai_portfolio_reviewer.py
+
 portfolio/portfolio.py
+
 tests/
 ```
 
@@ -368,9 +419,9 @@ The actual Git repository remains authoritative if this context document differs
 
 ---
 
-## 15. Current Development Priorities
+**## 15. Current Development Priorities**
 
-### Priority 1 — Portfolio-aware capital allocation and position sizing
+**### Priority 1 — Portfolio-aware capital allocation and position sizing**
 
 Continue improving allocation using:
 
@@ -384,7 +435,7 @@ Continue improving allocation using:
 * available capital;
 * released capital.
 
-### Priority 2 — Portfolio risk and recommendation reliability
+**### Priority 2 — Portfolio risk and recommendation reliability**
 
 Continue developing:
 
@@ -396,7 +447,7 @@ Continue developing:
 
 Do not automatically rewrite the underlying scoring model as part of calibration.
 
-### Priority 3 — ETF decision wiring
+**### Priority 3 — ETF decision wiring**
 
 Complete and validate ETF-specific decision handling so ETFs are consistently:
 
@@ -407,19 +458,27 @@ Complete and validate ETF-specific decision handling so ETFs are consistently:
 
 ---
 
-## 16. Important Working Rule for Future Changes
+**## 16. Important Working Rule for Future Changes**
 
 When debugging a portfolio decision defect, trace the complete handoff:
 
 ```text
 Recommendation
+
     ↓
+
 Portfolio Decision
+
     ↓
+
 Final Portfolio Decision
+
     ↓
+
 Capital Allocation
+
     ↓
+
 Report
 ```
 
@@ -437,7 +496,7 @@ When fixing a defect, first reproduce it with a focused regression harness, then
 
 ---
 
-## 17. Stable Baseline Principle
+**## 17. Stable Baseline Principle**
 
 Before significant architectural changes:
 
@@ -450,7 +509,7 @@ Use Git tags as rollback points rather than relying on local `.bak` files or bac
 
 ---
 
-## 18. Current State / Known Issues
+**## 18. Current State / Known Issues**
 
 Current implementation status:
 
@@ -471,9 +530,9 @@ Do not assume an item is fixed merely because the code contains an apparent impl
 
 ---
 
-# 19. PROTECTED COMPLETED EPIC — GOVERNANCE AUDIT
+**# 19. PROTECTED COMPLETED EPIC — GOVERNANCE AUDIT**
 
-## 19.1 Protection rule
+**## 19.1 Protection rule**
 
 **The governance audit implementation is a completed, working baseline and must be treated as protected functionality.**
 
@@ -489,11 +548,11 @@ When editing files for any future Stock Momentum Agent epic:
 * Do not replace persisted audit data with transient in-memory structures.
 * Do not delete, reset, truncate, or overwrite historical audit records as part of normal development.
 * Do not alter the audit implementation simply because another epic exposes a more convenient way to obtain or display the same information.
-* Treat the existing governance audit harness and its passing behaviour as regression requirements for future changes.
+* Treat the existing audit harness and its passing behaviour as regression requirements for future changes.
 
 If a future epic genuinely requires an audit change, that change must be explicitly identified as an **audit-impacting change** before implementation. It must be isolated from unrelated changes and the existing audit behaviour must be regression-tested afterwards.
 
-### Golden rule
+**### Golden rule**
 
 > **If a future change does not require changing audit, do not change audit.**
 
@@ -501,7 +560,7 @@ If a future change appears to require modifying audit, first determine whether t
 
 ---
 
-## 19.2 Audit architectural purpose
+**## 19.2 Audit architectural purpose**
 
 The audit system provides a persistent, inspectable and execution-specific record of governed portfolio decisions.
 
@@ -524,7 +583,7 @@ The audit trail is therefore part of the **decision-control architecture**, not 
 
 ---
 
-## 19.3 Authoritative source of truth
+**## 19.3 Authoritative source of truth**
 
 SQLite is the **authoritative source of truth for decision audit data**.
 
@@ -532,13 +591,21 @@ The persisted relationship is:
 
 ```text
 audit_runs
+
     │
+
     │ audit_run_id
+
     ▼
+
 audit_decisions
+
     │
+
     │ audit_decision_id
+
     ▼
+
 audit_reasons
 ```
 
@@ -550,72 +617,111 @@ New executions create new audit runs rather than overwriting previous runs.
 
 ---
 
-## 19.4 Audit tables
+**## 19.4 Audit tables**
 
-### `audit_runs`
+**### `audit_runs`**
 
 Identifies a specific execution:
 
 ```text
 id
+
 run_id
+
 run_date
+
 environment
+
 code_version
+
 status
+
 total_decisions
+
 changed_decisions
+
 created_at
 ```
 
 `audit_run_id` is the database primary identifier used to associate all decisions belonging to that execution.
 
-### `audit_decisions`
+**### `audit_decisions`**
 
 Stores the decision-level audit record:
 
 ```text
 id
+
 audit_run_id
+
 ticker
+
 asset_type
+
 original_action
+
 proposed_action
+
 reconciled_action
+
 final_action
+
 action_changed
+
 original_signal
+
 investment_score
+
 technical_score
+
 quality_score
+
 growth_score
+
 confidence_score
+
 evidence_score
+
 original_allocation_pct
+
 final_allocation_pct
+
 reconciliation_status
+
 decision_stage
+
 source_module
+
 created_at
 ```
 
 The record must retain the progression through the decision pipeline rather than only storing the final answer.
 
-### `audit_reasons`
+**### `audit_reasons`**
 
 Stores the detailed persisted reasons associated with an audit decision:
 
 ```text
 id
+
 audit_decision_id
+
 reason_code
+
 reason_category
+
 reason_description
+
 actual_value
+
 threshold_value
+
 unit
+
 severity
+
 source_layer
+
 created_at
 ```
 
@@ -625,21 +731,27 @@ For example:
 
 ```text
 reason_code:
+
 BUY_MORE_DETERMINISTIC_CONFIDENCE_LOW
 
 reason_description:
+
 Confidence score of 62.0 below threshold of 70.0.
 
 actual_value:
+
 62.0
 
 threshold_value:
+
 70.0
 
 unit:
+
 percent
 
 source_layer:
+
 reconciliation
 ```
 
@@ -647,11 +759,11 @@ This makes the audit explainable and allows the database to answer exactly which
 
 ---
 
-## 19.5 Audit production interfaces
+**## 19.5 Audit production interfaces**
 
 The audit implementation exposes a small set of important responsibilities/interfaces.
 
-### Database connection
+**### Database connection**
 
 The audit module owns the database connection mechanism:
 
@@ -661,7 +773,7 @@ get_connection()
 
 It opens the configured portfolio manager SQLite database.
 
-### Audit run lifecycle
+**### Audit run lifecycle**
 
 ```text
 start_audit_run(
@@ -690,7 +802,7 @@ fail_audit_run(
 
 Marks an audit run as failed.
 
-### Decision persistence
+**### Decision persistence**
 
 The governed decision path records an individual decision through the production audit writer:
 
@@ -708,7 +820,7 @@ This is the important production persistence boundary.
 
 It persists the decision-level information together with the associated audit reasons.
 
-### Compatibility API
+**### Compatibility API**
 
 The audit module also has a compatibility interface for simple decision dictionaries:
 
@@ -721,7 +833,7 @@ record_audit_decision(
 
 This wrapper must continue to use the same underlying audit-writing implementation rather than creating a second, divergent audit persistence path.
 
-### Batch audit
+**### Batch audit**
 
 ```text
 record_audit_decisions(
@@ -732,7 +844,7 @@ record_audit_decisions(
 
 Records a collection of decisions and calculates the run-level decision/change counts.
 
-### Complete run
+**### Complete run**
 
 ```text
 audit_decision_run(
@@ -746,11 +858,17 @@ Provides the complete audit lifecycle:
 
 ```text
 start run
+
     ↓
+
 record decisions
+
     ↓
+
 record reasons
+
     ↓
+
 complete run
 ```
 
@@ -758,7 +876,7 @@ If an audit error occurs, the run is marked failed and the exception is re-raise
 
 ---
 
-## 19.6 Reason normalisation contract
+**## 19.6 Reason normalisation contract**
 
 Reasons can be supplied as structured dictionaries or simple strings.
 
@@ -768,12 +886,19 @@ Structured reasons may contain:
 
 ```text
 reason_code
+
 reason_category
+
 reason_description
+
 actual_value
+
 threshold_value
+
 unit
+
 severity
+
 source_layer
 ```
 
@@ -785,6 +910,7 @@ In particular, a governance failure such as:
 
 ```text
 Investment Score = 38
+
 minimum required = 40
 ```
 
@@ -792,7 +918,9 @@ should remain capable of being persisted as:
 
 ```text
 actual_value = 38
+
 threshold_value = 40
+
 unit = score
 ```
 
@@ -806,7 +934,7 @@ The descriptive text is useful for humans; the actual/threshold values are requi
 
 ---
 
-## 19.7 Reconciliation-to-audit boundary
+**## 19.7 Reconciliation-to-audit boundary**
 
 The governance reconciler determines the governed outcome.
 
@@ -816,13 +944,21 @@ Conceptually:
 
 ```text
 Deterministic decision
+
         ↓
+
 AI review
+
         ↓
+
 Governance reconciliation
+
         ↓
+
 Final governed action
+
         ↓
+
 Audit persistence
 ```
 
@@ -832,11 +968,17 @@ The persisted audit record should make visible:
 
 ```text
 original action
+
     ↓
+
 proposed action
+
     ↓
+
 reconciled action
+
     ↓
+
 final action
 ```
 
@@ -844,7 +986,7 @@ including whether the action changed.
 
 ---
 
-## 19.8 Governance failure audit contract
+**## 19.8 Governance failure audit contract**
 
 Whenever a governance requirement causes an action to be blocked or changed, the audit should capture:
 
@@ -860,10 +1002,15 @@ For example, a BUY MORE governance override should be capable of producing recor
 
 ```text
 GOVERNANCE_FLAG_BUY_MORE_GOVERNANCE_REQUIREMENTS_NOT_MET
+
 GOVERNANCE_FLAG_DETERMINISTIC_CONFIDENCE_TOO_LOW
+
 GOVERNANCE_REASON
+
 GOVERNANCE_REASON
+
 BUY_MORE_DETERMINISTIC_CONFIDENCE_LOW
+
 ACTION_CHANGED
 ```
 
@@ -871,15 +1018,18 @@ with the dedicated failed-check reason carrying the numerical evidence:
 
 ```text
 actual_value = 62.0
+
 threshold_value = 70.0
+
 unit = percent
+
 ```
 
 The same principle applies to Investment Score, allocation limits, evidence scores, confidence, and other governed thresholds.
 
 ---
 
-## 19.9 Governance audit regression harness
+**## 19.9 Governance audit regression harness**
 
 The production audit path is validated by:
 
@@ -931,7 +1081,7 @@ The harness should be treated as a protected regression test for the audit imple
 
 ---
 
-## 19.10 Audit data is append-oriented
+**## 19.10 Audit data is append-oriented**
 
 Each execution should create a new audit run.
 
@@ -939,19 +1089,27 @@ Conceptually:
 
 ```text
 Run 19
+
     ├── decisions
+
     └── reasons
 
 Run 21
+
     ├── decisions
+
     └── reasons
 
 Run 22
+
     ├── decisions
+
     └── reasons
 
 Next production run
+
     ├── decisions
+
     └── reasons
 ```
 
@@ -963,7 +1121,7 @@ Development/test harnesses may deliberately create additional test records, but 
 
 ---
 
-## 19.11 Final Portfolio Decisions reporting interface
+**## 19.11 Final Portfolio Decisions reporting interface**
 
 The **Final Portfolio Decisions** Excel worksheet should obtain its `Audit Reason` from persisted SQLite audit records.
 
@@ -973,19 +1131,33 @@ The intended reporting flow is:
 
 ```text
 Report execution
+
       ↓
+
 explicit audit_run_id
+
       ↓
+
 SQLite audit_runs
+
       ↓
+
 audit_decisions
+
       ↓
+
 audit_reasons
+
       ↓
+
 reporting query / aggregation
+
       ↓
+
 Final Portfolio Decisions
+
       ↓
+
 Excel "Audit Reason" column
 ```
 
@@ -997,7 +1169,7 @@ A small dedicated database read function should retrieve the persisted audit rea
 
 The reporting preparation function can then match those persisted reasons to the final portfolio decision by ticker/audit decision.
 
-### Executive presentation of reasons
+**### Executive presentation of reasons**
 
 The database remains the detailed audit source.
 
@@ -1012,91 +1184,116 @@ The distinction is:
 
 ```text
 SQLite audit_reasons
+
     = detailed, authoritative audit trail
 
 Excel Audit Reason
+
     = executive reporting representation of that audit trail
 ```
 
 ---
 
-## 19.12 Rebuild requirements
+**## 19.12 Rebuild requirements**
 
 If the audit implementation ever has to be rebuilt, the replacement must preserve the following externally observable contract:
 
-### Persistence
+**### Persistence**
 
 * SQLite remains the authoritative audit store.
 * Audit runs remain execution-specific.
 * Historical runs remain inspectable.
 * New runs do not overwrite prior runs.
 
-### Relationships
+**### Relationships**
 
 ```text
 audit_runs.id
+
     ↓
+
 audit_decisions.audit_run_id
 
 audit_decisions.id
+
     ↓
+
 audit_reasons.audit_decision_id
 ```
 
-### Decision traceability
+**### Decision traceability**
 
 Each audited decision must retain:
 
 ```text
 original_action
+
 proposed_action
+
 reconciled_action
+
 final_action
+
 action_changed
 ```
 
 plus the relevant scores/evidence fields.
 
-### Reason traceability
+**### Reason traceability**
 
 Each material governance reason must retain:
 
 ```text
 reason_code
+
 reason_category
+
 reason_description
+
 actual_value
+
 threshold_value
+
 unit
+
 severity
+
 source_layer
 ```
 
-### Numerical governance evidence
+**### Numerical governance evidence**
 
 Where a rule fails against a threshold, the actual and threshold values must be persisted.
 
 The replacement must not reduce this to generic prose.
 
-### Production interfaces
+**### Production interfaces**
 
 The replacement must provide equivalent responsibilities for:
 
 ```text
 get_connection()
+
 start_audit_run()
+
 complete_audit_run()
+
 fail_audit_run()
+
 record_decision_audit()
+
 record_audit_decision()
+
 record_audit_decisions()
+
 audit_decision_run()
+
 normalise_reason()
 ```
 
 The exact internal implementation may change only if the externally observable behaviour and data contract remain intact.
 
-### Reporting
+**### Reporting**
 
 The Final Portfolio Decisions report must continue to use:
 
@@ -1108,13 +1305,13 @@ to retrieve persisted audit reasons.
 
 It must not rely on transient audit structures remaining in memory.
 
-### Regression
+**### Regression**
 
 The governance audit harness must continue to pass, including verification of both decision records and reason records.
 
 ---
 
-## 19.13 Rules for future epic development
+**## 19.13 Rules for future epic development**
 
 Before editing an existing file for a new epic, determine whether that file is part of the protected audit path.
 
@@ -1122,8 +1319,11 @@ Audit-sensitive components currently include, at minimum:
 
 ```text
 analysis/audit.py
+
 agents/ai_decision_reconciler.py
+
 tests/test_governance_audit_harness.py
+
 data/portfolio_manager.db
 ```
 
@@ -1143,11 +1343,17 @@ For an unrelated epic, the preferred approach is:
 
 ```text
 NEW EPIC
+
    ↓
+
 change only required non-audit components
+
    ↓
+
 leave audit implementation untouched
+
    ↓
+
 verify existing audit regression harness
 ```
 
@@ -1155,7 +1361,7 @@ The burden of proof is on a proposed change to demonstrate why the protected aud
 
 ---
 
-## 19.14 Current audit baseline
+**## 19.14 Current audit baseline**
 
 The governance audit implementation has been exercised successfully through the production audit persistence path.
 
@@ -1163,8 +1369,11 @@ The latest known successful governance audit harness run demonstrated:
 
 ```text
 Audit run ID: 22
+
 Decision records: 7
+
 Reason records: 33
+
 GOVERNANCE AUDIT HARNESS PASSED
 ```
 
@@ -1172,9 +1381,13 @@ The test also verified that a BUY MORE deterministic-confidence failure can now 
 
 ```text
 BUY_MORE_DETERMINISTIC_CONFIDENCE_LOW
+
 actual_value = 62.0
+
 threshold_value = 70.0
+
 unit = percent
+
 source_layer = reconciliation
 ```
 
@@ -1184,7 +1397,7 @@ Future development should preserve this level of audit detail.
 
 ---
 
-## 20. Architectural Principle
+**## 20. Architectural Principle**
 
 Avoid passing large audit structures through memory merely because they are convenient for reporting.
 
@@ -1202,8 +1415,321 @@ The audit system is therefore both:
 
 ```text
 a governance control
+
 +
+
 a persistent historical record
 ```
 
 and should be protected accordingly.
+
+---
+
+**## 20.1 Known-Good Rollback Baseline**
+
+The governance audit solution has a formally established, known-good Git rollback baseline:
+
+* **Baseline definition:** Working audit solution baseline
+* **Git commit:** `6bf5aca`
+* **Git tag:** `audit-baseline-working-2026-08-27`
+* **Established:** 27 August 2026
+
+This tag is the authoritative rollback point for the completed governance audit solution. It was created only after the audit implementation, production wiring, SQLite persistence, governance audit harness, and associated project context were staged together as the baseline.
+
+The baseline explicitly includes these nine tracked files:
+
+```text
+PROJECT_CONTEXT.md
+
+agents/ai_decision_reconciler.py
+
+analysis/audit.py
+
+analysis/final_portfolio_decision.py
+
+data/database.py
+
+data/portfolio_manager.db
+
+main.py
+
+tests/test_audit.py
+
+tests/test_governance_audit_harness.py
+```
+
+`analysis/audit.py` has been explicitly verified to exist in the tagged commit.
+
+The baseline was validated by the governance audit harness before tagging. The harness completed successfully with seven audit decisions and 33 persisted audit reason records for the validation run.
+
+**### Rollback rule**
+
+If a future epic damages, removes, bypasses, overwrites, or materially changes the governance audit implementation or its production wiring, the first rollback reference is:
+
+```text
+audit-baseline-working-2026-08-27
+```
+
+The commit hash `6bf5aca` is retained as the immutable commit-level reference.
+
+Future epic work must **not** assume that the current working tree represents the audit baseline. The tagged commit is the definitive known-good state. Any intentional audit-impacting change must create a new explicitly validated baseline rather than silently redefining this one.
+
+---
+
+**# 21. PROTECTED REQUIREMENT — END-TO-END RECOMMENDATION LEARNING**
+
+The recommendation-learning epic is intentionally designed as a **reporting/intelligence layer**, not as another input into deterministic final-action scoring.
+
+**### 21.1 Core design decision**
+
+Historical 5D / 10D / 60D recommendation outcomes must be surfaced to the user as **learning information by ticker**.
+
+They must **not**, by default:
+
+* alter Investment Score;
+* alter deterministic confidence;
+* alter Evidence Score;
+* alter the deterministic proposed action;
+* alter governance thresholds;
+* alter AI reconciliation;
+* alter the final BUY / BUY MORE / HOLD / REDUCE / SELL action.
+
+The purpose is to provide transparent evidence that the user can interpret, rather than creating a complex feedback loop inside the decision engine.
+
+Any future proposal to wire learning directly into final-action scoring must be treated as an explicit architectural change and must not be introduced implicitly as part of another epic.
+
+**### Golden rule**
+
+> **Learning informs the user; it does not silently decide the action.**
+
+---
+
+**### 21.2 Horizon hierarchy**
+
+Learning horizons have a maturity hierarchy:
+
+```text
+60D
+ ↓
+10D
+ ↓
+5D
+```
+
+The Final Portfolio Decision reporting layer should use the **longest mature horizon available** for each ticker.
+
+A horizon is mature only when it has at least the configured minimum number of observations.
+
+Therefore:
+
+```text
+60D mature
+    → report 60D learning
+
+otherwise
+
+10D mature
+    → report 10D learning
+
+otherwise
+
+5D mature
+    → report 5D learning
+
+otherwise
+
+5D insufficient data
+```
+
+The hierarchy is per ticker. One ticker may have mature 60D learning while another has only mature 10D or 5D learning.
+
+**### 21.3 Implicit horizon interpretation**
+
+The report does not need to state that a longer horizon is immature when a shorter mature horizon is being reported.
+
+For example, if the report says:
+
+```text
+10D: Supports initial recommendation — average outcome +1.1 (28 observations)
+```
+
+it is implicit that 60D does not currently meet the maturity requirement.
+
+Where useful, the report may additionally show the longer-horizon observation count:
+
+```text
+10D: Supports initial recommendation — average outcome +1.1 (28 observations); 60D: 12 observations
+```
+
+This provides visibility into how close the longer horizon is to becoming mature without cluttering the commentary.
+
+---
+
+**### 21.4 Insufficient-data representation**
+
+If no horizon is mature, the terminal reporting state is the 5D result:
+
+```text
+5D: Insufficient data — 15 observations (20 required)
+```
+
+There is **no requirement for a generic "No mature learning evidence available" message**.
+
+5D is the shortest learning horizon and therefore the terminal state of the hierarchy.
+
+The observation count and configured maturity requirement should be explicit whenever the selected horizon is immature.
+
+---
+
+**### 21.5 Mature learning commentary**
+
+When a horizon is mature, the learning commentary should communicate the historical relationship between the original recommendation and subsequent outcome.
+
+Examples:
+
+```text
+60D: Supports initial BUY MORE — average outcome +6.4 (42 observations)
+```
+
+```text
+10D: Supports initial HOLD — average outcome +1.1 (28 observations); 60D: 12 observations
+```
+
+```text
+5D: Supports initial BUY — average outcome +2.0 (31 observations); 10D: 14 observations; 60D: 6 observations
+```
+
+A mature commentary may also indicate contradiction where the historical outcome does not support the original recommendation, for example:
+
+```text
+10D: Contradicts initial SELL — average outcome -5.0 (24 observations)
+```
+
+The exact wording can evolve, but the output should remain:
+
+* ticker-specific;
+* horizon-specific;
+* based on persisted historical outcomes;
+* transparent about observation count;
+* clear about whether the historical evidence supports or contradicts the initial recommendation.
+
+---
+
+**### 21.6 Relationship to existing recommendation learning**
+
+The learning layer should use the existing historical outcome/recommendation data rather than creating a parallel learning database or feedback mechanism.
+
+The design should favour:
+
+```text
+Historical recommendation outcomes
+        ↓
+5D / 10D / 60D aggregation
+        ↓
+maturity assessment by ticker
+        ↓
+best mature horizon
+        ↓
+human-readable learning commentary
+        ↓
+Final Portfolio Decisions report
+```
+
+Learning calculations should be deterministic, reproducible and inspectable.
+
+---
+
+**### 21.7 Final Portfolio Decision reporting interface**
+
+The intended output is a field/column in the **Final Portfolio Decisions** worksheet containing learning commentary by ticker.
+
+The learning commentary should be produced independently of the final action decision itself.
+
+Conceptually:
+
+```text
+Final Portfolio Decision
+        │
+        ├── Final Action
+        │
+        ├── Governance / Audit information
+        │
+        └── Learning Commentary
+                ↑
+                │
+        Historical Outcomes
+        ├── 5D
+        ├── 10D
+        └── 60D
+```
+
+The learning field is informational.
+
+It should not require the final decision engine to consume a large nested learning object simply to display the information.
+
+Where persisted historical data is available, the reporting layer should retrieve and aggregate it using a small, explicit read interface.
+
+---
+
+**### 21.8 Protection against future epic drift**
+
+This learning design is also a protected architectural requirement.
+
+When implementing subsequent epics:
+
+* do not silently wire 5D / 10D / 60D outcomes into final action scoring;
+* do not make historical learning a hidden multiplier on Investment Score;
+* do not make learning a hidden component of deterministic confidence;
+* do not allow AI reconciliation to reinterpret learning as an automatic action override;
+* do not introduce a complex cross-horizon scoring model merely to expose learning in Excel;
+* keep the maturity hierarchy explicit and deterministic;
+* keep the longest-mature-horizon rule;
+* keep insufficient 5D data as the terminal state;
+* preserve observation counts so the user can judge the strength of the evidence.
+
+If a future epic proposes changing this architecture, that must be explicitly identified as a **learning-architecture change** before implementation.
+
+---
+
+**### 21.9 Rebuild contract**
+
+If the learning-reporting implementation ever has to be rebuilt, it must preserve this externally observable behaviour:
+
+1. Learning is calculated from historical recommendation outcomes.
+2. Learning is reported by ticker.
+3. 60D supersedes 10D when 60D is mature.
+4. 10D supersedes 5D when 10D is mature and 60D is not.
+5. 5D is used when it is the longest mature horizon.
+6. If 5D is not mature, report explicit 5D insufficient-data information.
+7. Observation counts remain visible.
+8. Mature commentary can identify whether historical outcomes support or contradict the initial recommendation.
+9. Learning remains informational and does not silently alter the final action.
+10. The implementation should remain deterministic and independently testable.
+
+This contract is deliberately simpler than feeding learning directly into final decision scoring and is intended to make the system easier to understand, debug and govern.
+
+---
+
+**### 21.10 Recommended regression scenarios**
+
+The learning reporting implementation should eventually have focused tests for at least:
+
+```text
+60D mature
+    → 60D commentary selected
+
+60D immature + 10D mature
+    → 10D commentary selected
+    → 60D observation count available
+
+60D immature + 10D immature + 5D mature
+    → 5D commentary selected
+    → 10D / 60D counts available
+
+5D immature
+    → "5D: Insufficient data ..."
+```
+
+The tests should also verify that learning commentary does **not** change the final action.
+
+This separation is intentional: the learning tests validate the intelligence/reporting layer while the existing governance tests continue to protect the decision-control layer.
