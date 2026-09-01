@@ -1,86 +1,57 @@
 
 """
 AI Decision Reconciler
+======================
 
 Purpose
 -------
-Reconcile the deterministic portfolio decision with the independent
-AI Portfolio Reviewer assessment.
+Apply deterministic governance to a portfolio decision while retaining
+the independent LLM review as advisory/audit information only.
 
-This module is a governance / reconciliation layer. It does not
-create investment decisions independently.
+IMPORTANT ARCHITECTURAL RULE
+----------------------------
+The deterministic decision and deterministic governance rules are
+authoritative.
 
-Architecture
-------------
-    Analytical Engines
-            |
-            v
-    Rules-Based Proposal
-            |
-            v
-    AI Decision Context
-            |
-            v
-    AI Decision Scoring
-            |
-            v
-    AI Portfolio Reviewer
-            |
-            v
-    AI Decision Reconciler
-            |
-            v
-    Final Portfolio Decision
+The LLM review is NOT authoritative.
 
-Important
----------
-The deterministic decision remains authoritative.
+Therefore:
 
-The LLM reviewer can:
-    - support the deterministic proposal
-    - challenge the proposal
-    - identify evidence gaps
-    - identify contradictory evidence
+    LLM ACCEPT      -> advisory only
+    LLM CHALLENGE   -> advisory only
+    LLM REJECT      -> advisory only
+    LLM unavailable -> advisory information only
+    LLM confidence  -> advisory information only
 
-The LLM cannot silently override the deterministic decision.
+None of the above may change:
+
+    - Reconciled Action
+    - Automatic Approval
+    - deterministic governance outcome
+
+The purpose of this module is therefore to determine whether the
+deterministic proposal is sufficiently governed to proceed.
+
+The final portfolio decision layer may subsequently apply portfolio-level
+allocation, position-sizing and other portfolio-aware rules.
 
 Design principles
 -----------------
-- HOLD remains the default.
-- Deterministic decisions remain authoritative.
-- LLM approval alone is never sufficient for a portfolio change.
-- An LLM challenge triggers additional scrutiny.
-- An LLM rejection prevents automatic approval.
-- Strong decisions require strong evidence.
-- SELL requires stronger evidence than REDUCE.
-- Existing holdings receive additional protection.
-- BUY MORE is more conservative than BUY NEW.
-- BUY MORE requires a strong current investment case and
-  strict LLM agreement.
-- A justified REDUCE may proceed despite an LLM challenge when
-  deterministic evidence is sufficiently strong.
-- BUY NEW may proceed when the current investment case is strong
-  but historical recommendation evidence is immature rather than
-  materially negative.
-- Missing LLM review never becomes approval.
-- LLM failure results in a conservative outcome.
-- Insufficient historical data is not treated as negative evidence.
-- This module does not allocate capital.
-- This module does not execute trades.
-- This module does not change investment scoring weights.
-- The final portfolio decision remains the responsibility of
-  the downstream final decision gate.
-
-Historical Horizon
-------------------
-The current learning engine provides short-term historical
-evidence. The governance model is designed so that future
-60-day evidence can become the preferred historical evidence
-without changing the overall governance structure.
-
-Importantly:
-
-    INSUFFICIENT DATA != NEGATIVE EVIDENCE
+1. Deterministic governance is the source of authority.
+2. The LLM reviewer is an independent advisory signal.
+3. LLM output is retained for auditability.
+4. LLM output must never override deterministic governance.
+5. Missing LLM review must not block an otherwise valid deterministic
+   decision.
+6. Weak deterministic evidence must still block automatic approval.
+7. BUY MORE receives dedicated existing-holding governance.
+8. BUY NEW with immature historical evidence may use its explicit
+   deterministic exception.
+9. REDUCE and SELL receive stronger deterministic evidence requirements.
+10. HOLD remains the safe default when deterministic governance fails.
+11. This module does not perform portfolio allocation.
+12. Asset type is consumed from the supplied decision data. This module
+    does not hard-code individual securities as stocks or ETFs.
 """
 
 from __future__ import annotations
@@ -89,52 +60,83 @@ from typing import Any
 
 
 # ============================================================
-# Configuration
+# Constants
 # ============================================================
 
-MIN_DETERMINISTIC_CONFIDENCE = 70.0
+VALID_ACTIONS = {
+    "BUY NEW",
+    "BUY MORE",
+    "HOLD",
+    "REDUCE",
+    "SELL",
+}
+
+VALID_ASSET_TYPES = {
+    "STOCK",
+    "ETF",
+    "CASH",
+}
+
+VALID_REVIEW_DECISIONS = {
+    "ACCEPT",
+    "CHALLENGE",
+    "REJECT",
+}
+
+# ------------------------------------------------------------
+# General deterministic governance thresholds
+# ------------------------------------------------------------
+
+MIN_DETERMINISTIC_CONFIDENCE = 65.0
 STRONG_DETERMINISTIC_CONFIDENCE = 80.0
 
 MIN_EVIDENCE_SCORE = 60.0
 STRONG_EVIDENCE_SCORE = 75.0
-SELL_EVIDENCE_SCORE = 80.0
+SELL_EVIDENCE_SCORE = 75.0
+
+# ------------------------------------------------------------
+# LLM thresholds
+#
+# These remain available for compatibility/audit reporting.
+#
+# THEY ARE NOT APPROVAL GATES.
+# ------------------------------------------------------------
 
 MIN_LLM_CONFIDENCE = 60.0
 STRONG_LLM_CONFIDENCE = 75.0
 
-
-# ============================================================
-# BUY NEW governance
-# ============================================================
-
-BUY_NEW_IMMATURE_MIN_EVIDENCE = 55.0
-BUY_NEW_IMMATURE_MIN_CONFIDENCE = 50.0
-BUY_NEW_IMMATURE_MIN_INVESTMENT_SCORE = 75.0
-
-
-# ============================================================
+# ------------------------------------------------------------
 # BUY MORE governance
 #
-# BUY MORE is deliberately stricter than BUY NEW because the
-# asset is already held and increasing the position increases
-# portfolio concentration.
-# ============================================================
+# These are deterministic requirements.
+# ------------------------------------------------------------
 
-BUY_MORE_MIN_EVIDENCE = 70.0
-BUY_MORE_MIN_CONFIDENCE = 70.0
-BUY_MORE_MIN_INVESTMENT_SCORE = 80.0
-BUY_MORE_MIN_LLM_CONFIDENCE = 75.0
-BUY_MORE_MAX_ALLOCATION_PERCENT = 5.0
+BUY_MORE_MIN_EVIDENCE = 65.0
+BUY_MORE_MIN_CONFIDENCE = 65.0
+BUY_MORE_MIN_INVESTMENT_SCORE = 75.0
+BUY_MORE_MAX_ALLOCATION_PERCENT = 20.0
 
 BUY_MORE_SUPPORTING_SIGNALS = {
     "BUY",
     "STRONG BUY",
 }
 
+# ------------------------------------------------------------
+# BUY NEW immature-history exception
+# ------------------------------------------------------------
 
-# ============================================================
-# REDUCE governance
-# ============================================================
+BUY_NEW_IMMATURE_MIN_EVIDENCE = 65.0
+BUY_NEW_IMMATURE_MIN_INVESTMENT_SCORE = 85.0
+BUY_NEW_IMMATURE_MIN_SCORE_BUCKET_WIN_RATE = 60.0
+BUY_NEW_IMMATURE_MIN_SCORE_BUCKET_OBSERVATIONS = 20
+
+# ------------------------------------------------------------
+# REDUCE challenge / strength compatibility constants
+#
+# These remain deterministic. The word "challenge" refers to the
+# historical governance path and does NOT mean that an LLM challenge
+# can change the action.
+# ------------------------------------------------------------
 
 REDUCE_CHALLENGE_MIN_EVIDENCE = 65.0
 REDUCE_CHALLENGE_MIN_CONFIDENCE = 65.0
@@ -145,42 +147,61 @@ REDUCE_SUPPORTING_SIGNALS = {
     "STRONG SELL",
 }
 
-
-VALID_ACTIONS = {
-    "BUY NEW",
-    "BUY MORE",
-    "HOLD",
-    "REDUCE",
-    "SELL",
-}
-
-VALID_REVIEW_DECISIONS = {
-    "ACCEPT",
-    "CHALLENGE",
-    "REJECT",
-}
-
-
 # ============================================================
-# Generic helpers
+# General helpers
 # ============================================================
+
+
+def _clean_text(
+    value: Any,
+    default: str = "",
+) -> str:
+    """Safely convert a value to stripped text."""
+    if value is None:
+        return default
+
+    try:
+        text = str(value).strip()
+    except Exception:
+        return default
+
+    return text if text else default
+
+
+def _normalise_text(
+    value: Any,
+    default: str = "",
+) -> str:
+    """Safely normalise text to uppercase."""
+    text = _clean_text(value, default)
+    return text.upper() if text else default
+
 
 def _safe_float(
     value: Any,
     default: float = 0.0,
 ) -> float:
     """Safely convert a value to float."""
+    if value is None:
+        return default
 
     try:
-        if value is None:
-            return default
-
         return float(value)
+    except (TypeError, ValueError):
+        return default
 
-    except (
-        TypeError,
-        ValueError,
-    ):
+
+def _safe_int(
+    value: Any,
+    default: int = 0,
+) -> int:
+    """Safely convert a value to integer."""
+    if value is None:
+        return default
+
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
         return default
 
 
@@ -189,63 +210,74 @@ def _clamp(
     minimum: float = 0.0,
     maximum: float = 100.0,
 ) -> float:
-    """Clamp a numeric value to a defined range."""
-
-    value = _safe_float(value)
-
-    return max(
-        minimum,
-        min(
-            maximum,
-            value,
+    """Convert to float and clamp to a range."""
+    number = _safe_float(value, minimum)
+    return round(
+        max(
+            minimum,
+            min(
+                maximum,
+                number,
+            ),
         ),
+        2,
     )
 
 
-def _clean_text(
+def _safe_bool(
     value: Any,
-    default: str = "",
-) -> str:
-    """Safely normalise text."""
-
+    default: bool = False,
+) -> bool:
+    """Safely convert common boolean representations."""
     if value is None:
         return default
 
-    try:
-        text = str(value).strip()
+    if isinstance(value, bool):
+        return value
 
-    except Exception:
-        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
 
-    return (
-        text.upper()
-        if text
-        else default
-    )
+    text = _normalise_text(value)
+
+    if text in {
+        "TRUE",
+        "YES",
+        "Y",
+        "1",
+    }:
+        return True
+
+    if text in {
+        "FALSE",
+        "NO",
+        "N",
+        "0",
+    }:
+        return False
+
+    return default
 
 
 def _get(
-    mapping: Any,
+    data: dict[str, Any],
     *keys: str,
     default: Any = None,
 ) -> Any:
-    """Return the first available non-null value from a dictionary."""
-
-    if not isinstance(
-        mapping,
-        dict,
-    ):
+    """Return the first non-empty value for the supplied keys."""
+    if not isinstance(data, dict):
         return default
 
     for key in keys:
+        value = data.get(key)
 
-        if key not in mapping:
+        if value is None:
             continue
 
-        value = mapping.get(key)
+        if isinstance(value, str) and not value.strip():
+            continue
 
-        if value is not None:
-            return value
+        return value
 
     return default
 
@@ -256,12 +288,12 @@ def _normalise_action(
     """
     Normalise a portfolio action.
 
-    REDUCE percentage variants are normalised to REDUCE.
+    REDUCE 25%, REDUCE 50%, REDUCE 75% and REDUCE 100% all normalise
+    to REDUCE for governance-category comparisons.
     """
-
-    action = _clean_text(
+    action = _normalise_text(
         value,
-        default="HOLD",
+        "HOLD",
     )
 
     if action.startswith("REDUCE"):
@@ -273,478 +305,557 @@ def _normalise_action(
     return "HOLD"
 
 
-# ============================================================
-# Deterministic decision extraction
-# ============================================================
-
-def get_deterministic_action(
-    decision: dict,
+def _action_with_percentage(
+    value: Any,
 ) -> str:
-    """Extract the deterministic final action."""
+    """Return the original action text while normalising whitespace."""
+    action = _clean_text(
+        value,
+        "HOLD",
+    ).upper()
 
-    action = _get(
-        decision,
-        "Final Decision",
-        "final_decision",
-        "Proposed Action",
-        "proposed_action",
-        "Action",
-        "action",
-        default="HOLD",
-    )
+    if action.startswith("REDUCE"):
+        return action
 
-    return _normalise_action(action)
+    if action in VALID_ACTIONS:
+        return action
+
+    return "HOLD"
+
+
+# ============================================================
+# Decision field extraction
+# ============================================================
 
 
 def get_proposed_action(
-    decision: dict,
+    decision: dict[str, Any],
 ) -> str:
-    """Extract the original deterministic proposed action."""
-
-    action = _get(
+    """Extract and normalise the deterministic proposed action."""
+    value = _get(
         decision,
         "Proposed Action",
         "proposed_action",
         "Action",
         "action",
+        "Final Decision",
+        "final_decision",
         default="HOLD",
     )
 
-    return _normalise_action(action)
+    return _action_with_percentage(value)
 
 
 def get_evidence_score(
-    decision: dict,
+    decision: dict[str, Any],
 ) -> float:
-    """Extract the deterministic evidence score."""
-
-    evidence = decision.get(
-        "Evidence Assessment",
-        {},
-    )
-
-    value = _get(
+    """Extract deterministic evidence score."""
+    evidence = _get(
         decision,
-        "Evidence Score",
-        "evidence_score",
-        default=None,
+        "Evidence Assessment",
+        "evidence_assessment",
+        default={},
     )
 
-    if value is None:
-        value = _get(
-            evidence,
+    if not isinstance(evidence, dict):
+        evidence = {}
+
+    return _safe_float(
+        _get(
+            decision,
             "Evidence Score",
             "evidence_score",
-            default=0.0,
+            default=_get(
+                evidence,
+                "Evidence Score",
+                "evidence_score",
+                default=0.0,
+            ),
         )
-
-    return _clamp(value)
+    )
 
 
 def get_evidence_strength(
-    decision: dict,
+    decision: dict[str, Any],
 ) -> str:
     """Extract deterministic evidence strength."""
-
-    evidence = decision.get(
-        "Evidence Assessment",
-        {},
-    )
-
-    value = _get(
+    evidence = _get(
         decision,
-        "Evidence Strength",
-        "evidence_strength",
-        default=None,
+        "Evidence Assessment",
+        "evidence_assessment",
+        default={},
     )
 
-    if value is None:
-        value = _get(
-            evidence,
+    if not isinstance(evidence, dict):
+        evidence = {}
+
+    return _normalise_text(
+        _get(
+            decision,
             "Evidence Strength",
             "evidence_strength",
-            default="",
-        )
-
-    return _clean_text(value)
-
-
-def get_decision_support(
-    decision: dict,
-) -> str:
-    """Extract deterministic decision support classification."""
-
-    evidence = decision.get(
-        "Evidence Assessment",
-        {},
+            default=_get(
+                evidence,
+                "Evidence Strength",
+                "evidence_strength",
+                default="UNKNOWN",
+            ),
+        ),
+        "UNKNOWN",
     )
-
-    value = _get(
-        decision,
-        "Decision Support",
-        "decision_support",
-        default=None,
-    )
-
-    if value is None:
-        value = _get(
-            evidence,
-            "Decision Support",
-            "decision_support",
-            default="",
-        )
-
-    return _clean_text(value)
 
 
 def get_deterministic_confidence(
-    decision: dict,
+    decision: dict[str, Any],
 ) -> float:
-    """Extract deterministic decision confidence."""
-
-    evidence = decision.get(
-        "Evidence Assessment",
-        {},
-    )
-
-    value = _get(
+    """Extract deterministic confidence."""
+    evidence = _get(
         decision,
-        "Deterministic Confidence",
-        "deterministic_confidence",
-        "Confidence",
-        "confidence",
-        default=None,
+        "Evidence Assessment",
+        "evidence_assessment",
+        default={},
     )
 
-    if value is None:
-        value = _get(
-            evidence,
+    if not isinstance(evidence, dict):
+        evidence = {}
+
+    return _clamp(
+        _get(
+            decision,
+            "Confidence",
             "Deterministic Confidence",
             "deterministic_confidence",
-            "Confidence",
-            "confidence",
-            default=0.0,
+            default=_get(
+                evidence,
+                "Confidence",
+                "confidence",
+                default=0.0,
+            ),
         )
+    )
 
-    return _clamp(value)
+
+def get_decision_support(
+    decision: dict[str, Any],
+) -> str:
+    """Extract deterministic decision support classification."""
+    evidence = _get(
+        decision,
+        "Evidence Assessment",
+        "evidence_assessment",
+        default={},
+    )
+
+    if not isinstance(evidence, dict):
+        evidence = {}
+
+    return _normalise_text(
+        _get(
+            decision,
+            "Decision Support",
+            "decision_support",
+            default=_get(
+                evidence,
+                "Decision Support",
+                "decision_support",
+                default="UNKNOWN",
+            ),
+        ),
+        "UNKNOWN",
+    )
+
 
 def get_investment_score(
-    decision: dict,
+    decision: dict[str, Any],
 ) -> float:
-    """Extract the existing investment score."""
-
-    evidence = decision.get(
-        "Evidence Assessment",
-        {},
-    )
-
-    value = _get(
-        decision,
-        "Investment Score",
-        "investment_score",
-        default=None,
-    )
-
-    if value is None:
-        value = _get(
-            evidence,
+    """Extract investment score."""
+    return _safe_float(
+        _get(
+            decision,
             "Investment Score",
             "investment_score",
             default=0.0,
         )
-
-    return _clamp(value)
+    )
 
 
 def get_signal(
-    decision: dict,
+    decision: dict[str, Any],
 ) -> str:
-    """Extract the existing analytical signal."""
+    """Extract the deterministic technical signal."""
 
-    evidence = decision.get(
-        "Evidence Assessment",
-        {},
-    )
-
-    value = _get(
+    evidence = _get(
         decision,
-        "Signal",
-        "signal",
-        "Momentum Signal",
-        "momentum_signal",
-        default=None,
+        "Evidence Assessment",
+        "evidence_assessment",
+        default={},
     )
 
-    if value is None:
-        value = _get(
-            evidence,
+    if not isinstance(evidence, dict):
+        evidence = {}
+
+    analysis = _get(
+        decision,
+        "Analysis",
+        "analysis",
+        default={},
+    )
+
+    if not isinstance(analysis, dict):
+        analysis = {}
+
+    return _normalise_text(
+        _get(
+            decision,
+            # Preferred production/top-level locations
             "Signal",
             "signal",
             "Momentum Signal",
             "momentum_signal",
-            default="",
+
+            # Nested evidence locations
+            default=_get(
+                evidence,
+                "Signal",
+                "signal",
+                "Momentum Signal",
+                "momentum_signal",
+
+                # Nested analysis locations
+                default=_get(
+                    analysis,
+                    "Signal",
+                    "signal",
+                    "Momentum Signal",
+                    "momentum_signal",
+                    default="",
+                ),
+            ),
+        )
+    )
+
+def get_existing_holding(
+    decision: dict[str, Any],
+) -> bool:
+    """Extract existing-holding status."""
+    ownership = _get(
+        decision,
+        "Ownership",
+        "ownership",
+        default={},
+    )
+
+    if isinstance(ownership, dict):
+        owned = _get(
+            ownership,
+            "owned",
+            "Existing Holding",
+            "existing_holding",
+            default=None,
         )
 
-    return _clean_text(value)
+        if owned is not None:
+            return _safe_bool(
+                owned,
+                False,
+            )
+
+    return _safe_bool(
+        _get(
+            decision,
+            "Existing Holding",
+            "existing_holding",
+            "Held?",
+            "held",
+            default=False,
+        ),
+        False,
+    )
 
 
 def get_allocation_percent(
-    decision: dict,
-) -> float | None:
-    """
-    Extract portfolio allocation percentage.
-
-    Allocation is consumed evidence from the upstream portfolio
-    allocation layer. The reconciler does not calculate it.
-
-    Returns
-    -------
-    float | None
-        None when allocation is unavailable.
-    """
-
-    value = _get(
+    decision: dict[str, Any],
+) -> float:
+    """Extract current portfolio allocation percentage."""
+    ownership = _get(
         decision,
-        "Allocation %",
-        "allocation_percent",
-        "Allocation Percent",
-        "allocation",
-        default=None,
+        "Ownership",
+        "ownership",
+        default={},
     )
 
-    if value is None:
-        return None
-
-    try:
-        return float(value)
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return None
-
-
-# ============================================================
-# Historical evidence helpers
-# ============================================================
-
-def get_historical_reliability(
-    decision: dict,
-) -> str:
-    """Extract historical recommendation reliability."""
-
-    evidence = decision.get(
-        "Evidence Assessment",
-        {},
-    )
-
-    value = _get(
-        decision,
-        "Historical Signal Reliability",
-        "historical_signal_reliability",
-        default=None,
-    )
-
-    if value is None:
+    if isinstance(ownership, dict):
         value = _get(
-            evidence,
-            "Historical Signal Reliability",
-            "historical_signal_reliability",
-            default="",
+            ownership,
+            "allocation_pct",
+            "Allocation %",
+            "Current Allocation %",
+            "current_allocation_pct",
+            default=None,
         )
 
-    return _clean_text(value)
+        if value is not None:
+            return _safe_float(value)
+
+    return _safe_float(
+        _get(
+            decision,
+            "Allocation %",
+            "allocation_pct",
+            "Current Allocation %",
+            "current_allocation_pct",
+            default=0.0,
+        )
+    )
+
+
+def get_asset_type(
+    decision: dict[str, Any],
+) -> str:
+    """
+    Extract authoritative asset type supplied by the decision layer.
+
+    This function deliberately does not infer asset type from ticker
+    names. In particular, individual security names are never used to
+    classify STOCK versus ETF.
+    """
+    asset_type = _normalise_text(
+        _get(
+            decision,
+            "Asset Type",
+            "asset_type",
+            "Asset_Type",
+            default="STOCK",
+        ),
+        "STOCK",
+    )
+
+    if asset_type == "EQUITY":
+        asset_type = "STOCK"
+
+    if asset_type in VALID_ASSET_TYPES:
+        return asset_type
+
+    return "STOCK"
+
+
+def get_reason(
+    decision: dict[str, Any],
+) -> str:
+    """Extract the deterministic decision reason."""
+    return _clean_text(
+        _get(
+            decision,
+            "Reason",
+            "reason",
+            "Decision Reason",
+            "decision_reason",
+            "Final Reason",
+            "final_reason",
+            default="",
+        )
+    )
 
 
 def get_historical_observations(
-    decision: dict,
-) -> float:
-    """Extract historical recommendation observations."""
-
-    evidence = decision.get(
-        "Evidence Assessment",
-        {},
-    )
-
-    value = _get(
+    decision: dict[str, Any],
+) -> int:
+    """Extract historical signal observations."""
+    intelligence = _get(
         decision,
-        "Historical Signal Observations",
-        "historical_signal_observations",
-        default=None,
+        "Recommendation Intelligence",
+        "recommendation_intelligence",
+        default={},
     )
 
-    if value is None:
-        value = _get(
-            evidence,
+    if not isinstance(intelligence, dict):
+        intelligence = {}
+
+    return _safe_int(
+        _get(
+            decision,
             "Historical Signal Observations",
             "historical_signal_observations",
-            default=0,
+            default=_get(
+                intelligence,
+                "historical_signal_observations",
+                "Historical Signal Observations",
+                default=0,
+            ),
         )
-
-    return _safe_float(value)
-
-
-def history_is_immature(
-    decision: dict,
-) -> bool:
-    """
-    Determine whether historical evidence is immature.
-
-    INSUFFICIENT DATA is treated as evidence immaturity,
-    not as negative evidence.
-    """
-
-    reliability = get_historical_reliability(
-        decision
     )
 
-    observations = get_historical_observations(
-        decision
+
+def get_score_bucket_observations(
+    decision: dict[str, Any],
+) -> int:
+    """Extract score-bucket observation count."""
+    intelligence = _get(
+        decision,
+        "Recommendation Intelligence",
+        "recommendation_intelligence",
+        default={},
     )
 
-    if reliability in {
-        "",
-        "NO DATA",
-        "INSUFFICIENT DATA",
-    }:
-        return True
+    if not isinstance(intelligence, dict):
+        intelligence = {}
 
-    if observations < 10:
-        return True
+    return _safe_int(
+        _get(
+            decision,
+            "Score Bucket Observations",
+            "score_bucket_observations",
+            default=_get(
+                intelligence,
+                "score_bucket_observations",
+                "Score Bucket Observations",
+                default=0,
+            ),
+        )
+    )
 
-    return False
+
+def get_score_bucket_win_rate(
+    decision: dict[str, Any],
+) -> float:
+    """Extract score-bucket win rate."""
+    intelligence = _get(
+        decision,
+        "Recommendation Intelligence",
+        "recommendation_intelligence",
+        default={},
+    )
+
+    if not isinstance(intelligence, dict):
+        intelligence = {}
+
+    return _safe_float(
+        _get(
+            decision,
+            "Score Bucket Win Rate %",
+            "score_bucket_win_rate_pct",
+            default=_get(
+                intelligence,
+                "score_bucket_win_rate_pct",
+                "Score Bucket Win Rate %",
+                default=0.0,
+            ),
+        )
+    )
 
 
 # ============================================================
-# LLM review helpers
+# LLM extraction
+#
+# These helpers remain deliberately available because the review
+# is still retained as advisory/audit information.
+#
+# NONE of these values are used as deterministic approval gates.
 # ============================================================
+
 
 def get_llm_review(
-    review: dict,
+    review: dict[str, Any],
 ) -> str:
-    """Extract the LLM review classification."""
-
-    value = _get(
-        review,
-        "Review Decision",
-        "review_decision",
-        "LLM Decision",
-        "LLM Assessment",
-        default="CHALLENGE",
+    """Extract the advisory LLM review decision."""
+    return _normalise_text(
+        _get(
+            review,
+            "Review Decision",
+            "review_decision",
+            "LLM Review",
+            "llm_review",
+            "LLM Assessment",
+            "llm_assessment",
+            default="",
+        )
     )
-
-    value = _clean_text(
-        value,
-        default="CHALLENGE",
-    )
-
-    if value not in VALID_REVIEW_DECISIONS:
-        return "CHALLENGE"
-
-    return value
 
 
 def get_llm_confidence(
-    review: dict,
+    review: dict[str, Any],
 ) -> float:
-    """Extract LLM confidence."""
-
-    value = _get(
-        review,
-        "LLM Confidence",
-        "llm_confidence",
-        "Confidence",
-        "confidence",
-        default=0.0,
+    """Extract advisory LLM confidence."""
+    return _clamp(
+        _get(
+            review,
+            "LLM Confidence",
+            "llm_confidence",
+            "Confidence",
+            "confidence",
+            default=0.0,
+        )
     )
-
-    return _clamp(value)
 
 
 def get_llm_challenge(
-    review: dict,
+    review: dict[str, Any],
 ) -> bool:
-    """Extract explicit LLM challenge status."""
-
-    value = _get(
+    """Extract advisory LLM challenge status."""
+    explicit = _get(
         review,
         "Challenge",
         "challenge",
         default=None,
     )
 
-    if value is None:
-        return (
-            get_llm_review(review)
-            != "ACCEPT"
+    if explicit is not None:
+        return _safe_bool(
+            explicit,
+            False,
         )
 
-    if isinstance(
-        value,
-        str,
-    ):
-        return (
-            value.strip().lower()
-            in {
-                "true",
-                "yes",
-                "1",
-                "challenge",
-            }
-        )
+    return get_llm_review(review) == "CHALLENGE"
 
-    return bool(value)
+
+def get_llm_reason(
+    review: dict[str, Any],
+) -> str:
+    """Extract advisory LLM reasoning."""
+    return _clean_text(
+        _get(
+            review,
+            "Reason",
+            "reason",
+            "LLM Reason",
+            "llm_reason",
+            default="",
+        )
+    )
 
 
 def review_indicates_material_contradiction(
-    review: dict,
+    review: dict[str, Any],
 ) -> bool:
     """
-    Detect substantive contradiction in the independent review.
+    Detect whether the advisory LLM review describes a material concern.
 
-    Missing or insufficient data alone does not count as a
-    material contradiction.
+    IMPORTANT:
+        This function is informational only.
+
+    It MUST NOT be used to alter the deterministic action.
     """
-
-    if not isinstance(
-        review,
-        dict,
-    ):
+    if not isinstance(review, dict):
         return False
 
-    text_parts: list[str] = []
+    if get_llm_challenge(review):
+        return True
 
-    for key in (
-        "LLM Reason",
-        "Reason",
-        "LLM Evidence Gaps",
-        "Evidence Gaps",
-        "LLM Key Points",
-        "Key Points",
-    ):
-
-        value = review.get(key)
-
-        if isinstance(
-            value,
-            list,
-        ):
-
-            text_parts.extend(
-                str(item)
-                for item in value
-            )
-
-        elif value is not None:
-
-            text_parts.append(
-                str(value)
-            )
-
-    text = " ".join(
-        text_parts
-    ).upper()
+    text = _normalise_text(
+        " ".join(
+            [
+                _clean_text(
+                    review.get("Reason")
+                ),
+                _clean_text(
+                    review.get("LLM Reason")
+                ),
+                _clean_text(
+                    review.get("reason")
+                ),
+            ]
+        )
+    )
 
     contradiction_terms = (
         "CONTRADICTORY",
@@ -754,6 +865,7 @@ def review_indicates_material_contradiction(
         "MATERIAL NEGATIVE",
         "UNSUPPORTED",
         "NOT SUPPORTED",
+        "ESSENTIAL GAP",
     )
 
     return any(
@@ -763,191 +875,75 @@ def review_indicates_material_contradiction(
 
 
 # ============================================================
-# Context extraction
+# Historical evidence helpers
 # ============================================================
 
-def get_existing_holding(
-    decision: dict,
-    review: dict | None = None,
+
+def history_is_immature(
+    decision: dict[str, Any],
 ) -> bool:
     """
-    Determine whether the candidate is an existing portfolio holding.
+    Determine whether historical evidence is immature.
 
-    Ownership is determined from Quantity whenever a valid quantity is
-    available. A positive quantity means the asset is owned.
+    Immature history means there is insufficient historical evidence
+    to treat the learning layer as mature evidence.
 
-    This prevents a stale or incorrect "Existing Holding" boolean in the
-    decision/review context from overriding the authoritative portfolio
-    quantity.
-
-    Fallback order:
-        1. Quantity from decision
-        2. Quantity from review
-        3. Existing Holding / Owned flag from decision
-        4. Existing Holding / Owned flag from review
-        5. False
+    It is NOT itself negative evidence.
     """
-
-    # --------------------------------------------------------
-    # Quantity is the authoritative ownership signal.
-    # --------------------------------------------------------
-
-    quantity = _get(
-        decision,
-        "Quantity",
-        "quantity",
-        default=None,
+    observations = get_historical_observations(
+        decision
     )
 
-    if quantity is not None:
-        try:
-            return float(quantity) > 0
-        except (TypeError, ValueError):
-            pass
-
-    # --------------------------------------------------------
-    # Fall back to quantity supplied by the review.
-    # --------------------------------------------------------
-
-    if review:
-        quantity = _get(
-            review,
-            "Quantity",
-            "quantity",
-            default=None,
-        )
-
-        if quantity is not None:
-            try:
-                return float(quantity) > 0
-            except (TypeError, ValueError):
-                pass
-
-    # --------------------------------------------------------
-    # Legacy / fallback ownership flag from the decision.
-    # --------------------------------------------------------
-
-    value = _get(
-        decision,
-        "Existing Holding",
-        "existing_holding",
-        "Owned",
-        "owned",
-        default=None,
+    bucket_observations = get_score_bucket_observations(
+        decision
     )
 
-    if value is not None:
-        if isinstance(value, bool):
-            return value
-
-        return _clean_text(value) in {
-            "TRUE",
-            "YES",
-            "OWNED",
-            "EXISTING",
-        }
-
-    # --------------------------------------------------------
-    # Final fallback: ownership flag from the review.
-    # --------------------------------------------------------
-
-    if review:
-        value = _get(
-            review,
-            "Existing Holding",
-            "existing_holding",
-            "Owned",
-            "owned",
-            default=None,
-        )
-
-        if value is not None:
-            if isinstance(value, bool):
-                return value
-
-            return _clean_text(value) in {
-                "TRUE",
-                "YES",
-                "OWNED",
-                "EXISTING",
-            }
-
-    return False
-
-
-
-def get_asset_type(
-    decision: dict,
-    review: dict | None = None,
-) -> str:
-    """Determine whether the candidate is a STOCK or ETF."""
-
-    value = _get(
-        decision,
-        "Asset Type",
-        "asset_type",
-        default=None,
+    return (
+        observations
+        < BUY_NEW_IMMATURE_MIN_SCORE_BUCKET_OBSERVATIONS
+        or
+        bucket_observations
+        < BUY_NEW_IMMATURE_MIN_SCORE_BUCKET_OBSERVATIONS
     )
 
-    if value is None and review:
-        value = _get(
-            review,
-            "Asset Type",
-            "asset_type",
-            default="STOCK",
-        )
-
-    value = _clean_text(
-        value,
-        default="STOCK",
-    )
-
-    if value == "EQUITY":
-        return "STOCK"
-
-    if value not in {
-        "STOCK",
-        "ETF",
-    }:
-        return "STOCK"
-
-    return value
-
-
-# ============================================================
-# BUY NEW governance
-# ============================================================
 
 def buy_new_is_strong_enough_to_survive_immature_history(
-    decision: dict,
-    review: dict,
+    decision: dict[str, Any],
+    review: dict[str, Any] | None = None,
 ) -> bool:
     """
-    Determine whether BUY NEW may proceed despite immature
-    historical evidence.
+    Determine whether BUY NEW qualifies for the deterministic
+    immature-history exception.
+
+    NOTE:
+        ``review`` is accepted for API compatibility only.
+
+        The LLM review is intentionally NOT inspected here.
 
     Requirements
     ------------
     - BUY NEW proposal
-    - LLM ACCEPT
-    - No material contradiction
-    - Immature historical evidence
-    - Evidence score >= configured minimum
-    - Deterministic confidence >= configured minimum
-    - Decision support is SUPPORTED or CONDITIONAL
-    - Investment score >= configured minimum
+    - immature historical evidence
+    - evidence score >= 65
+    - deterministic confidence >= 70
+    - decision support is SUPPORTED or CONDITIONAL
+    - investment score >= 85
+    - score bucket has >= 20 observations
+    - score bucket win rate >= 60%
     """
+    del review
 
-    if get_proposed_action(decision) != "BUY NEW":
+    if (
+        _normalise_action(
+            get_proposed_action(decision)
+        )
+        != "BUY NEW"
+    ):
         return False
 
-    if get_llm_review(review) != "ACCEPT":
-        return False
-
-    if review_indicates_material_contradiction(review):
-        return False
-
-    if not history_is_immature(decision):
+    if not history_is_immature(
+        decision
+    ):
         return False
 
     evidence_score = get_evidence_score(
@@ -966,10 +962,18 @@ def buy_new_is_strong_enough_to_survive_immature_history(
         decision
     )
 
+    bucket_observations = get_score_bucket_observations(
+        decision
+    )
+
+    bucket_win_rate = get_score_bucket_win_rate(
+        decision
+    )
+
     if evidence_score < BUY_NEW_IMMATURE_MIN_EVIDENCE:
         return False
 
-    if confidence < BUY_NEW_IMMATURE_MIN_CONFIDENCE:
+    if confidence < MIN_DETERMINISTIC_CONFIDENCE:
         return False
 
     if support not in {
@@ -981,363 +985,47 @@ def buy_new_is_strong_enough_to_survive_immature_history(
     if investment_score < BUY_NEW_IMMATURE_MIN_INVESTMENT_SCORE:
         return False
 
+    if (
+        bucket_observations
+        < BUY_NEW_IMMATURE_MIN_SCORE_BUCKET_OBSERVATIONS
+    ):
+        return False
+
+    if (
+        bucket_win_rate
+        < BUY_NEW_IMMATURE_MIN_SCORE_BUCKET_WIN_RATE
+    ):
+        return False
+
     return True
 
 
 # ============================================================
-# BUY MORE governance
+# Deterministic governance helpers
 # ============================================================
 
-def _buy_more_is_strong_enough_for_automatic_approval(
-    decision: dict,
-    review: dict,
-    existing_holding: bool,
+
+def _is_high_impact_action(
+    action: str,
 ) -> bool:
-    """
-    Determine whether BUY MORE satisfies the dedicated
-    BUY MORE governance requirements.
-
-    BUY MORE is intentionally stricter than BUY NEW because
-    the asset is already held and increasing the position
-    increases portfolio concentration.
-
-    Requirements
-    ------------
-    - Existing holding
-    - Evidence Score >= 70
-    - Deterministic Confidence >= 70
-    - Investment Score >= 80
-    - Signal is BUY or STRONG BUY
-    - LLM review is ACCEPT
-    - LLM Confidence >= 75
-    - No material contradiction
-    - Allocation <= 2%
-
-    Allocation is consumed evidence from the upstream portfolio
-    decision / capital-allocation layer.
-    """
-
-    if not existing_holding:
-        return False
-
-    if get_proposed_action(decision) != "BUY MORE":
-        return False
-
-    evidence_score = get_evidence_score(
-        decision
-    )
-
-    deterministic_confidence = (
-        get_deterministic_confidence(
-            decision
-        )
-    )
-
-    investment_score = get_investment_score(
-        decision
-    )
-
-    signal = get_signal(
-        decision
-    )
-
-    llm_review = get_llm_review(
-        review
-    )
-
-    llm_confidence = get_llm_confidence(
-        review
-    )
-
-    allocation = get_allocation_percent(
-        decision
-    )
-
-    if evidence_score < BUY_MORE_MIN_EVIDENCE:
-        return False
-
-    if deterministic_confidence < BUY_MORE_MIN_CONFIDENCE:
-        return False
-
-    if investment_score < BUY_MORE_MIN_INVESTMENT_SCORE:
-        return False
-
-    if signal not in BUY_MORE_SUPPORTING_SIGNALS:
-        return False
-
-    if llm_review != "ACCEPT":
-        return False
-
-    if llm_confidence < BUY_MORE_MIN_LLM_CONFIDENCE:
-        return False
-
-    if review_indicates_material_contradiction(review):
-        return False
-
-    # Missing allocation is deliberately conservative.
-    if allocation is None:
-        return False
-
-    if allocation < 0:
-        return False
-
-    if allocation > BUY_MORE_MAX_ALLOCATION_PERCENT:
-        return False
-
-    return True
-
-
-def debug_buy_more_governance(
-    decision: dict,
-    review: dict,
-) -> None:
-    """
-    Print the individual BUY MORE governance checks.
-
-    This is diagnostic only. It does not change any decision.
-    It allows the main program output to show exactly why a
-    BUY MORE proposal was either qualified or moved to HOLD.
-    """
-
-    existing_holding = get_existing_holding(
-        decision,
-        review,
-    )
-
-    proposed_action = get_proposed_action(
-        decision
-    )
-
-    if proposed_action != "BUY MORE":
-        return
-
-    evidence_score = get_evidence_score(
-        decision
-    )
-
-    deterministic_confidence = (
-        get_deterministic_confidence(
-            decision
-        )
-    )
-
-    investment_score = get_investment_score(
-        decision
-    )
-
-    signal = get_signal(
-        decision
-    )
-
-    llm_review = get_llm_review(
-        review
-    )
-
-    llm_confidence = get_llm_confidence(
-        review
-    )
-
-    allocation = get_allocation_percent(
-        decision
-    )
-
-    contradiction = (
-        review_indicates_material_contradiction(
-            review
-        )
-    )
-
-    checks = {
-        "Existing Holding":
-            existing_holding,
-
-        "Evidence >= 70":
-            evidence_score >= BUY_MORE_MIN_EVIDENCE,
-
-        "Confidence >= 70":
-            deterministic_confidence
-            >= BUY_MORE_MIN_CONFIDENCE,
-
-        "Investment Score >= 80":
-            investment_score
-            >= BUY_MORE_MIN_INVESTMENT_SCORE,
-
-        "Signal BUY/STRONG BUY":
-            signal in BUY_MORE_SUPPORTING_SIGNALS,
-
-        "LLM ACCEPT":
-            llm_review == "ACCEPT",
-
-        "LLM Confidence >= 75":
-            llm_confidence
-            >= BUY_MORE_MIN_LLM_CONFIDENCE,
-
-        "No Material Contradiction":
-            not contradiction,
-
-        "Allocation <= 2%":
-            (
-                allocation is not None
-                and
-                0 <= allocation
-                <= BUY_MORE_MAX_ALLOCATION_PERCENT
-            ),
+    """Return True for actions requiring enhanced scrutiny."""
+    return _normalise_action(action) in {
+        "BUY MORE",
+        "REDUCE",
+        "SELL",
     }
 
-    print()
-    print("=" * 72)
-    print("BUY MORE GOVERNANCE DEBUG")
-    print("=" * 72)
-
-    print(
-        f"Proposed Action        : {proposed_action}"
-    )
-
-    print(
-        f"Existing Holding       : {existing_holding}"
-    )
-
-    print(
-        f"Evidence Score         : {evidence_score:.2f}"
-    )
-
-    print(
-        f"Deterministic Conf.    : {deterministic_confidence:.2f}"
-    )
-
-    print(
-        f"Investment Score       : {investment_score:.2f}"
-    )
-
-    print(
-        f"Signal                 : {signal}"
-    )
-
-    print(
-        f"LLM Review             : {llm_review}"
-    )
-
-    print(
-        f"LLM Confidence         : {llm_confidence:.2f}"
-    )
-
-    print(
-        f"Allocation %           : "
-        f"{allocation:.2f}%"
-        if allocation is not None
-        else "Allocation %           : MISSING"
-    )
-
-    print(
-        f"Material Contradiction : {contradiction}"
-    )
-
-    print("-" * 72)
-
-    for check_name, passed in checks.items():
-
-        print(
-            f"{'PASS' if passed else 'FAIL':4} | "
-            f"{check_name}"
-        )
-
-    all_pass = all(checks.values())
-
-    print("-" * 72)
-
-    print(
-        "BUY MORE RESULT        : "
-        f"{'QUALIFIED BUY MORE' if all_pass else 'HOLD'}"
-    )
-
-    print("=" * 72)
-
-
-# ============================================================
-# REDUCE governance
-# ============================================================
-
-def _reduce_is_strong_enough_to_survive_challenge(
-    decision: dict,
-    existing_holding: bool,
-) -> bool:
-    """
-    Determine whether REDUCE is strong enough to proceed
-    despite an LLM challenge.
-
-    Requirements
-    ------------
-    - Existing holding
-    - Evidence >= 65
-    - Deterministic confidence >= 65
-    - Deterministic support
-    - Either:
-        * Investment Score <= 40
-        * bearish SELL / STRONG SELL signal
-    """
-
-    if not existing_holding:
-        return False
-
-    evidence_score = get_evidence_score(
-        decision
-    )
-
-    deterministic_confidence = (
-        get_deterministic_confidence(
-            decision
-        )
-    )
-
-    decision_support = get_decision_support(
-        decision
-    )
-
-    investment_score = get_investment_score(
-        decision
-    )
-
-    signal = get_signal(
-        decision
-    )
-
-    if evidence_score < REDUCE_CHALLENGE_MIN_EVIDENCE:
-        return False
-
-    if deterministic_confidence < REDUCE_CHALLENGE_MIN_CONFIDENCE:
-        return False
-
-    if decision_support != "SUPPORTED":
-        return False
-
-    weak_investment_case = (
-        investment_score
-        <=
-        REDUCE_CHALLENGE_MAX_INVESTMENT_SCORE
-    )
-
-    bearish_signal = (
-        signal
-        in
-        REDUCE_SUPPORTING_SIGNALS
-    )
-
-    return (
-        weak_investment_case
-        or bearish_signal
-    )
-
-
-# ============================================================
-# Generic governance helpers
-# ============================================================
 
 def _requires_strong_evidence(
     action: str,
 ) -> bool:
-    """Return True where strong deterministic evidence is required."""
+    """
+    Return True where strong deterministic evidence is required.
 
-    return action in {
+    BUY NEW has a lower general evidence requirement because it has
+    the explicit immature-history exception.
+    """
+    return _normalise_action(action) in {
         "BUY MORE",
         "REDUCE",
         "SELL",
@@ -1345,16 +1033,14 @@ def _requires_strong_evidence(
 
 
 def _deterministic_action_is_weak(
-    decision: dict,
+    decision: dict[str, Any],
 ) -> bool:
     """
-    Determine whether the deterministic proposal lacks sufficient
-    evidence for automatic approval.
+    Determine whether the deterministic proposal lacks the minimum
+    evidence required for automatic approval.
 
-    BUY NEW with immature historical evidence may receive a
-    controlled exception later.
+    This is entirely deterministic.
     """
-
     evidence_score = get_evidence_score(
         decision
     )
@@ -1379,9 +1065,310 @@ def _deterministic_action_is_weak(
     return False
 
 
+def _reduce_is_strong_enough_to_survive_challenge(
+    decision: dict[str, Any],
+    existing_holding: bool,
+) -> bool:
+    """
+    Determine whether a deterministic REDUCE proposal is strong enough
+    to remain a REDUCE action.
+
+    This function has no dependency on LLM output.
+
+    The name is retained for compatibility with existing tests and
+    callers. "Challenge" here refers to the historical governance
+    concept, not an LLM override.
+    """
+    if not existing_holding:
+        return False
+
+    evidence_score = get_evidence_score(
+        decision
+    )
+
+    deterministic_confidence = get_deterministic_confidence(
+        decision
+    )
+
+    decision_support = get_decision_support(
+        decision
+    )
+
+    investment_score = get_investment_score(
+        decision
+    )
+
+    signal = get_signal(
+        decision
+    )
+
+    if evidence_score < REDUCE_CHALLENGE_MIN_EVIDENCE:
+        return False
+
+    if (
+        deterministic_confidence
+        < REDUCE_CHALLENGE_MIN_CONFIDENCE
+    ):
+        return False
+
+    if decision_support != "SUPPORTED":
+        return False
+
+    weak_investment_case = (
+        investment_score
+        <= REDUCE_CHALLENGE_MAX_INVESTMENT_SCORE
+    )
+
+    bearish_signal = (
+        signal
+        in REDUCE_SUPPORTING_SIGNALS
+    )
+
+    return (
+        weak_investment_case
+        or
+        bearish_signal
+    )
+
+
+def _record_failed_check(
+    failed_checks: list[dict[str, Any]],
+    *,
+    check_def: str,
+    check_code: str,
+    reason: str,
+    actual_value: Any,
+    threshold_value: Any,
+    unit: str,
+) -> None:
+    """Record one deterministic governance failure."""
+    failed_checks.append(
+        {
+            "check_def": check_def,
+            "check_code": check_code,
+            "reason": reason,
+            "actual_value": actual_value,
+            "threshold_value": threshold_value,
+            "unit": unit,
+            "source_layer": "reconciliation",
+        }
+    )
+
+
+# ============================================================
+# BUY MORE deterministic governance
+# ============================================================
+
+
+def _evaluate_buy_more_governance(
+    decision: dict[str, Any],
+    *,
+    existing_holding: bool,
+) -> tuple[
+    bool,
+    list[str],
+    list[str],
+    list[dict[str, Any]],
+]:
+    """
+    Evaluate BUY MORE using deterministic rules only.
+
+    Returns
+    -------
+    qualified, flags, reasons, failed_checks
+    """
+    flags: list[str] = []
+    reasons: list[str] = []
+    failed_checks: list[dict[str, Any]] = []
+
+    allocation_pct = get_allocation_percent(
+        decision
+    )
+
+    evidence_score = get_evidence_score(
+        decision
+    )
+
+    deterministic_confidence = (
+        get_deterministic_confidence(
+            decision
+        )
+    )
+
+    investment_score = get_investment_score(
+        decision
+    )
+
+    signal = get_signal(
+        decision
+    )
+
+    if not existing_holding:
+        flags.append(
+            "BUY MORE REQUIRES EXISTING HOLDING"
+        )
+
+        reasons.append(
+            "BUY MORE requires an existing holding."
+        )
+
+        _record_failed_check(
+            failed_checks,
+            check_def="BUY_MORE_GOVERNANCE",
+            check_code=(
+                "BUY_MORE_REQUIRES_EXISTING_HOLDING"
+            ),
+            reason=(
+                "BUY MORE REQUIRES EXISTING HOLDING"
+            ),
+            actual_value=existing_holding,
+            threshold_value=True,
+            unit="boolean",
+        )
+
+    if allocation_pct > BUY_MORE_MAX_ALLOCATION_PERCENT:
+        flags.append(
+            "BUY MORE ALLOCATION ABOVE LIMIT"
+        )
+
+        reasons.append(
+            f"Current allocation of {allocation_pct:.2f}% "
+            f"exceeds the maximum permitted allocation of "
+            f"{BUY_MORE_MAX_ALLOCATION_PERCENT:.2f}%."
+        )
+
+        _record_failed_check(
+            failed_checks,
+            check_def="BUY_MORE_GOVERNANCE",
+            check_code=(
+                "BUY_MORE_ALLOCATION_ABOVE_LIMIT"
+            ),
+            reason=(
+                "BUY MORE allocation exceeds the maximum permitted "
+                "portfolio allocation."
+            ),
+            actual_value=allocation_pct,
+            threshold_value=BUY_MORE_MAX_ALLOCATION_PERCENT,
+            unit="percent",
+        )
+
+    if evidence_score < BUY_MORE_MIN_EVIDENCE:
+        flags.append(
+            "BUY MORE EVIDENCE BELOW THRESHOLD"
+        )
+
+        reasons.append(
+            f"Evidence score of {evidence_score:.2f} is below "
+            f"the BUY MORE minimum of "
+            f"{BUY_MORE_MIN_EVIDENCE:.2f}."
+        )
+
+        _record_failed_check(
+            failed_checks,
+            check_def="BUY_MORE_GOVERNANCE",
+            check_code=(
+                "BUY_MORE_EVIDENCE_BELOW_THRESHOLD"
+            ),
+            reason=(
+                "BUY MORE EVIDENCE BELOW THRESHOLD"
+            ),
+            actual_value=evidence_score,
+            threshold_value=BUY_MORE_MIN_EVIDENCE,
+            unit="score",
+        )
+
+    if (
+        deterministic_confidence
+        < BUY_MORE_MIN_CONFIDENCE
+    ):
+        flags.append(
+            "BUY MORE CONFIDENCE BELOW THRESHOLD"
+        )
+
+        reasons.append(
+            f"Deterministic confidence of "
+            f"{deterministic_confidence:.2f} is below "
+            f"the BUY MORE minimum of "
+            f"{BUY_MORE_MIN_CONFIDENCE:.2f}."
+        )
+
+        _record_failed_check(
+            failed_checks,
+            check_def="BUY_MORE_GOVERNANCE",
+            check_code=(
+                "BUY_MORE_CONFIDENCE_BELOW_THRESHOLD"
+            ),
+            reason=(
+                "BUY MORE CONFIDENCE BELOW THRESHOLD"
+            ),
+            actual_value=deterministic_confidence,
+            threshold_value=BUY_MORE_MIN_CONFIDENCE,
+            unit="percent",
+        )
+
+    if investment_score < BUY_MORE_MIN_INVESTMENT_SCORE:
+        flags.append(
+            "BUY MORE INVESTMENT SCORE BELOW THRESHOLD"
+        )
+
+        reasons.append(
+            f"Investment score of {investment_score:.2f} "
+            f"is below the BUY MORE minimum of "
+            f"{BUY_MORE_MIN_INVESTMENT_SCORE:.2f}."
+        )
+
+        _record_failed_check(
+            failed_checks,
+            check_def="BUY_MORE_GOVERNANCE",
+            check_code=(
+                "BUY_MORE_INVESTMENT_SCORE_BELOW_THRESHOLD"
+            ),
+            reason=(
+                "BUY MORE INVESTMENT SCORE BELOW THRESHOLD"
+            ),
+            actual_value=investment_score,
+            threshold_value=BUY_MORE_MIN_INVESTMENT_SCORE,
+            unit="score",
+        )
+
+    if signal not in BUY_MORE_SUPPORTING_SIGNALS:
+        flags.append(
+            "BUY MORE SIGNAL NOT SUPPORTIVE"
+        )
+
+        reasons.append(
+            f"Signal '{signal or 'UNKNOWN'}' is not a "
+            "BUY or STRONG BUY signal."
+        )
+
+        _record_failed_check(
+            failed_checks,
+            check_def="BUY_MORE_GOVERNANCE",
+            check_code=(
+                "BUY_MORE_SIGNAL_NOT_SUPPORTIVE"
+            ),
+            reason=(
+                "BUY MORE SIGNAL NOT SUPPORTIVE"
+            ),
+            actual_value=signal,
+            threshold_value="BUY / STRONG BUY",
+            unit="signal",
+        )
+
+    qualified = not failed_checks
+
+    return (
+        qualified,
+        flags,
+        reasons,
+        failed_checks,
+    )
+
+
 # ============================================================
 # Result construction
 # ============================================================
+
 
 def _build_result(
     *,
@@ -1398,18 +1385,23 @@ def _build_result(
     existing_holding: bool,
     asset_type: str,
     governance_flags: list[str],
-    failed_checks: list[dict],
     reasons: list[str],
     automatic_approval: bool,
+    failed_checks: list[dict[str, Any]] | None = None,
     governance_reason_code: str = "",
     governance_reason: str = "",
-) -> dict:
+    llm_reason: str = "",
+    llm_challenge: bool = False,
+) -> dict[str, Any]:
     """
-    Build the standard reconciliation result.
+    Build the stable reconciliation result.
 
-    Final Decision deliberately remains None because this module
-    is not the final portfolio decision gate.
+    Reconciled Action is determined by deterministic governance.
+
+    LLM fields are retained for audit/advisory purposes only.
     """
+    if failed_checks is None:
+        failed_checks = []
 
     return {
         "Reconciliation Status":
@@ -1429,6 +1421,12 @@ def _build_result(
 
         "LLM Confidence":
             llm_confidence,
+
+        "LLM Challenge":
+            llm_challenge,
+
+        "LLM Reason":
+            llm_reason,
 
         "Evidence Score":
             evidence_score,
@@ -1451,11 +1449,20 @@ def _build_result(
         "Governance Flags":
             governance_flags,
 
+        "Governance Reasons":
+            reasons,
+
         "Governance Failed Checks":
             failed_checks,
 
-        "Governance Reasons":
-            reasons,
+        "Governance Failed Check Count":
+            len(failed_checks),
+
+        "Failed Checks":
+            failed_checks,
+
+        "Failed Check Count":
+            len(failed_checks),
 
         "Governance Reason Code":
             governance_reason_code,
@@ -1465,6 +1472,13 @@ def _build_result(
 
         "Automatic Approval":
             automatic_approval,
+
+        # Explicit architecture marker.
+        "Decision Authority":
+            "DETERMINISTIC GOVERNANCE",
+
+        "LLM Role":
+            "ADVISORY ONLY",
 
         "Final Decision":
             None,
@@ -1478,19 +1492,31 @@ def _build_result(
 # Main reconciliation
 # ============================================================
 
+
 def reconcile_decision(
     decision: dict,
     review: dict,
 ) -> dict:
     """
-    Reconcile one deterministic decision with one LLM review.
+    Reconcile one deterministic decision with one advisory LLM review.
 
-    The deterministic proposal remains authoritative.
+    IMPORTANT
+    ---------
+    The LLM review does not participate in determining the final action.
 
-    The LLM provides independent governance evidence but cannot
-    silently override a justified deterministic decision.
+    The deterministic proposal is evaluated against deterministic
+    governance rules.
 
-    This function does not make the final portfolio decision.
+    The resulting action is therefore a function of the deterministic
+    decision only:
+
+        Reconciled Action = f(deterministic decision)
+
+    and NOT:
+
+        Reconciled Action = f(deterministic decision, LLM review)
+
+    The LLM review is copied into the result for auditability.
     """
 
     if not isinstance(
@@ -1505,12 +1531,16 @@ def reconcile_decision(
     ):
         review = {}
 
+    # --------------------------------------------------------
+    # Extract deterministic fields.
+    # --------------------------------------------------------
+
     proposed_action = get_proposed_action(
         decision
     )
 
-    deterministic_action = get_deterministic_action(
-        decision
+    deterministic_action = _normalise_action(
+        proposed_action
     )
 
     evidence_score = get_evidence_score(
@@ -1531,6 +1561,28 @@ def reconcile_decision(
         decision
     )
 
+    existing_holding = get_existing_holding(
+        decision
+    )
+
+    asset_type = get_asset_type(
+        decision
+    )
+
+    investment_score = get_investment_score(
+        decision
+    )
+
+    signal = get_signal(
+        decision
+    )
+
+    # --------------------------------------------------------
+    # Extract LLM fields.
+    #
+    # These are advisory only.
+    # --------------------------------------------------------
+
     llm_review = get_llm_review(
         review
     )
@@ -1543,126 +1595,174 @@ def reconcile_decision(
         review
     )
 
-    existing_holding = get_existing_holding(
-        decision,
-        review,
-    )
-
-    asset_type = get_asset_type(
-        decision,
-        review,
+    llm_reason = get_llm_reason(
+        review
     )
 
     governance_flags: list[str] = []
-    failed_checks: list[dict] = []
     reasons: list[str] = []
+    failed_checks: list[dict[str, Any]] = []
 
     # --------------------------------------------------------
-    # Detect unavailable LLM review.
+    # Explicitly record the architecture.
     # --------------------------------------------------------
 
-    reviewer_status = _clean_text(
-        _get(
-            review,
-            "Reviewer Status",
-            "reviewer_status",
-            default="",
-        )
+    governance_flags.append(
+        "DETERMINISTIC GOVERNANCE AUTHORITATIVE"
     )
 
-    llm_available = (
-        bool(review)
-        and
-        reviewer_status
-        not in {
-            "LLM UNAVAILABLE",
-            "LLM REVIEW ERROR",
-        }
+    reasons.append(
+        "The portfolio action is determined by deterministic "
+        "governance. The independent LLM review is advisory only."
     )
 
-    if not llm_available:
+    # --------------------------------------------------------
+    # Record advisory LLM information.
+    #
+    # None of these conditions changes the action.
+    # --------------------------------------------------------
 
+    if not llm_review:
         governance_flags.append(
             "LLM REVIEW UNAVAILABLE"
         )
 
         reasons.append(
-            "Independent LLM review is unavailable."
+            "Independent LLM review is unavailable; this does not "
+            "affect deterministic governance."
         )
 
-        if proposed_action != "HOLD":
-            reasons.append(
-                "A non-HOLD action cannot be automatically approved without the independent review layer."
-            )
+    elif llm_review == "ACCEPT":
+        governance_flags.append(
+            "LLM ADVISORY ACCEPT"
+        )
+
+        reasons.append(
+            "The independent LLM review supports the deterministic "
+            "proposal as an advisory signal only."
+        )
+
+    elif llm_review == "CHALLENGE":
+        governance_flags.append(
+            "LLM ADVISORY CHALLENGE"
+        )
+
+        reasons.append(
+            "The independent LLM review challenges the deterministic "
+            "proposal; the challenge is retained for audit purposes "
+            "and does not override deterministic governance."
+        )
+
+    elif llm_review == "REJECT":
+        governance_flags.append(
+            "LLM ADVISORY REJECT"
+        )
+
+        reasons.append(
+            "The independent LLM review rejects the deterministic "
+            "proposal; the rejection is retained for audit purposes "
+            "and does not override deterministic governance."
+        )
+
+    else:
+        governance_flags.append(
+            "LLM ADVISORY RESULT UNKNOWN"
+        )
+
+        reasons.append(
+            f"The LLM returned an unrecognised advisory review value "
+            f"'{llm_review}'. It has no effect on deterministic "
+            f"governance."
+        )
+
+    if llm_challenge:
+        governance_flags.append(
+            "LLM CHALLENGE ADVISORY ONLY"
+        )
+
+    if llm_confidence < MIN_LLM_CONFIDENCE:
+        governance_flags.append(
+            "LOW LLM CONFIDENCE ADVISORY ONLY"
+        )
+
+    # --------------------------------------------------------
+    # HOLD
+    #
+    # HOLD is deterministic and does not require LLM approval.
+    # --------------------------------------------------------
+
+    if deterministic_action == "HOLD":
+        reasons.append(
+            "The deterministic proposal is HOLD. No LLM approval "
+            "is required to retain the HOLD action."
+        )
+
+        return _build_result(
+            status="SUPPORTED",
+            reconciled_action="HOLD",
+            deterministic_action=deterministic_action,
+            proposed_action=proposed_action,
+            llm_review=llm_review,
+            llm_confidence=llm_confidence,
+            llm_reason=llm_reason,
+            llm_challenge=llm_challenge,
+            evidence_score=evidence_score,
+            evidence_strength=evidence_strength,
+            deterministic_confidence=deterministic_confidence,
+            decision_support=decision_support,
+            existing_holding=existing_holding,
+            asset_type=asset_type,
+            governance_flags=governance_flags,
+            reasons=reasons,
+            automatic_approval=True,
+            failed_checks=[],
+            governance_reason_code=(
+                "DETERMINISTIC_HOLD"
+            ),
+            governance_reason=(
+                "HOLD is the deterministic portfolio action and "
+                "requires no LLM approval."
+            ),
+        )
+
+    # --------------------------------------------------------
+    # Asset-specific defensive rule.
+    #
+    # Cash should not be given a transactional stock action by this
+    # reconciliation layer.
+    # --------------------------------------------------------
+
+    if asset_type == "CASH":
+        governance_flags.append(
+            "CASH ACTION NOT PERMITTED"
+        )
+
+        reasons.append(
+            "CASH is not eligible for stock/ETF BUY, BUY MORE, "
+            "REDUCE or SELL governance."
+        )
+
+        _record_failed_check(
+            failed_checks,
+            check_def="reconcile_decision",
+            check_code="CASH_ACTION_NOT_PERMITTED",
+            reason=(
+                "Cash cannot be processed as a stock/ETF transaction."
+            ),
+            actual_value=proposed_action,
+            threshold_value="HOLD",
+            unit="action",
+        )
 
         return _build_result(
             status="REVIEW REQUIRED",
             reconciled_action="HOLD",
             deterministic_action=deterministic_action,
             proposed_action=proposed_action,
-            llm_review="CHALLENGE",
-            llm_confidence=0.0,
-            evidence_score=evidence_score,
-            evidence_strength=evidence_strength,
-            deterministic_confidence=deterministic_confidence,
-            decision_support=decision_support,
-            existing_holding=existing_holding,
-            asset_type=asset_type,
-            governance_flags=governance_flags,
-            failed_checks=failed_checks,
-            reasons=reasons,
-            automatic_approval=False,
-        )
-
-    # --------------------------------------------------------
-    # HOLD.
-    # --------------------------------------------------------
-
-    if proposed_action == "HOLD":
-
-        if llm_review == "ACCEPT":
-
-            reasons.append(
-                "The independent LLM review supports the deterministic HOLD."
-            )
-
-            status = (
-                "SUPPORTED"
-                if llm_confidence >= STRONG_LLM_CONFIDENCE
-                else "CONDITIONAL"
-            )
-
-        elif llm_review == "CHALLENGE":
-
-            governance_flags.append(
-                "LLM CHALLENGE"
-            )
-
-            reasons.append(
-                "The independent LLM review challenges the HOLD."
-            )
-
-            status = "REVIEW REQUIRED"
-
-        else:
-
-            governance_flags.append(
-                "LLM REJECT"
-            )
-
-            reasons.append(
-                "The independent LLM review rejects the deterministic HOLD."
-            )
-
-            status = "REVIEW REQUIRED"
-
-        return _build_result(
-            status=status,
-            reconciled_action="HOLD",
-            deterministic_action=deterministic_action,
-            proposed_action=proposed_action,
             llm_review=llm_review,
             llm_confidence=llm_confidence,
+            llm_reason=llm_reason,
+            llm_challenge=llm_challenge,
             evidence_score=evidence_score,
             evidence_strength=evidence_strength,
             deterministic_confidence=deterministic_confidence,
@@ -1670,277 +1770,70 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
-            failed_checks=failed_checks,
             reasons=reasons,
-            automatic_approval=(
-                status == "SUPPORTED"
+            automatic_approval=False,
+            failed_checks=failed_checks,
+            governance_reason_code=(
+                "CASH_ACTION_NOT_PERMITTED"
+            ),
+            governance_reason=(
+                "Cash cannot receive a stock/ETF transaction action."
             ),
         )
 
     # --------------------------------------------------------
-    # BUY MORE dedicated governance.
+    # BUY MORE
     #
-    # This occurs after LLM availability and HOLD handling.
+    # Every check is deterministic.
     #
-    # BUY MORE must satisfy the complete stronger rule set.
-    # It cannot obtain approval merely by satisfying the generic
-    # evidence threshold.
+    # NO LLM REVIEW CHECK.
+    # NO LLM CONFIDENCE CHECK.
+    # NO LLM CONTRADICTION CHECK.
     # --------------------------------------------------------
 
-    if proposed_action == "BUY MORE":
-
-
-        debug_buy_more_governance(
-            decision=decision,
-            review=review,
+    if deterministic_action == "BUY MORE":
+        (
+            buy_more_qualified,
+            buy_more_flags,
+            buy_more_reasons,
+            buy_more_failed_checks,
+        ) = _evaluate_buy_more_governance(
+            decision,
+            existing_holding=existing_holding,
         )
 
-        if not _buy_more_is_strong_enough_for_automatic_approval(
-            decision=decision,
-            review=review,
-            existing_holding=existing_holding,
-        ):
+        governance_flags.extend(
+            buy_more_flags
+        )
 
+        reasons.extend(
+            buy_more_reasons
+        )
+
+        failed_checks.extend(
+            buy_more_failed_checks
+        )
+
+        if buy_more_qualified:
             governance_flags.append(
-                "BUY MORE GOVERNANCE REQUIREMENTS NOT MET"
+                "BUY MORE GOVERNANCE PASSED"
             )
 
             reasons.append(
-                "BUY MORE requires existing ownership, "
-                "Evidence Score >= 70, deterministic confidence "
-                ">= 70, Investment Score >= 80, a BUY or STRONG BUY "
-                "signal, LLM ACCEPT with confidence >= 75, no "
-                "material contradiction, and allocation <= 2%."
+                "BUY MORE satisfies all deterministic existing-holding, "
+                "allocation, evidence, confidence, investment-score and "
+                "signal requirements."
             )
-
-            allocation = get_allocation_percent(
-                decision
-            )
-
-            if allocation is None:
-
-                governance_flags.append(
-                    "BUY MORE ALLOCATION MISSING"
-                )
-
-                reasons.append(
-                    "BUY MORE cannot be automatically approved "
-                    "without an explicit portfolio allocation percentage."
-                )
-
-            elif allocation > BUY_MORE_MAX_ALLOCATION_PERCENT:
-
-                governance_flags.append(
-                    "BUY MORE ALLOCATION ABOVE LIMIT"
-                )
-
-                reasons.append(
-                    f"BUY MORE allocation of {allocation:.2f}% "
-                    f"exceeds the maximum permitted allocation of "
-                    f"{BUY_MORE_MAX_ALLOCATION_PERCENT:.2f}%."
-                )
-
-            if not existing_holding:
-
-                governance_flags.append(
-                    "BUY MORE REQUIRES EXISTING HOLDING"
-                )
-
-                failed_checks.append(
-                    {
-                        "check_code":
-                            "BUY_MORE_REQUIRES_EXISTING_HOLDING",
-                        "reason":
-                            "BUY MORE REQUIRES EXISTING HOLDING",
-                        "actual_value":
-                            existing_holding,
-                        "threshold_value":
-                            True,
-                        "unit":
-                            "boolean",
-                        "source_layer":
-                            "reconciliation",
-                    }
-                )
-
-            if evidence_score < BUY_MORE_MIN_EVIDENCE:
-
-                governance_flags.append(
-                    "BUY MORE EVIDENCE BELOW THRESHOLD"
-                )
-
-                failed_checks.append(
-                    {
-                        "check_code":
-                            "BUY_MORE_EVIDENCE_BELOW_THRESHOLD",
-                        "reason":
-                            "BUY MORE EVIDENCE BELOW THRESHOLD",
-                        "actual_value":
-                            evidence_score,
-                        "threshold_value":
-                            BUY_MORE_MIN_EVIDENCE,
-                        "unit":
-                            "score",
-                        "source_layer":
-                            "reconciliation",
-                    }
-                )
-
-            if (
-                deterministic_confidence
-                <
-                BUY_MORE_MIN_CONFIDENCE
-            ):
-
-                governance_flags.append(
-                    "BUY MORE CONFIDENCE BELOW THRESHOLD"
-                )
-
-                failed_checks.append(
-                    {
-                        "check_code":
-                            "BUY_MORE_CONFIDENCE_BELOW_THRESHOLD",
-                        "reason":
-                            "BUY MORE CONFIDENCE BELOW THRESHOLD",
-                        "actual_value":
-                            deterministic_confidence,
-                        "threshold_value":
-                            BUY_MORE_MIN_CONFIDENCE,
-                        "unit":
-                            "score",
-                        "source_layer":
-                            "reconciliation",
-                    }
-                )
-
-            if (
-                get_investment_score(decision)
-                <
-                BUY_MORE_MIN_INVESTMENT_SCORE
-            ):
-
-                governance_flags.append(
-                    "BUY MORE INVESTMENT SCORE BELOW THRESHOLD"
-                )
-
-                failed_checks.append(
-                    {
-                        "check_code":
-                            "BUY_MORE_INVESTMENT_SCORE_BELOW_THRESHOLD",
-                        "reason":
-                            "BUY MORE INVESTMENT SCORE BELOW THRESHOLD",
-                        "actual_value":
-                            get_investment_score(decision),
-                        "threshold_value":
-                            BUY_MORE_MIN_INVESTMENT_SCORE,
-                        "unit":
-                            "score",
-                        "source_layer":
-                            "reconciliation",
-                    }
-                )
-
-            if get_signal(decision) not in BUY_MORE_SUPPORTING_SIGNALS:
-
-                governance_flags.append(
-                    "BUY MORE SIGNAL NOT SUPPORTIVE"
-                )
-
-                failed_checks.append(
-                    {
-                        "check_code":
-                            "BUY_MORE_SIGNAL_NOT_SUPPORTIVE",
-                        "reason":
-                            "BUY MORE SIGNAL NOT SUPPORTIVE",
-                        "actual_value":
-                            get_signal(decision),
-                        "threshold_value":
-                            "BUY / STRONG BUY",
-                        "unit":
-                            "signal",
-                        "source_layer":
-                            "reconciliation",
-                    }
-                )
-
-            if llm_review != "ACCEPT":
-
-                governance_flags.append(
-                    "BUY MORE LLM REVIEW NOT ACCEPTED"
-                )
-
-                failed_checks.append(
-                    {
-                        "check_code":
-                            "BUY_MORE_LLM_REVIEW_NOT_ACCEPTED",
-                        "reason":
-                            "BUY MORE LLM REVIEW NOT ACCEPTED",
-                        "actual_value":
-                            llm_review,
-                        "threshold_value":
-                            "ACCEPT",
-                        "unit":
-                            "review",
-                        "source_layer":
-                            "reconciliation",
-                    }
-                )
-
-            if llm_confidence < BUY_MORE_MIN_LLM_CONFIDENCE:
-
-                governance_flags.append(
-                    "BUY MORE LLM CONFIDENCE BELOW THRESHOLD"
-                )
-
-                failed_checks.append(
-                    {
-                        "check_code":
-                            "BUY_MORE_LLM_CONFIDENCE_BELOW_THRESHOLD",
-                        "reason":
-                            "BUY MORE LLM CONFIDENCE BELOW THRESHOLD",
-                        "actual_value":
-                            llm_confidence,
-                        "threshold_value":
-                            BUY_MORE_MIN_LLM_CONFIDENCE,
-                        "unit":
-                            "score",
-                        "source_layer":
-                            "reconciliation",
-                    }
-                )
-
-            if review_indicates_material_contradiction(
-                review
-            ):
-
-                governance_flags.append(
-                    "BUY MORE MATERIAL CONTRADICTION"
-                )
-
-                failed_checks.append(
-                    {
-                        "check_code":
-                            "BUY_MORE_MATERIAL_CONTRADICTION",
-                        "reason":
-                            "BUY MORE MATERIAL CONTRADICTION",
-                        "actual_value":
-                            True,
-                        "threshold_value":
-                            False,
-                        "unit":
-                            "boolean",
-                        "source_layer":
-                            "reconciliation",
-                    }
-                )
 
             return _build_result(
-                status="REVIEW REQUIRED",
-                reconciled_action="HOLD",
+                status="SUPPORTED",
+                reconciled_action="BUY MORE",
                 deterministic_action=deterministic_action,
                 proposed_action=proposed_action,
                 llm_review=llm_review,
                 llm_confidence=llm_confidence,
+                llm_reason=llm_reason,
+                llm_challenge=llm_challenge,
                 evidence_score=evidence_score,
                 evidence_strength=evidence_strength,
                 deterministic_confidence=deterministic_confidence,
@@ -1948,36 +1841,36 @@ def reconcile_decision(
                 existing_holding=existing_holding,
                 asset_type=asset_type,
                 governance_flags=governance_flags,
-                failed_checks=failed_checks,
                 reasons=reasons,
-                automatic_approval=False,
-                governance_reason_code="BUY_MORE_GOVERNANCE_THRESHOLD",
+                automatic_approval=True,
+                failed_checks=[],
+                governance_reason_code=(
+                    "BUY_MORE_DETERMINISTIC_GOVERNANCE_PASSED"
+                ),
                 governance_reason=(
-                    "BUY MORE did not satisfy the complete "
-                    "governance requirements for increasing an "
-                    "existing position."
+                    "BUY MORE was automatically approved because all "
+                    "deterministic BUY MORE governance requirements passed."
                 ),
             )
 
         governance_flags.append(
-            "QUALIFIED BUY MORE"
+            "BUY MORE GOVERNANCE REQUIREMENTS NOT MET"
         )
 
         reasons.append(
-            "BUY MORE satisfies the dedicated existing-holding governance requirements."
-        )
-
-        reasons.append(
-            "The investment score, analytical signal, deterministic evidence and independent LLM review all support increasing the existing position."
+            "BUY MORE did not satisfy the complete deterministic "
+            "governance requirements."
         )
 
         return _build_result(
-            status="SUPPORTED",
-            reconciled_action="BUY MORE",
+            status="REVIEW REQUIRED",
+            reconciled_action="HOLD",
             deterministic_action=deterministic_action,
             proposed_action=proposed_action,
             llm_review=llm_review,
             llm_confidence=llm_confidence,
+            llm_reason=llm_reason,
+            llm_challenge=llm_challenge,
             evidence_score=evidence_score,
             evidence_strength=evidence_strength,
             deterministic_confidence=deterministic_confidence,
@@ -1985,20 +1878,23 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
-            failed_checks=failed_checks,
             reasons=reasons,
-            automatic_approval=True,
-            governance_reason_code="QUALIFIED_BUY_MORE",
+            automatic_approval=False,
+            failed_checks=failed_checks,
+            governance_reason_code=(
+                "BUY_MORE_DETERMINISTIC_GOVERNANCE_FAILED"
+            ),
             governance_reason=(
-                "BUY MORE approved because the existing holding "
-                "meets the required evidence, confidence, "
-                "investment-score, signal, LLM-review and "
-                "allocation thresholds."
+                "BUY MORE was not automatically approved because "
+                "one or more deterministic BUY MORE governance "
+                "requirements failed."
             ),
         )
 
     # --------------------------------------------------------
     # BUY NEW immature-history exception.
+    #
+    # This is entirely deterministic.
     # --------------------------------------------------------
 
     buy_new_immature_history_override = (
@@ -2008,63 +1904,30 @@ def reconcile_decision(
         )
     )
 
-    # --------------------------------------------------------
-    # JUSTIFIED REDUCE WITH LLM ACCEPT.
-    #
-    # This gate deliberately occurs before the generic weak-
-    # deterministic-evidence gate.
-    # --------------------------------------------------------
-
     if (
-        proposed_action == "REDUCE"
+        deterministic_action == "BUY NEW"
         and
-        llm_review == "ACCEPT"
-        and
-        _reduce_is_strong_enough_to_survive_challenge(
-            decision=decision,
-            existing_holding=existing_holding,
-        )
+        buy_new_immature_history_override
     ):
-
         governance_flags.append(
-            "JUSTIFIED REDUCE"
+            "BUY NEW WITH IMMATURE HISTORICAL EVIDENCE"
         )
 
         reasons.append(
-            "REDUCE is supported by sufficient deterministic evidence and an adequately weak investment case for the existing holding."
-        )
-
-        if (
-            get_investment_score(decision)
-            <=
-            REDUCE_CHALLENGE_MAX_INVESTMENT_SCORE
-        ):
-
-            reasons.append(
-                "Investment Score is sufficiently weak to justify reducing exposure."
-            )
-
-        if (
-            get_signal(decision)
-            in
-            REDUCE_SUPPORTING_SIGNALS
-        ):
-
-            reasons.append(
-                "The underlying analytical signal is bearish."
-            )
-
-        reasons.append(
-            "The independent LLM review accepts the REDUCE proposal."
+            "BUY NEW qualifies for the deterministic immature-history "
+            "exception because the current investment case is strong "
+            "enough despite immature historical evidence."
         )
 
         return _build_result(
-            status="SUPPORTED",
-            reconciled_action="REDUCE",
+            status="SUPPORTED WITH IMMATURE EVIDENCE",
+            reconciled_action="BUY NEW",
             deterministic_action=deterministic_action,
             proposed_action=proposed_action,
             llm_review=llm_review,
             llm_confidence=llm_confidence,
+            llm_reason=llm_reason,
+            llm_challenge=llm_challenge,
             evidence_score=evidence_score,
             evidence_strength=evidence_strength,
             deterministic_confidence=deterministic_confidence,
@@ -2072,127 +1935,87 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
-            failed_checks=failed_checks,
             reasons=reasons,
             automatic_approval=True,
-            governance_reason_code="JUSTIFIED_REDUCE",
+            failed_checks=[],
+            governance_reason_code=(
+                "BUY_NEW_IMMATURE_HISTORY"
+            ),
             governance_reason=(
-                "REDUCE approved because the existing holding has "
-                "sufficient deterministic evidence, adequate "
-                "confidence, and a weak investment case and/or "
-                "bearish signal."
+                "BUY NEW approved under the deterministic immature-history "
+                "exception. LLM review is advisory only."
             ),
         )
 
     # --------------------------------------------------------
-    # Weak deterministic proposal.
-    # --------------------------------------------------------
-
-    # --------------------------------------------------------
-    # REDUCE + LLM CHALLENGE exception.
+    # General deterministic minimum gate.
     #
-    # A justified REDUCE is allowed to reach the dedicated
-    # challenge-handling logic even when its deterministic
-    # confidence is below the generic 70 threshold.
+    # This is the normal gate for BUY NEW / REDUCE / SELL.
     # --------------------------------------------------------
-
-    reduce_challenge_override = (
-        proposed_action == "REDUCE"
-        and
-        llm_review == "CHALLENGE"
-        and
-        _reduce_is_strong_enough_to_survive_challenge(
-            decision=decision,
-            existing_holding=existing_holding,
-        )
-    )
 
     weak_deterministic = _deterministic_action_is_weak(
         decision
     )
 
-    if (
-        weak_deterministic
-        and
-        not buy_new_immature_history_override
-        and
-        not reduce_challenge_override
-    ):
-
-        # Persist each underlying deterministic governance failure
-        # so the audit layer can report the actual value and threshold.
-        if evidence_score < MIN_EVIDENCE_SCORE:
-            failed_checks.append(
-                {
-                    "check_code": "WEAK_DETERMINISTIC_EVIDENCE",
-                    "reason": "Deterministic evidence is insufficient.",
-                    "actual_value": evidence_score,
-                    "threshold_value": MIN_EVIDENCE_SCORE,
-                    "unit": "score",
-                    "source_layer": "reconciliation",
-                }
-            )
-
-        if deterministic_confidence < MIN_DETERMINISTIC_CONFIDENCE:
-            failed_checks.append(
-                {
-                    "check_code": "WEAK_DETERMINISTIC_CONFIDENCE",
-                    "reason": "Deterministic confidence is below the minimum threshold.",
-                    "actual_value": deterministic_confidence,
-                    "threshold_value": MIN_DETERMINISTIC_CONFIDENCE,
-                    "unit": "score",
-                    "source_layer": "reconciliation",
-                }
-            )
-
-        if decision_support == "NOT SUPPORTED":
-            failed_checks.append(
-                {
-                    "check_code": "DETERMINISTIC_DECISION_NOT_SUPPORTED",
-                    "reason": "Deterministic decision is not supported.",
-                    "actual_value": decision_support,
-                    "threshold_value": "SUPPORTED",
-                    "unit": "decision support",
-                    "source_layer": "reconciliation",
-                }
-            )
-
+    if weak_deterministic:
         governance_flags.append(
             "WEAK DETERMINISTIC EVIDENCE"
         )
 
         reasons.append(
-            "Deterministic evidence is insufficient to support automatic portfolio change."
+            "Deterministic evidence is insufficient to support "
+            "automatic portfolio change."
         )
 
-        if llm_review == "ACCEPT":
-
-            governance_flags.append(
-                "LLM ACCEPTS WEAK PROPOSAL"
+        if evidence_score < MIN_EVIDENCE_SCORE:
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "WEAK_DETERMINISTIC_EVIDENCE"
+                ),
+                reason=(
+                    "Deterministic evidence is below the minimum "
+                    "evidence threshold."
+                ),
+                actual_value=evidence_score,
+                threshold_value=MIN_EVIDENCE_SCORE,
+                unit="score",
             )
 
-            reasons.append(
-                "LLM agreement cannot compensate for insufficient deterministic evidence."
+        if (
+            deterministic_confidence
+            < MIN_DETERMINISTIC_CONFIDENCE
+        ):
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "WEAK_DETERMINISTIC_CONFIDENCE"
+                ),
+                reason=(
+                    "Deterministic confidence is below the minimum "
+                    "confidence threshold."
+                ),
+                actual_value=deterministic_confidence,
+                threshold_value=MIN_DETERMINISTIC_CONFIDENCE,
+                unit="percent",
             )
 
-        elif llm_review == "CHALLENGE":
-
-            governance_flags.append(
-                "LLM CHALLENGE"
-            )
-
-            reasons.append(
-                "The independent reviewer also identifies concerns."
-            )
-
-        else:
-
-            governance_flags.append(
-                "LLM REJECT"
-            )
-
-            reasons.append(
-                "The independent reviewer rejects the already weak proposal."
+        if decision_support == "NOT SUPPORTED":
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "DETERMINISTIC_DECISION_NOT_SUPPORTED"
+                ),
+                reason=(
+                    "The deterministic decision support classification "
+                    "is NOT SUPPORTED."
+                ),
+                actual_value=decision_support,
+                threshold_value="SUPPORTED",
+                unit="decision support",
             )
 
         return _build_result(
@@ -2202,6 +2025,8 @@ def reconcile_decision(
             proposed_action=proposed_action,
             llm_review=llm_review,
             llm_confidence=llm_confidence,
+            llm_reason=llm_reason,
+            llm_challenge=llm_challenge,
             evidence_score=evidence_score,
             evidence_strength=evidence_strength,
             deterministic_confidence=deterministic_confidence,
@@ -2209,162 +2034,53 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
-            failed_checks=failed_checks,
             reasons=reasons,
             automatic_approval=False,
+            failed_checks=failed_checks,
+            governance_reason_code=(
+                "DETERMINISTIC_MINIMUM_GATE_FAILED"
+            ),
+            governance_reason=(
+                "The deterministic proposal did not satisfy the "
+                "minimum evidence, confidence and decision-support "
+                "requirements."
+            ),
         )
 
     # --------------------------------------------------------
-    # LLM CHALLENGE.
+    # Strong evidence gate for high-impact deterministic actions.
     #
-    # Normal rule:
-    #     Challenge blocks BUY NEW / SELL.
-    #
-    # A justified REDUCE may survive a challenge.
-    # BUY MORE cannot survive a challenge because the dedicated
-    # BUY MORE gate requires LLM ACCEPT.
+    # Again, this is entirely deterministic.
     # --------------------------------------------------------
 
     if (
-        llm_review == "CHALLENGE"
-        or
-        llm_challenge
+        _requires_strong_evidence(
+            deterministic_action
+        )
+        and
+        evidence_score < STRONG_EVIDENCE_SCORE
     ):
-
-        if proposed_action == "REDUCE":
-
-            if _reduce_is_strong_enough_to_survive_challenge(
-                decision=decision,
-                existing_holding=existing_holding,
-            ):
-
-                governance_flags.append(
-                    "LLM CHALLENGE - REDUCE EXCEPTION"
-                )
-
-                reasons.append(
-                    "LLM challenged the reduction, but strong deterministic evidence supports reducing the existing holding."
-                )
-
-                reasons.append(
-                    "The reduction is supported by a sufficiently low investment score and/or bearish signal."
-                )
-
-                return _build_result(
-                    status="SUPPORTED WITH CHALLENGE",
-                    reconciled_action="REDUCE",
-                    deterministic_action=deterministic_action,
-                    proposed_action=proposed_action,
-                    llm_review=llm_review,
-                    llm_confidence=llm_confidence,
-                    evidence_score=evidence_score,
-                    evidence_strength=evidence_strength,
-                    deterministic_confidence=deterministic_confidence,
-                    decision_support=decision_support,
-                    existing_holding=existing_holding,
-                    asset_type=asset_type,
-                    governance_flags=governance_flags,
-                    failed_checks=failed_checks,
-                    reasons=reasons,
-                    automatic_approval=True,
-                    governance_reason_code="REDUCE_CHALLENGE_EXCEPTION",
-                    governance_reason=(
-                        "REDUCE allowed despite LLM challenge because "
-                        "the existing holding satisfies the dedicated "
-                        "strong-reduction criteria."
-                    ),
-                )
-
-            governance_flags.append(
-                "LLM CHALLENGE"
-            )
-
-            reasons.append(
-                "The independent LLM review challenges the REDUCE proposal and the deterministic evidence is not strong enough to override that challenge."
-            )
-
-            return _build_result(
-                status="REVIEW REQUIRED",
-                reconciled_action="HOLD",
-                deterministic_action=deterministic_action,
-                proposed_action=proposed_action,
-                llm_review=llm_review,
-                llm_confidence=llm_confidence,
-                evidence_score=evidence_score,
-                evidence_strength=evidence_strength,
-                deterministic_confidence=deterministic_confidence,
-                decision_support=decision_support,
-                existing_holding=existing_holding,
-                asset_type=asset_type,
-                governance_flags=governance_flags,
-                failed_checks=failed_checks,
-                reasons=reasons,
-                automatic_approval=False,
-            )
-
         governance_flags.append(
-            "LLM CHALLENGE"
+            "STRONG EVIDENCE REQUIRED"
         )
 
         reasons.append(
-            "The independent LLM review challenges the deterministic proposal."
+            f"{deterministic_action} requires deterministic evidence "
+            f"of at least {STRONG_EVIDENCE_SCORE:.2f}."
         )
 
-        if proposed_action == "BUY MORE":
-
-            governance_flags.append(
-                "EXISTING HOLDING PROTECTION"
-            )
-
-            reasons.append(
-                "BUY MORE receives additional scrutiny because the asset is already held."
-            )
-
-        if proposed_action == "SELL":
-
-            governance_flags.append(
-                "SELL CHALLENGE"
-            )
-
-            reasons.append(
-                "SELL remains subject to the strictest governance because an LLM challenge was received."
-            )
-
-        return _build_result(
-            status="REVIEW REQUIRED",
-            reconciled_action="HOLD",
-            deterministic_action=deterministic_action,
-            proposed_action=proposed_action,
-            llm_review=llm_review,
-            llm_confidence=llm_confidence,
-            evidence_score=evidence_score,
-            evidence_strength=evidence_strength,
-            deterministic_confidence=deterministic_confidence,
-            decision_support=decision_support,
-            existing_holding=existing_holding,
-            asset_type=asset_type,
-            governance_flags=governance_flags,
-            failed_checks=failed_checks,
-            reasons=reasons,
-            automatic_approval=False,
-        )
-
-    # --------------------------------------------------------
-    # Explicit LLM rejection.
-    # --------------------------------------------------------
-
-    if llm_review == "REJECT":
-
-        governance_flags.append(
-            "LLM REJECT"
-        )
-
-        reasons.append(
-            "The independent LLM review rejects the deterministic proposal."
-        )
-
-        reasons.append(
-            "The proposal requires further governance review."
+        _record_failed_check(
+            failed_checks,
+            check_def="reconcile_decision",
+            check_code=(
+                "DETERMINISTIC_EVIDENCE_THRESHOLD"
+            ),
+            reason=(
+                "Strong deterministic evidence is required for this action."
+            ),
+            actual_value=evidence_score,
+            threshold_value=STRONG_EVIDENCE_SCORE,
+            unit="score",
         )
 
         return _build_result(
@@ -2374,6 +2090,8 @@ def reconcile_decision(
             proposed_action=proposed_action,
             llm_review=llm_review,
             llm_confidence=llm_confidence,
+            llm_reason=llm_reason,
+            llm_challenge=llm_challenge,
             evidence_score=evidence_score,
             evidence_strength=evidence_strength,
             deterministic_confidence=deterministic_confidence,
@@ -2381,29 +2099,111 @@ def reconcile_decision(
             existing_holding=existing_holding,
             asset_type=asset_type,
             governance_flags=governance_flags,
-            failed_checks=failed_checks,
             reasons=reasons,
             automatic_approval=False,
+            failed_checks=failed_checks,
+            governance_reason_code=(
+                "DETERMINISTIC_EVIDENCE_THRESHOLD"
+            ),
+            governance_reason=(
+                f"{deterministic_action} was not automatically approved "
+                f"because deterministic evidence of {evidence_score:.2f} "
+                f"is below the required strong-evidence threshold of "
+                f"{STRONG_EVIDENCE_SCORE:.2f}."
+            ),
         )
 
     # --------------------------------------------------------
-    # LLM ACCEPT.
+    # SELL requires the strongest deterministic evidence.
     # --------------------------------------------------------
 
-    if llm_review == "ACCEPT":
+    if (
+        deterministic_action == "SELL"
+        and
+        evidence_score < SELL_EVIDENCE_SCORE
+    ):
+        governance_flags.append(
+            "SELL EVIDENCE BELOW THRESHOLD"
+        )
 
         reasons.append(
-            "The independent LLM review supports the deterministic proposal."
+            f"SELL requires deterministic evidence of at least "
+            f"{SELL_EVIDENCE_SCORE:.2f}."
         )
 
-        if llm_confidence < MIN_LLM_CONFIDENCE:
+        _record_failed_check(
+            failed_checks,
+            check_def="reconcile_decision",
+            check_code=(
+                "SELL_EVIDENCE_BELOW_THRESHOLD"
+            ),
+            reason=(
+                "SELL requires stronger deterministic evidence."
+            ),
+            actual_value=evidence_score,
+            threshold_value=SELL_EVIDENCE_SCORE,
+            unit="score",
+        )
 
+        return _build_result(
+            status="REVIEW REQUIRED",
+            reconciled_action="HOLD",
+            deterministic_action=deterministic_action,
+            proposed_action=proposed_action,
+            llm_review=llm_review,
+            llm_confidence=llm_confidence,
+            llm_reason=llm_reason,
+            llm_challenge=llm_challenge,
+            evidence_score=evidence_score,
+            evidence_strength=evidence_strength,
+            deterministic_confidence=deterministic_confidence,
+            decision_support=decision_support,
+            existing_holding=existing_holding,
+            asset_type=asset_type,
+            governance_flags=governance_flags,
+            reasons=reasons,
+            automatic_approval=False,
+            failed_checks=failed_checks,
+            governance_reason_code=(
+                "SELL_EVIDENCE_THRESHOLD"
+            ),
+            governance_reason=(
+                "SELL was not approved because deterministic evidence "
+                "is below the required SELL threshold."
+            ),
+        )
+
+    # --------------------------------------------------------
+    # REDUCE.
+    #
+    # A REDUCE is allowed when the deterministic proposal itself
+    # is sufficiently governed.
+    #
+    # The LLM cannot veto it.
+    # --------------------------------------------------------
+
+    if deterministic_action == "REDUCE":
+        if not existing_holding:
             governance_flags.append(
-                "LOW LLM CONFIDENCE"
+                "REDUCE REQUIRES EXISTING HOLDING"
             )
 
             reasons.append(
-                "LLM confidence is too low to materially strengthen the proposal."
+                "REDUCE requires an existing holding."
+            )
+
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "REDUCE_REQUIRES_EXISTING_HOLDING"
+                ),
+                reason=(
+                    "REDUCE requires an existing holding."
+                ),
+                actual_value=existing_holding,
+                threshold_value=True,
+                unit="boolean",
             )
 
             return _build_result(
@@ -2413,6 +2213,8 @@ def reconcile_decision(
                 proposed_action=proposed_action,
                 llm_review=llm_review,
                 llm_confidence=llm_confidence,
+                llm_reason=llm_reason,
+                llm_challenge=llm_challenge,
                 evidence_score=evidence_score,
                 evidence_strength=evidence_strength,
                 deterministic_confidence=deterministic_confidence,
@@ -2420,70 +2222,94 @@ def reconcile_decision(
                 existing_holding=existing_holding,
                 asset_type=asset_type,
                 governance_flags=governance_flags,
-                failed_checks=failed_checks,
                 reasons=reasons,
                 automatic_approval=False,
-            )
-
-        # ----------------------------------------------------
-        # BUY NEW with immature historical evidence.
-        # ----------------------------------------------------
-
-        if buy_new_immature_history_override:
-
-            governance_flags.append(
-                "BUY NEW WITH IMMATURE HISTORICAL EVIDENCE"
-            )
-
-            reasons.append(
-                "BUY NEW is supported by a strong current investment case; historical evidence is immature rather than materially negative."
-            )
-
-            reasons.append(
-                "The independent LLM review accepts the proposal."
-            )
-
-            return _build_result(
-                status="SUPPORTED WITH IMMATURE EVIDENCE",
-                reconciled_action="BUY NEW",
-                deterministic_action=deterministic_action,
-                proposed_action=proposed_action,
-                llm_review=llm_review,
-                llm_confidence=llm_confidence,
-                evidence_score=evidence_score,
-                evidence_strength=evidence_strength,
-                deterministic_confidence=deterministic_confidence,
-                decision_support=decision_support,
-                existing_holding=existing_holding,
-                asset_type=asset_type,
-                governance_flags=governance_flags,
                 failed_checks=failed_checks,
-                reasons=reasons,
-                automatic_approval=True,
-                governance_reason_code="BUY_NEW_IMMATURE_HISTORY",
+                governance_reason_code=(
+                    "REDUCE_REQUIRES_EXISTING_HOLDING"
+                ),
                 governance_reason=(
-                    "BUY NEW approved because current deterministic "
-                    "evidence and investment quality are sufficiently "
-                    "strong while historical evidence remains immature."
+                    "REDUCE was not approved because the asset is "
+                    "not an existing holding."
                 ),
             )
 
         # ----------------------------------------------------
-        # SELL requires strongest deterministic evidence.
+        # Deterministic REDUCE governance has passed the general
+        # minimum and strong-evidence gates above.
         # ----------------------------------------------------
 
-        if (
-            proposed_action == "SELL"
-            and
-            evidence_score < SELL_EVIDENCE_SCORE
-        ):
+        governance_flags.append(
+            "REDUCE DETERMINISTIC GOVERNANCE PASSED"
+        )
 
+        reasons.append(
+            "REDUCE satisfies the deterministic governance requirements."
+        )
+
+        return _build_result(
+            status="SUPPORTED",
+            reconciled_action=proposed_action,
+            deterministic_action=deterministic_action,
+            proposed_action=proposed_action,
+            llm_review=llm_review,
+            llm_confidence=llm_confidence,
+            llm_reason=llm_reason,
+            llm_challenge=llm_challenge,
+            evidence_score=evidence_score,
+            evidence_strength=evidence_strength,
+            deterministic_confidence=deterministic_confidence,
+            decision_support=decision_support,
+            existing_holding=existing_holding,
+            asset_type=asset_type,
+            governance_flags=governance_flags,
+            reasons=reasons,
+            automatic_approval=True,
+            failed_checks=[],
+            governance_reason_code=(
+                "REDUCE_DETERMINISTIC_GOVERNANCE_PASSED"
+            ),
+            governance_reason=(
+                "REDUCE was approved by deterministic governance. "
+                "Any LLM challenge or rejection is advisory only."
+            ),
+        )
+
+
+    # --------------------------------------------------------
+    # SELL.
+    #
+    # SELL is equivalent to REDUCE 100%.
+    #
+    # All SELL governance is deterministic. The LLM cannot
+    # veto or downgrade a fully governed SELL.
+    #
+    # The general minimum gate, strong-evidence gate and
+    # SELL-specific evidence gate above have already passed
+    # before execution reaches this block.
+    # --------------------------------------------------------
+
+    if deterministic_action == "SELL":
+        if not existing_holding:
             governance_flags.append(
-                "SELL EVIDENCE BELOW THRESHOLD"
+                "SELL REQUIRES EXISTING HOLDING"
+            )
+            reasons.append(
+                "SELL requires an existing holding."
             )
 
-            reasons.append(
-                "SELL requires stronger deterministic evidence than the current proposal provides."
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "SELL_REQUIRES_EXISTING_HOLDING"
+                ),
+                reason=(
+                    "SELL requires an existing holding."
+                ),
+                actual_value=existing_holding,
+                threshold_value=True,
+                unit="boolean",
             )
 
             return _build_result(
@@ -2493,6 +2319,8 @@ def reconcile_decision(
                 proposed_action=proposed_action,
                 llm_review=llm_review,
                 llm_confidence=llm_confidence,
+                llm_reason=llm_reason,
+                llm_challenge=llm_challenge,
                 evidence_score=evidence_score,
                 evidence_strength=evidence_strength,
                 deterministic_confidence=deterministic_confidence,
@@ -2500,104 +2328,118 @@ def reconcile_decision(
                 existing_holding=existing_holding,
                 asset_type=asset_type,
                 governance_flags=governance_flags,
-                failed_checks=failed_checks,
                 reasons=reasons,
                 automatic_approval=False,
+                failed_checks=failed_checks,
+                governance_reason_code=(
+                    "SELL_REQUIRES_EXISTING_HOLDING"
+                ),
+                governance_reason=(
+                    "SELL was not approved because the asset is "
+                    "not an existing holding."
+                ),
             )
 
         # ----------------------------------------------------
-        # REDUCE / SELL / other high-impact actions.
+        # Deterministic SELL governance has passed all gates
+        # above, including the SELL-specific evidence threshold.
         #
-        # BUY MORE has already been handled by the dedicated
-        # governance gate above.
+        # SELL represents a 100% reduction of the holding.
         # ----------------------------------------------------
 
-        if (
-            _requires_strong_evidence(
-                proposed_action
-            )
-            and
-            evidence_score < STRONG_EVIDENCE_SCORE
-        ):
+        governance_flags.append(
+            "SELL DETERMINISTIC GOVERNANCE PASSED"
+        )
 
+        reasons.append(
+            "SELL satisfies the deterministic governance "
+            "requirements and represents a 100% reduction "
+            "of the existing holding."
+        )
+
+        return _build_result(
+            status="SUPPORTED",
+            reconciled_action="SELL",
+            deterministic_action=deterministic_action,
+            proposed_action=proposed_action,
+            llm_review=llm_review,
+            llm_confidence=llm_confidence,
+            llm_reason=llm_reason,
+            llm_challenge=llm_challenge,
+            evidence_score=evidence_score,
+            evidence_strength=evidence_strength,
+            deterministic_confidence=deterministic_confidence,
+            decision_support=decision_support,
+            existing_holding=existing_holding,
+            asset_type=asset_type,
+            governance_flags=governance_flags,
+            reasons=reasons,
+            automatic_approval=True,
+            failed_checks=[],
+            governance_reason_code=(
+                "SELL_DETERMINISTIC_GOVERNANCE_PASSED"
+            ),
+            governance_reason=(
+                "SELL was approved by deterministic governance. "
+                "SELL represents a 100% reduction of the holding. "
+                "Any LLM challenge or rejection is advisory only."
+            ),
+        )
+
+    # --------------------------------------------------------
+    # BUY NEW.
+    #
+    # General deterministic governance has passed.
+    # --------------------------------------------------------
+
+
+
+    if deterministic_action == "BUY NEW":
+        if existing_holding:
             governance_flags.append(
-                "STRONG EVIDENCE REQUIRED"
-            )
-
-            governance_reason_code = (
-                "DETERMINISTIC_EVIDENCE_THRESHOLD"
-            )
-
-            governance_reason = (
-                f"{proposed_action} was not automatically approved because "
-                f"the deterministic evidence score of {evidence_score:.2f} "
-                f"is below the required strong-evidence threshold of "
-                f"{STRONG_EVIDENCE_SCORE:.2f}."
+                "BUY NEW WITH EXISTING HOLDING"
             )
 
             reasons.append(
-                governance_reason
+                "The deterministic action is BUY NEW even though "
+                "the asset is already marked as held."
             )
 
-            return _build_result(
-                status="REVIEW REQUIRED",
-                reconciled_action="HOLD",
-                deterministic_action=deterministic_action,
-                proposed_action=proposed_action,
-                llm_review=llm_review,
-                llm_confidence=llm_confidence,
-                evidence_score=evidence_score,
-                evidence_strength=evidence_strength,
-                deterministic_confidence=deterministic_confidence,
-                decision_support=decision_support,
-                existing_holding=existing_holding,
-                asset_type=asset_type,
-                governance_flags=governance_flags,
-                failed_checks=failed_checks,
-                reasons=reasons,
-                automatic_approval=False,
-                governance_reason_code=governance_reason_code,
-                governance_reason=governance_reason,
-            )
+        governance_flags.append(
+            "BUY NEW DETERMINISTIC GOVERNANCE PASSED"
+        )
 
-        # ----------------------------------------------------
-        # Strong deterministic + LLM agreement.
-        # ----------------------------------------------------
+        reasons.append(
+            "BUY NEW satisfies the deterministic governance requirements."
+        )
 
-        if (
-            evidence_score >= MIN_EVIDENCE_SCORE
-            and
-            deterministic_confidence >= MIN_DETERMINISTIC_CONFIDENCE
-        ):
-
-            reasons.append(
-                "Deterministic evidence and independent LLM review are aligned."
-            )
-
-            if llm_confidence >= STRONG_LLM_CONFIDENCE:
-
-                reasons.append(
-                    "LLM review has strong confidence."
-                )
-
-            return _build_result(
-                status="SUPPORTED",
-                reconciled_action=proposed_action,
-                deterministic_action=deterministic_action,
-                proposed_action=proposed_action,
-                llm_review=llm_review,
-                llm_confidence=llm_confidence,
-                evidence_score=evidence_score,
-                evidence_strength=evidence_strength,
-                deterministic_confidence=deterministic_confidence,
-                decision_support=decision_support,
-                existing_holding=existing_holding,
-                asset_type=asset_type,
-                governance_flags=governance_flags,
-                failed_checks=failed_checks,
-                reasons=reasons,
-                automatic_approval=True,
-            )
+        return _build_result(
+            status="SUPPORTED",
+            reconciled_action="BUY NEW",
+            deterministic_action=deterministic_action,
+            proposed_action=proposed_action,
+            llm_review=llm_review,
+            llm_confidence=llm_confidence,
+            llm_reason=llm_reason,
+            llm_challenge=llm_challenge,
+            evidence_score=evidence_score,
+            evidence_strength=evidence_strength,
+            deterministic_confidence=deterministic_confidence,
+            decision_support=decision_support,
+            existing_holding=existing_holding,
+            asset_type=asset_type,
+            governance_flags=governance_flags,
+            reasons=reasons,
+            automatic_approval=True,
+            failed_checks=[],
+            governance_reason_code=(
+                "BUY_NEW_DETERMINISTIC_GOVERNANCE_PASSED"
+            ),
+            governance_reason=(
+                "BUY NEW was approved by deterministic governance. "
+                "The LLM review is advisory only."
+            ),
+        )
 
     # --------------------------------------------------------
     # Defensive fallback.
@@ -2608,7 +2450,21 @@ def reconcile_decision(
     )
 
     reasons.append(
-        "The deterministic proposal could not be reconciled with sufficient confidence."
+        "The deterministic proposal could not be reconciled "
+        "with sufficient governance certainty."
+    )
+
+    _record_failed_check(
+        failed_checks,
+        check_def="reconcile_decision",
+        check_code="UNRESOLVED_RECONCILIATION",
+        reason=(
+            "No deterministic governance path produced sufficient "
+            "certainty for automatic approval."
+        ),
+        actual_value=proposed_action,
+        threshold_value="VALID DETERMINISTIC ACTION",
+        unit="action",
     )
 
     return _build_result(
@@ -2618,6 +2474,8 @@ def reconcile_decision(
         proposed_action=proposed_action,
         llm_review=llm_review,
         llm_confidence=llm_confidence,
+        llm_reason=llm_reason,
+        llm_challenge=llm_challenge,
         evidence_score=evidence_score,
         evidence_strength=evidence_strength,
         deterministic_confidence=deterministic_confidence,
@@ -2627,6 +2485,15 @@ def reconcile_decision(
         governance_flags=governance_flags,
         reasons=reasons,
         automatic_approval=False,
+        failed_checks=failed_checks,
+        governance_reason_code=(
+            "UNRESOLVED_RECONCILIATION"
+        ),
+        governance_reason=(
+            "The deterministic proposal reached the defensive "
+            "fallback because no valid deterministic governance "
+            "path was available."
+        ),
     )
 
 
@@ -2634,15 +2501,17 @@ def reconcile_decision(
 # Public compatibility API
 # ============================================================
 
+
 def reconcile_ai_decision(
     decision: dict,
     review: dict,
 ) -> dict:
     """
-    Public entry point used by the production chain and
-    AI decision-layer test harness.
-    """
+    Public compatibility entry point.
 
+    The LLM review is accepted because existing callers provide it,
+    but it is advisory only and cannot determine the action.
+    """
     return reconcile_decision(
         decision=decision,
         review=review,
@@ -2654,7 +2523,6 @@ def reconcile_review(
     review: dict,
 ) -> dict:
     """Compatibility alias for reconcile_decision()."""
-
     return reconcile_decision(
         decision=decision,
         review=review,
@@ -2665,16 +2533,18 @@ def reconcile_review(
 # Batch reconciliation
 # ============================================================
 
+
 def reconcile_ai_decisions(
     decisions: list[dict] | None,
     reviews: list[dict] | None,
 ) -> list[dict]:
     """
-    Reconcile multiple deterministic decisions and reviews.
+    Reconcile multiple deterministic decisions.
 
-    Missing reviews are handled conservatively.
+    Reviews are matched by position and retained as advisory information.
+
+    Missing reviews do not block deterministic reconciliation.
     """
-
     if not decisions:
         return []
 
@@ -2682,7 +2552,9 @@ def reconcile_ai_decisions(
         decisions,
         list,
     ):
-        decisions = [decisions]
+        decisions = [
+            decisions
+        ]
 
     if not isinstance(
         reviews,
@@ -2690,12 +2562,11 @@ def reconcile_ai_decisions(
     ):
         reviews = []
 
-    results = []
+    results: list[dict] = []
 
     for index, decision in enumerate(
         decisions
     ):
-
         review = (
             reviews[index]
             if index < len(reviews)
@@ -2716,6 +2587,7 @@ def reconcile_ai_decisions(
 # Module tests
 # ============================================================
 
+
 if __name__ == "__main__":
 
     print(
@@ -2727,27 +2599,53 @@ if __name__ == "__main__":
     )
 
     # --------------------------------------------------------
-    # TEST 1: REDUCE 25% with strong bearish evidence.
+    # TEST 1: Strong deterministic REDUCE with LLM ACCEPT.
     # --------------------------------------------------------
 
     reduce_decision = {
-        "Final Decision": "REDUCE 25%",
-        "Proposed Action": "REDUCE 25%",
-        "Evidence Score": 82.5,
-        "Evidence Strength": "VERY STRONG",
-        "Decision Support": "SUPPORTED",
-        "Confidence": 72.61,
-        "Existing Holding": True,
-        "Asset Type": "STOCK",
-        "Investment Score": 25.0,
-        "Signal": "SELL",
+        "Final Decision":
+            "REDUCE 25%",
+
+        "Proposed Action":
+            "REDUCE 25%",
+
+        "Evidence Score":
+            82.5,
+
+        "Evidence Strength":
+            "VERY STRONG",
+
+        "Decision Support":
+            "SUPPORTED",
+
+        "Confidence":
+            72.61,
+
+        "Existing Holding":
+            True,
+
+        "Asset Type":
+            "STOCK",
+
+        "Investment Score":
+            25.0,
+
+        "Signal":
+            "SELL",
     }
 
     reduce_review = {
-        "Review Decision": "ACCEPT",
-        "LLM Confidence": 85.0,
-        "Challenge": False,
-        "Reviewer Status": "LLM REVIEW COMPLETE",
+        "Review Decision":
+            "ACCEPT",
+
+        "LLM Confidence":
+            85.0,
+
+        "Challenge":
+            False,
+
+        "Reviewer Status":
+            "LLM REVIEW COMPLETE",
     }
 
     result = reconcile_decision(
@@ -2775,29 +2673,62 @@ if __name__ == "__main__":
         result["Automatic Approval"],
     )
 
+    print(
+        "Decision Authority:",
+        result["Decision Authority"],
+    )
+
     # --------------------------------------------------------
-    # TEST 2: QUALIFIED BUY MORE.
+    # TEST 2: Qualified BUY MORE with LLM ACCEPT.
     # --------------------------------------------------------
 
     buy_more_decision = {
-        "Final Decision": "BUY MORE",
-        "Proposed Action": "BUY MORE",
-        "Evidence Score": 78.0,
-        "Evidence Strength": "STRONG",
-        "Decision Support": "SUPPORTED",
-        "Confidence": 74.0,
-        "Existing Holding": True,
-        "Asset Type": "STOCK",
-        "Investment Score": 86.0,
-        "Signal": "STRONG BUY",
-        "Allocation %": 1.5,
+        "Final Decision":
+            "BUY MORE",
+
+        "Proposed Action":
+            "BUY MORE",
+
+        "Evidence Score":
+            78.0,
+
+        "Evidence Strength":
+            "STRONG",
+
+        "Decision Support":
+            "SUPPORTED",
+
+        "Confidence":
+            74.0,
+
+        "Existing Holding":
+            True,
+
+        "Asset Type":
+            "STOCK",
+
+        "Investment Score":
+            86.0,
+
+        "Signal":
+            "STRONG BUY",
+
+        "Allocation %":
+            1.5,
     }
 
     buy_more_review = {
-        "Review Decision": "ACCEPT",
-        "LLM Confidence": 82.0,
-        "Challenge": False,
-        "Reviewer Status": "LLM REVIEW COMPLETE",
+        "Review Decision":
+            "ACCEPT",
+
+        "LLM Confidence":
+            82.0,
+
+        "Challenge":
+            False,
+
+        "Reviewer Status":
+            "LLM REVIEW COMPLETE",
     }
 
     result = reconcile_decision(
@@ -2825,13 +2756,8 @@ if __name__ == "__main__":
         result["Automatic Approval"],
     )
 
-    print(
-        "Governance Reason Code:",
-        result["Governance Reason Code"],
-    )
-
     # --------------------------------------------------------
-    # TEST 3: BUY MORE fails because allocation is too high.
+    # TEST 3: BUY MORE fails deterministic allocation.
     # --------------------------------------------------------
 
     buy_more_high_allocation = dict(
@@ -2849,7 +2775,7 @@ if __name__ == "__main__":
 
     print()
     print(
-        "TEST 3: BUY MORE ABOVE 2% ALLOCATION"
+        "TEST 3: BUY MORE HIGH ALLOCATION"
     )
 
     print(
@@ -2868,29 +2794,106 @@ if __name__ == "__main__":
     )
 
     # --------------------------------------------------------
-    # TEST 4: BUY MORE fails because LLM confidence is below 75.
+    # TEST 4: LLM REJECT MUST NOT change a qualified
+    # deterministic BUY MORE.
     # --------------------------------------------------------
 
-    buy_more_low_llm = dict(
-        buy_more_decision
-    )
+    reject_review = {
+        "Review Decision":
+            "REJECT",
 
-    buy_more_low_llm_review = dict(
-        buy_more_review
-    )
+        "LLM Confidence":
+            95.0,
 
-    buy_more_low_llm_review[
-        "LLM Confidence"
-    ] = 70.0
+        "Challenge":
+            True,
+
+        "Reviewer Status":
+            "LLM REVIEW COMPLETE",
+    }
 
     result = reconcile_decision(
-        decision=buy_more_low_llm,
-        review=buy_more_low_llm_review,
+        decision=buy_more_decision,
+        review=reject_review,
     )
 
     print()
     print(
-        "TEST 4: BUY MORE LOW LLM CONFIDENCE"
+        "TEST 4: QUALIFIED BUY MORE + LLM REJECT"
+    )
+
+    print(
+        "Reconciled Action:",
+        result["Reconciled Action"],
+    )
+
+    print(
+        "Status:",
+        result["Reconciliation Status"],
+    )
+
+    print(
+        "Automatic Approval:",
+        result["Automatic Approval"],
+    )
+
+    # --------------------------------------------------------
+    # TEST 5: LLM CHALLENGE must not change a qualified
+    # deterministic REDUCE.
+    # --------------------------------------------------------
+
+    challenge_review = {
+        "Review Decision":
+            "CHALLENGE",
+
+        "LLM Confidence":
+            95.0,
+
+        "Challenge":
+            True,
+
+        "Reviewer Status":
+            "LLM REVIEW COMPLETE",
+    }
+
+    result = reconcile_decision(
+        decision=reduce_decision,
+        review=challenge_review,
+    )
+
+    print()
+    print(
+        "TEST 5: QUALIFIED REDUCE + LLM CHALLENGE"
+    )
+
+    print(
+        "Reconciled Action:",
+        result["Reconciled Action"],
+    )
+
+    print(
+        "Status:",
+        result["Reconciliation Status"],
+    )
+
+    print(
+        "Automatic Approval:",
+        result["Automatic Approval"],
+    )
+
+    # --------------------------------------------------------
+    # TEST 6: Missing LLM review must not block qualified
+    # deterministic REDUCE.
+    # --------------------------------------------------------
+
+    result = reconcile_decision(
+        decision=reduce_decision,
+        review={},
+    )
+
+    print()
+    print(
+        "TEST 6: QUALIFIED REDUCE + NO LLM REVIEW"
     )
 
     print(

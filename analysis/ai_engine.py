@@ -167,15 +167,16 @@ def _save_cached_response(prompt, response):
 
 def generate_ai_response(prompt):
     """
+
     Generate a response using the local Ollama/Llama model.
 
     A successful response is cached using a deterministic hash of the
     complete request. Repeated identical requests therefore avoid another
     Ollama invocation.
 
-    The caller remains responsible for deciding which stocks should receive
-    AI analysis. In the main application this is controlled by
-    AI_ANALYSIS_LIMIT.
+    The caller is responsible for constructing the prompt and determining
+    when an AI response is required.
+
     """
 
     # ---------------------------------

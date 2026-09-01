@@ -204,6 +204,728 @@ def clean_text(
     return value
 
 
+
+# ============================================================
+# Semantic / Ontology Layer
+# ============================================================
+#
+# Purpose:
+#
+# Convert raw decision evidence into explicit, deterministic
+# semantic relationships before the context is supplied to
+# the LLM reviewer.
+#
+# This layer:
+#
+#   - DOES NOT change deterministic decisions
+#   - DOES NOT change proposed actions
+#   - DOES NOT calculate new market data
+#   - DOES NOT invent missing evidence
+#   - DOES NOT make the final portfolio decision
+#
+# It explains what existing fields mean and how they relate.
+#
+# The LLM should reason FROM these relationships rather than
+# having to infer the application's data model itself.
+# ============================================================
+
+
+SEMANTIC_ACTION_ORDER = {
+    "BUY NEW": 1,
+    "BUY MORE": 1,
+    "HOLD": 0,
+    "REDUCE": -1,
+    "REDUCE 25%": -1,
+    "REDUCE 50%": -1,
+    "REDUCE 75%": -1,
+    "REDUCE 100%": -1,
+    "SELL": -1,
+}
+
+
+def _normalise_action(value):
+    """
+    Return a canonical action string.
+
+    Missing or invalid values remain None rather than being
+    converted into a synthetic action.
+    """
+
+    value = clean_text(value, default="")
+
+    if not value:
+        return None
+
+    value = value.upper().strip()
+
+    if value in VALID_ACTIONS:
+        return value
+
+    return None
+
+
+def _semantic_number(value):
+    """
+    Convert a value to a finite float for semantic interpretation.
+
+    Missing or invalid values return None.
+
+    This deliberately preserves absence of evidence.
+    """
+
+    return safe_float(value, default=None)
+
+
+def _action_direction(action):
+    """
+    Return the semantic direction of an action.
+
+    BUY NEW / BUY MORE -> BUY
+    HOLD -> HOLD
+    REDUCE / SELL -> REDUCE
+    """
+
+    action = _normalise_action(action)
+
+    if action is None:
+        return None
+
+    if action in {"BUY NEW", "BUY MORE"}:
+        return "BUY"
+
+    if action == "HOLD":
+        return "HOLD"
+
+    if action in {
+        "REDUCE",
+        "REDUCE 25%",
+        "REDUCE 50%",
+        "REDUCE 75%",
+        "REDUCE 100%",
+        "SELL",
+    }:
+        return "REDUCE"
+
+    return None
+
+
+def _compare_action_values(left, right):
+    """
+    Compare two action-like values semantically.
+
+    Returns:
+        CONSISTENT
+        POTENTIAL_CONFLICT
+        INDETERMINATE
+    """
+
+    left = _action_direction(left)
+    right = _action_direction(right)
+
+    if left is None or right is None:
+        return "INDETERMINATE"
+
+    if left == right:
+        return "CONSISTENT"
+
+    return "POTENTIAL_CONFLICT"
+
+
+def _interpret_rsi(rsi):
+    """
+    Interpret RSI using established technical-analysis bands.
+
+    Returns None when RSI is unavailable.
+    """
+
+    rsi = _semantic_number(rsi)
+
+    if rsi is None:
+        return None
+
+    if rsi < 30:
+        return "OVERSOLD"
+
+    if rsi < 50:
+        return "WEAK_MOMENTUM"
+
+    if rsi <= 70:
+        return "POSITIVE_MOMENTUM"
+
+    return "OVERBOUGHT"
+
+
+def _interpret_price_vs_moving_averages(
+    current_price,
+    ma50,
+    ma200,
+):
+    """
+    Interpret the relationship between current price and
+    medium/long-term moving averages.
+
+    No inference is made when the relevant evidence is missing.
+    """
+
+    current_price = _semantic_number(current_price)
+    ma50 = _semantic_number(ma50)
+    ma200 = _semantic_number(ma200)
+
+    relationships = []
+
+    if current_price is not None and ma50 is not None:
+
+        if current_price > ma50:
+            relationships.append(
+                "PRICE_ABOVE_MA50"
+            )
+        elif current_price < ma50:
+            relationships.append(
+                "PRICE_BELOW_MA50"
+            )
+        else:
+            relationships.append(
+                "PRICE_AT_MA50"
+            )
+
+    if current_price is not None and ma200 is not None:
+
+        if current_price > ma200:
+            relationships.append(
+                "PRICE_ABOVE_MA200"
+            )
+        elif current_price < ma200:
+            relationships.append(
+                "PRICE_BELOW_MA200"
+            )
+        else:
+            relationships.append(
+                "PRICE_AT_MA200"
+            )
+
+    if (
+        "PRICE_BELOW_MA50" in relationships
+        and "PRICE_BELOW_MA200" in relationships
+    ):
+        trend_state = "WEAK_TREND"
+
+    elif (
+        "PRICE_ABOVE_MA50" in relationships
+        and "PRICE_ABOVE_MA200" in relationships
+    ):
+        trend_state = "STRONG_TREND"
+
+    else:
+        trend_state = "MIXED_TREND"
+
+    if not relationships:
+        trend_state = None
+
+    return {
+        "relationships": relationships,
+        "trend_state": trend_state,
+    }
+
+
+def _semantic_field_relationship(
+    field_a,
+    value_a,
+    field_b,
+    value_b,
+):
+    """
+    Describe the semantic relationship between two action fields.
+
+    This is deliberately explicit so the LLM cannot interpret
+    identical values as contradictory.
+    """
+
+    action_a = _normalise_action(value_a)
+    action_b = _normalise_action(value_b)
+
+    if action_a is None or action_b is None:
+        return {
+            "field_a": field_a,
+            "value_a": action_a,
+            "field_b": field_b,
+            "value_b": action_b,
+            "relationship": "INDETERMINATE",
+            "meaning": (
+                "One or both action values are unavailable."
+            ),
+        }
+
+    relationship = _compare_action_values(
+        action_a,
+        action_b,
+    )
+
+    if relationship == "CONSISTENT":
+
+        meaning = (
+            f"{field_a} ({action_a}) and "
+            f"{field_b} ({action_b}) are semantically "
+            f"consistent. They do not represent a conflict."
+        )
+
+    else:
+
+        meaning = (
+            f"{field_a} ({action_a}) and "
+            f"{field_b} ({action_b}) point in different "
+            f"portfolio-action directions and therefore "
+            f"represent a potential conflict requiring review."
+        )
+
+    return {
+        "field_a": field_a,
+        "value_a": action_a,
+        "field_b": field_b,
+        "value_b": action_b,
+        "relationship": relationship,
+        "meaning": meaning,
+    }
+
+
+def build_semantic_evidence(
+    *,
+    asset_type=None,
+    current_price=None,
+    rsi=None,
+    ma50=None,
+    ma200=None,
+    etf_signal=None,
+    signal=None,
+    deterministic_action=None,
+    proposed_action=None,
+):
+    """
+    Build deterministic semantic/ontology evidence.
+
+    This function translates existing evidence into explicit
+    relationships for the AI reviewer.
+
+    It does not alter any decision.
+
+    Returns
+    -------
+    dict
+        JSON-serialisable semantic evidence.
+    """
+
+    asset_type = clean_text(
+        asset_type,
+        default="",
+    ).upper()
+
+    if asset_type not in VALID_ASSET_TYPES:
+        asset_type = None
+
+    current_price = _semantic_number(
+        current_price
+    )
+    rsi = _semantic_number(rsi)
+    ma50 = _semantic_number(ma50)
+    ma200 = _semantic_number(ma200)
+
+    deterministic_action = _normalise_action(
+        deterministic_action
+    )
+
+    proposed_action = _normalise_action(
+        proposed_action
+    )
+
+    etf_signal = _normalise_action(
+        etf_signal
+    )
+
+    signal = _normalise_action(
+        signal
+    )
+
+    semantic = {
+        "ontology_version": "1.0",
+        "asset_type": asset_type,
+        "metric_semantics": {},
+        "relationships": [],
+        "action_semantics": {},
+        "conflicts": [],
+        "missing_evidence": [],
+    }
+
+    # --------------------------------------------------------
+    # Metric semantics
+    # --------------------------------------------------------
+
+    if rsi is not None:
+
+        semantic["metric_semantics"]["rsi"] = {
+            "value": rsi,
+            "category": "MOMENTUM",
+            "interpretation": _interpret_rsi(rsi),
+        }
+
+    else:
+
+        semantic["missing_evidence"].append(
+            "RSI_UNAVAILABLE"
+        )
+
+    price_ma = _interpret_price_vs_moving_averages(
+        current_price=current_price,
+        ma50=ma50,
+        ma200=ma200,
+    )
+
+    if price_ma["relationships"]:
+
+        semantic["metric_semantics"][
+            "price_vs_moving_averages"
+        ] = price_ma
+
+        semantic["relationships"].extend(
+            price_ma["relationships"]
+        )
+
+    else:
+
+        semantic["missing_evidence"].append(
+            "MOVING_AVERAGE_RELATIONSHIP_UNAVAILABLE"
+        )
+
+    # --------------------------------------------------------
+    # Action semantics
+    # --------------------------------------------------------
+
+    if deterministic_action is not None:
+
+        semantic["action_semantics"][
+            "deterministic_action"
+        ] = {
+            "value": deterministic_action,
+            "direction": _action_direction(
+                deterministic_action
+            ),
+            "meaning": (
+                "Rules-based portfolio decision."
+            ),
+        }
+
+    if proposed_action is not None:
+
+        semantic["action_semantics"][
+            "proposed_action"
+        ] = {
+            "value": proposed_action,
+            "direction": _action_direction(
+                proposed_action
+            ),
+            "meaning": (
+                "Candidate portfolio action being reviewed."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # ETF signal
+    # --------------------------------------------------------
+
+    if asset_type == "ETF":
+
+        if etf_signal is not None:
+
+            semantic["action_semantics"][
+                "etf_signal"
+            ] = {
+                "value": etf_signal,
+                "direction": _action_direction(
+                    etf_signal
+                ),
+                "meaning": (
+                    "ETF-specific market/trend signal. "
+                    "It is evidence, not itself the final "
+                    "portfolio decision."
+                ),
+            }
+
+        else:
+
+            semantic["missing_evidence"].append(
+                "ETF_SIGNAL_UNAVAILABLE"
+            )
+
+    # --------------------------------------------------------
+    # Stock signal
+    # --------------------------------------------------------
+
+    if asset_type == "STOCK":
+
+        if signal is not None:
+
+            semantic["action_semantics"][
+                "stock_signal"
+            ] = {
+                "value": signal,
+                "direction": _action_direction(
+                    signal
+                ),
+                "meaning": (
+                    "Stock technical signal. "
+                    "It is evidence, not itself the final "
+                    "portfolio decision."
+                ),
+            }
+
+        else:
+
+            semantic["missing_evidence"].append(
+                "STOCK_SIGNAL_UNAVAILABLE"
+            )
+
+    # --------------------------------------------------------
+    # Deterministic decision vs proposed action
+    # --------------------------------------------------------
+
+    relationship = _semantic_field_relationship(
+        "DETERMINISTIC DECISION",
+        deterministic_action,
+        "PROPOSED ACTION",
+        proposed_action,
+    )
+
+    semantic["relationships"].append(
+        relationship
+    )
+
+    if (
+        relationship["relationship"]
+        == "POTENTIAL_CONFLICT"
+    ):
+
+        semantic["conflicts"].append(
+            "DETERMINISTIC_DECISION_PROPOSED_ACTION_CONFLICT"
+        )
+
+    # --------------------------------------------------------
+    # ETF signal vs deterministic decision
+    #
+    # IMPORTANT:
+    #
+    # Equal values are explicitly CONSISTENT.
+    # --------------------------------------------------------
+
+    if asset_type == "ETF":
+
+        relationship = _semantic_field_relationship(
+            "ETF SIGNAL",
+            etf_signal,
+            "DETERMINISTIC DECISION",
+            deterministic_action,
+        )
+
+        semantic["relationships"].append(
+            relationship
+        )
+
+        if (
+            relationship["relationship"]
+            == "POTENTIAL_CONFLICT"
+        ):
+
+            semantic["conflicts"].append(
+                "ETF_SIGNAL_DETERMINISTIC_DECISION_CONFLICT"
+            )
+
+        # ETF signal vs proposed action
+
+        relationship = _semantic_field_relationship(
+            "ETF SIGNAL",
+            etf_signal,
+            "PROPOSED ACTION",
+            proposed_action,
+        )
+
+        semantic["relationships"].append(
+            relationship
+        )
+
+        if (
+            relationship["relationship"]
+            == "POTENTIAL_CONFLICT"
+        ):
+
+            semantic["conflicts"].append(
+                "ETF_SIGNAL_PROPOSED_ACTION_CONFLICT"
+            )
+
+    # --------------------------------------------------------
+    # Stock signal vs deterministic decision
+    # --------------------------------------------------------
+
+    if asset_type == "STOCK":
+
+        relationship = _semantic_field_relationship(
+            "STOCK SIGNAL",
+            signal,
+            "DETERMINISTIC DECISION",
+            deterministic_action,
+        )
+
+        semantic["relationships"].append(
+            relationship
+        )
+
+        if (
+            relationship["relationship"]
+            == "POTENTIAL_CONFLICT"
+        ):
+
+            semantic["conflicts"].append(
+                "STOCK_SIGNAL_DETERMINISTIC_DECISION_CONFLICT"
+            )
+
+    # --------------------------------------------------------
+    # Technical trend vs action
+    #
+    # IMPORTANT:
+    #
+    # Weak trend does NOT automatically contradict HOLD.
+    # It is primarily relevant when the proposed action
+    # increases exposure.
+    # --------------------------------------------------------
+
+    trend_state = price_ma["trend_state"]
+
+    if trend_state is not None:
+
+        proposed_direction = _action_direction(
+            proposed_action
+        )
+
+        if (
+            trend_state == "WEAK_TREND"
+            and proposed_direction == "BUY"
+        ):
+
+            semantic["relationships"].append({
+                "field_a": "PRICE/TREND EVIDENCE",
+                "value_a": trend_state,
+                "field_b": "PROPOSED ACTION",
+                "value_b": proposed_action,
+                "relationship": "POTENTIAL_CONFLICT",
+                "meaning": (
+                    "Price is below both MA50 and MA200 "
+                    "while the proposed action increases "
+                    "exposure. This is a potential technical "
+                    "conflict requiring review."
+                ),
+            })
+
+            semantic["conflicts"].append(
+                "WEAK_TREND_VS_BUY_ACTION"
+            )
+
+        elif (
+            trend_state == "WEAK_TREND"
+            and proposed_direction == "HOLD"
+        ):
+
+            semantic["relationships"].append({
+                "field_a": "PRICE/TREND EVIDENCE",
+                "value_a": trend_state,
+                "field_b": "PROPOSED ACTION",
+                "value_b": proposed_action,
+                "relationship": "CONSISTENT",
+                "meaning": (
+                    "Weak technical trend is compatible "
+                    "with maintaining an existing position. "
+                    "Weak trend alone is not a contradiction "
+                    "of HOLD."
+                ),
+            })
+
+    # --------------------------------------------------------
+    # RSI vs action
+    # --------------------------------------------------------
+
+    rsi_state = _interpret_rsi(rsi)
+    proposed_direction = _action_direction(
+        proposed_action
+    )
+
+    if rsi_state is not None:
+
+        if (
+            rsi_state == "OVERBOUGHT"
+            and proposed_direction == "BUY"
+        ):
+
+            semantic["relationships"].append({
+                "field_a": "RSI",
+                "value_a": rsi_state,
+                "field_b": "PROPOSED ACTION",
+                "value_b": proposed_action,
+                "relationship": "POTENTIAL_CONFLICT",
+                "meaning": (
+                    "RSI is overbought while the proposed "
+                    "action increases exposure."
+                ),
+            })
+
+            semantic["conflicts"].append(
+                "OVERBOUGHT_RSI_VS_BUY_ACTION"
+            )
+
+        elif (
+            rsi_state == "OVERSOLD"
+            and proposed_direction == "REDUCE"
+        ):
+
+            semantic["relationships"].append({
+                "field_a": "RSI",
+                "value_a": rsi_state,
+                "field_b": "PROPOSED ACTION",
+                "value_b": proposed_action,
+                "relationship": "POTENTIAL_CONFLICT",
+                "meaning": (
+                    "RSI is oversold while the proposed "
+                    "action reduces exposure. RSI alone "
+                    "does not determine the decision, but "
+                    "the relationship warrants review."
+                ),
+            })
+
+            semantic["conflicts"].append(
+                "OVERSOLD_RSI_VS_REDUCE_ACTION"
+            )
+
+    # --------------------------------------------------------
+    # Overall semantic status
+    # --------------------------------------------------------
+
+    if semantic["conflicts"]:
+
+        semantic["overall_status"] = (
+            "POTENTIAL_CONFLICT"
+        )
+
+    elif semantic["missing_evidence"]:
+
+        semantic["overall_status"] = (
+            "EVIDENCE_INCOMPLETE"
+        )
+
+    else:
+
+        semantic["overall_status"] = (
+            "CONSISTENT"
+        )
+
+    return semantic
+
+
+
+
 def normalise_text(
     value: Any,
     default: str = "",
@@ -1761,6 +2483,8 @@ def build_candidate_context(
         )
     )
 
+
+
     # --------------------------------------------------------
     # Rules-based proposal
     # --------------------------------------------------------
@@ -1770,9 +2494,18 @@ def build_candidate_context(
             candidate,
             "Action",
             "action",
-            "Decision",
-            "Final Decision",
+            "Proposed Action",
+            "proposed_action",
             default="HOLD",
+        )
+    )
+
+    proposed_action = normalise_action(
+        get_value(
+            candidate,
+            "Proposed Action",
+            "proposed_action",
+            default=rules_action,
         )
     )
 
@@ -1844,7 +2577,7 @@ def build_candidate_context(
             "RSI",
             "rsi",
             evidence_key="rsi",
-            default=0,
+            default=None,
         )
     )
 
@@ -1856,7 +2589,7 @@ def build_candidate_context(
             "MA50",
             "ma50",
             evidence_key="sma50",
-            default=0,
+            default=None,
         )
     )
 
@@ -1868,7 +2601,7 @@ def build_candidate_context(
             "MA200",
             "ma200",
             evidence_key="sma200",
-            default=0,
+            default=None,
         )
     )
 
@@ -2124,6 +2857,42 @@ def build_candidate_context(
         intelligence_lookup,
     )
 
+
+    # --------------------------------------------------------
+    # Semantic / ontology evidence
+    # --------------------------------------------------------
+    #
+    # IMPORTANT:
+    # This must be built only after all analytical evidence
+    # and action fields have been resolved.
+    #
+    # The semantic layer does NOT make or change a decision.
+    # It translates the existing evidence into explicit
+    # relationships for the LLM reviewer.
+    # --------------------------------------------------------
+
+    proposed_action = normalise_action(
+        get_value(
+            candidate,
+            "Proposed Action",
+            "proposed_action",
+            default=rules_action,
+        )
+    )
+
+    semantic_evidence = build_semantic_evidence(
+        asset_type=asset_type,
+        current_price=current_price,
+        rsi=rsi,
+        ma50=sma50,
+        ma200=sma200,
+        etf_signal=etf_signal,
+        signal=signal,
+        deterministic_action=rules_action,
+        proposed_action=proposed_action,
+    )
+
+
     return {
         "ticker":
             ticker,
@@ -2291,6 +3060,17 @@ def build_candidate_context(
             "action":
                 rules_action,
         },
+
+        # ----------------------------------------------------
+        # Explicit semantic / ontology interpretation
+        # ----------------------------------------------------
+        #
+        # This is explanatory evidence for the LLM reviewer.
+        # It is not a decision and must not override the
+        # deterministic decision.
+        # ----------------------------------------------------
+        "semantic_evidence":
+            semantic_evidence,
 
         "recommendation_intelligence":
             intelligence,

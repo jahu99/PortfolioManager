@@ -245,7 +245,6 @@ def enrich_portfolio_holdings(
 
             "AI Summary",
 
-            "AI Analysis",
 
             "Price",
 

@@ -76,7 +76,6 @@ from analysis.ai_decision_engine import (
     generate_ai_decision
 )
 
-from analysis.ai_analyst import generate_ai_analysis
 
 from analysis.portfolio_ai import (
     generate_portfolio_review
@@ -135,8 +134,6 @@ def main():
 
     print("MAIN STARTED")
 
-    AI_ANALYSIS_LIMIT = 3
-    ai_analysis_count = 0
 
     # ---------------------------------
     # Initialise database
@@ -585,7 +582,6 @@ def main():
                 f"{ai_decision}"
             )
 
-            ai_analysis = None
 
             ai_recommendation = (
                 generate_ai_recommendation(
@@ -964,41 +960,6 @@ def main():
     print(
         f"RESULTS AFTER SORT: {len(results)}"
     )
-
-    # ---------------------------------
-    # AI Analyst Review - Top Candidates
-    # ---------------------------------
-
-    for stock in results[:AI_ANALYSIS_LIMIT]:
-
-        try:
-
-            print(
-                "OLLAMA ANALYST RUN:",
-                stock["Ticker"]
-            )
-
-            ai_analysis = generate_ai_analysis(
-                stock["Ticker"],
-                stock["Investment Score"],
-                stock["Technical Score"],
-                stock["Quality Score"],
-                stock["Growth Score"],
-                stock["AI Decision Object"],
-                stock["Recommendation Reasons"],
-                stock["Recommendation Risks"]
-            )
-
-            stock["AI Analysis"] = ai_analysis
-
-        except Exception as e:
-
-            print(
-                f"AI Analyst failed for "
-                f"{stock['Ticker']}: {e}"
-            )
-
-            stock["AI Analysis"] = None
 
     # ---------------------------------
     # Save recommendation history

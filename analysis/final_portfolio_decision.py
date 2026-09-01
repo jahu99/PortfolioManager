@@ -751,34 +751,18 @@ def build_eligible_population(
     """
     Build the exact Final Portfolio Decisions population.
 
-    FD-02 — Population Governance
-    ------------------------------
+    Existing holdings are always eligible.
 
-    The final population contains ONLY:
+    Non-owned securities are eligible only when Capital Allocation
+    proposes BUY NEW.
 
-        1. Every currently owned investment holding.
-        2. Every non-owned BUY NEW opportunity from Capital Allocation.
+    For existing holdings, analytical stock fields such as
+    Investment Score and Signal are preserved from portfolio_decisions.
+    Capital Allocation must not overwrite those values with its
+    default/placeholder zero values.
 
-    Explicit exclusions:
-
-        - CASH
-        - non-owned HOLD
-        - non-owned BUY MORE
-        - non-owned REDUCE
-        - non-owned SELL
-        - non-owned WATCH
-        - non-owned REVIEW
-
-    Ownership is authoritative from portfolio_summary.
-
-    Capital Allocation is authoritative for NEW BUY proposals.
-
-    CASH is excluded at source and again immediately before the
-    population is returned.
-
-    This routine does not run the AI decision chain.
-    It only establishes the population that the final decision
-    engine is permitted to review.
+    ETFs retain ETF Score / ETF Signal and must not inherit stock
+    scoring fields.
     """
 
     # ============================================================
@@ -786,46 +770,30 @@ def build_eligible_population(
     # ============================================================
 
     holdings = normalise_tickers(
-        safe_dataframe(
-            portfolio_summary
-        )
+        safe_dataframe(portfolio_summary)
     )
 
     decisions = normalise_tickers(
-        safe_dataframe(
-            portfolio_decisions
-        )
+        safe_dataframe(portfolio_decisions)
     )
 
     capital = normalise_tickers(
-        get_capital_allocation_dataframe(
-            capital_allocation
-        )
+        get_capital_allocation_dataframe(capital_allocation)
     )
 
     # ============================================================
     # CASH EXCLUSION
-    #
-    # CASH must never enter the Final Portfolio Decisions
-    # population, regardless of which upstream source contains it.
-    #
-    # Do this before constructing any lookup dictionaries.
     # ============================================================
 
     def remove_cash(
         dataframe: pd.DataFrame,
     ) -> pd.DataFrame:
 
-        if dataframe.empty:
-            return dataframe
-
-        if "Ticker" not in dataframe.columns:
+        if dataframe.empty or "Ticker" not in dataframe.columns:
             return dataframe
 
         ticker_series = (
-            dataframe[
-                "Ticker"
-            ]
+            dataframe["Ticker"]
             .astype(str)
             .str.strip()
             .str.upper()
@@ -835,86 +803,134 @@ def build_eligible_population(
             ticker_series != "CASH"
         ].copy()
 
-    holdings = remove_cash(
-        holdings
-    )
-
-    decisions = remove_cash(
-        decisions
-    )
-
-    capital = remove_cash(
-        capital
-    )
+    holdings = remove_cash(holdings)
+    decisions = remove_cash(decisions)
+    capital = remove_cash(capital)
 
     # ============================================================
-    # EXISTING HOLDINGS
-    #
-    # portfolio_summary is authoritative for ownership.
-    #
-    # Positive Quantity means the security is currently held.
-    #
-    # Do not use Capital Allocation to determine whether something
-    # is owned.
+    # LOOKUPS
     # ============================================================
 
     holding_lookup: dict[str, dict] = {}
+    decision_lookup: dict[str, dict] = {}
+    capital_lookup: dict[str, dict] = {}
 
-    if (
-        not holdings.empty
-        and
-        "Ticker" in holdings.columns
-    ):
+    if not holdings.empty and "Ticker" in holdings.columns:
 
         for _, row in holdings.iterrows():
 
             record = row.to_dict()
+            ticker = get_ticker(record)
 
-            ticker = get_ticker(
-                record
-            )
-
-            # Defensive CASH protection.
             if not ticker or ticker == "CASH":
                 continue
 
-            quantity = get_quantity(
-                record
-            )
+            if get_quantity(record) > 0:
+                holding_lookup[ticker] = record
 
-            if quantity > 0:
+    if not decisions.empty and "Ticker" in decisions.columns:
 
-                holding_lookup[
-                    ticker
-                ] = record
+        for _, row in decisions.iterrows():
 
-    # ============================================================
-    # CAPITAL ALLOCATION LOOKUP
-    # ============================================================
+            record = row.to_dict()
+            ticker = get_ticker(record)
 
-    capital_lookup = {}
+            if not ticker or ticker == "CASH":
+                continue
 
-    if (
-        not capital.empty
-        and
-        "Ticker" in capital.columns
-    ):
+            decision_lookup[ticker] = record
+
+    if not capital.empty and "Ticker" in capital.columns:
 
         for _, row in capital.iterrows():
 
             record = row.to_dict()
+            ticker = get_ticker(record)
 
-            ticker = get_ticker(
-                record
-            )
-
-            # Defensive CASH protection.
             if not ticker or ticker == "CASH":
                 continue
 
-            capital_lookup[
-                ticker
-            ] = record
+            capital_lookup[ticker] = record
+
+    # ============================================================
+    # HELPERS
+    # ============================================================
+
+    def is_missing(value: Any) -> bool:
+
+        if value is None:
+            return True
+
+        if isinstance(value, str):
+            return not value.strip()
+
+        try:
+            return bool(pd.isna(value))
+        except Exception:
+            return False
+
+    def has_real_score(
+        value: Any,
+    ) -> bool:
+
+        if is_missing(value):
+            return False
+
+        try:
+            return float(value) != 0.0
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return False
+
+    def overlay_non_missing(
+        target: dict,
+        source: dict,
+    ) -> None:
+
+        for key, value in source.items():
+
+            if is_missing(value):
+                continue
+
+            if key not in target or is_missing(target.get(key)):
+                target[key] = value
+
+    # ============================================================
+    # STOCK ANALYTICAL FIELDS
+    #
+    # These belong to portfolio_decisions for stocks.
+    #
+    # CRITICAL:
+    # Capital allocation commonly contains Investment Score = 0
+    # because that value is not required by the allocator itself.
+    #
+    # Therefore a zero from capital allocation must NEVER replace
+    # an existing non-zero stock Investment Score.
+    # ============================================================
+
+    stock_score_fields = {
+        "Investment Score",
+        "investment_score",
+        "Score",
+        "Quality Score",
+        "quality_score",
+        "Growth Score",
+        "growth_score",
+        "Risk Score",
+        "risk_score",
+        "Signal",
+        "signal",
+        "Momentum Signal",
+    }
+
+    etf_score_fields = {
+        "ETF Score",
+        "etf_score",
+        "ETF Signal",
+        "etf_signal",
+    }
 
     # ============================================================
     # BUILD POPULATION
@@ -923,97 +939,209 @@ def build_eligible_population(
     population: dict[str, dict] = {}
 
     # ============================================================
-    # 1. ADD EVERY EXISTING HOLDING
-    #
-    # Existing holdings are always eligible for final portfolio
-    # review, regardless of whether Capital Allocation currently
-    # proposes HOLD, BUY MORE, REDUCE or SELL.
+    # 1. EXISTING HOLDINGS
     # ============================================================
 
     for ticker, holding in holding_lookup.items():
 
-        # Absolute final CASH safety check.
         if ticker == "CASH":
             continue
 
-        base = dict(
-            holding
-        )
+        base = dict(holding)
 
-        allocation_row = capital_lookup.get(
-            ticker
-        )
+        decision_row = decision_lookup.get(ticker)
+        allocation_row = capital_lookup.get(ticker)
 
-        # Merge Capital Allocation fields without allowing the
-        # allocation row to overwrite authoritative holding data.
+        # --------------------------------------------------------
+        # FIRST: preserve portfolio decision analytical data.
+        #
+        # This is deliberately applied BEFORE capital allocation.
+        # --------------------------------------------------------
+
+        if decision_row:
+
+            overlay_non_missing(
+                base,
+                decision_row,
+            )
+
+        # --------------------------------------------------------
+        # SECOND: overlay capital-allocation data.
+        #
+        # But NEVER allow allocator placeholders to destroy
+        # analytical decision data.
+        # --------------------------------------------------------
+
         if allocation_row:
 
             for key, value in allocation_row.items():
 
-                if key not in base:
+                if is_missing(value):
+                    continue
 
-                    base[
-                        key
-                    ] = value
+                # ------------------------------------------------
+                # Stock analytical fields:
+                #
+                # A valid value already supplied by
+                # portfolio_decisions wins.
+                # ------------------------------------------------
 
+                if key in stock_score_fields:
+
+                    existing_value = base.get(key)
+
+                    if (
+                        key in {
+                            "Investment Score",
+                            "investment_score",
+                            "Score",
+                        }
+                        and
+                        has_real_score(existing_value)
+                        and
+                        not has_real_score(value)
+                    ):
+                        continue
+
+                    if (
+                        key in {
+                            "Signal",
+                            "signal",
+                            "Momentum Signal",
+                        }
+                        and
+                        existing_value
+                        and
+                        not str(value).strip()
+                    ):
+                        continue
+
+                    base[key] = value
+                    continue
+
+                # ------------------------------------------------
+                # ETF analytical fields follow the same rule.
+                # ------------------------------------------------
+
+                if key in etf_score_fields:
+
+                    existing_value = base.get(key)
+
+                    if (
+                        key in {
+                            "ETF Score",
+                            "etf_score",
+                        }
+                        and
+                        has_real_score(existing_value)
+                        and
+                        not has_real_score(value)
+                    ):
+                        continue
+
+                    if (
+                        key in {
+                            "ETF Signal",
+                            "etf_signal",
+                        }
+                        and
+                        existing_value
+                        and
+                        not str(value).strip()
+                    ):
+                        continue
+
+                    base[key] = value
+                    continue
+
+                # ------------------------------------------------
+                # All other allocator fields are allowed to overlay.
+                # ------------------------------------------------
+
+                if key not in base or is_missing(base.get(key)):
+                    base[key] = value
                 else:
+                    base[key] = value
 
-                    try:
+        # --------------------------------------------------------
+        # CRITICAL FINAL REPAIR FOR EXISTING STOCKS
+        #
+        # If portfolio_decisions contains a real Investment Score,
+        # restore it after ALL overlays.
+        #
+        # This specifically protects BUY MORE rows.
+        # --------------------------------------------------------
 
-                        if pd.isna(
-                            base[
-                                key
-                            ]
-                        ):
+        if decision_row:
 
-                            base[
-                                key
-                            ] = value
+            decision_score = decision_row.get(
+                "Investment Score"
+            )
 
-                    except Exception:
+            if not has_real_score(decision_score):
 
-                        pass
+                decision_score = decision_row.get(
+                    "investment_score"
+                )
 
-        # Ownership is explicit and authoritative.
-        base[
-            "Existing Holding"
-        ] = True
+            if not has_real_score(decision_score):
 
-        base[
-            "Owned"
-        ] = True
+                decision_score = decision_row.get(
+                    "Score"
+                )
 
-        base[
-            "Quantity"
-        ] = get_quantity(
+            if has_real_score(decision_score):
+
+                base["Investment Score"] = (
+                    decision_score
+                )
+
+            # ----------------------------------------------------
+            # Restore the stock Signal as well.
+            # ----------------------------------------------------
+
+            decision_signal = decision_row.get(
+                "Signal"
+            )
+
+            if is_missing(decision_signal):
+
+                decision_signal = decision_row.get(
+                    "signal"
+                )
+
+            if is_missing(decision_signal):
+
+                decision_signal = decision_row.get(
+                    "Momentum Signal"
+                )
+
+            if not is_missing(decision_signal):
+
+                base["Signal"] = decision_signal
+
+        # --------------------------------------------------------
+        # OWNERSHIP IS AUTHORITATIVE FROM portfolio_summary.
+        # --------------------------------------------------------
+
+        base["Existing Holding"] = True
+        base["Owned"] = True
+
+        base["Quantity"] = get_quantity(
             holding
         )
 
-        population[
-            ticker
-        ] = base
+        population[ticker] = base
 
     # ============================================================
-    # 2. ADD ONLY NON-OWNED BUY NEW OPPORTUNITIES
-    #
-    # Capital Allocation determines whether a new candidate is
-    # eligible.
-    #
-    # IMPORTANT:
-    #
-    # Only the exact action "BUY NEW" qualifies.
-    #
-    # Do not use startswith("BUY"), because BUY MORE is not a
-    # valid non-owned population candidate.
+    # 2. NON-OWNED BUY NEW OPPORTUNITIES ONLY
     # ============================================================
 
     for ticker, allocation_row in capital_lookup.items():
 
-        # Existing holdings were already added above.
         if ticker in holding_lookup:
             continue
 
-        # Absolute CASH protection.
         if ticker == "CASH":
             continue
 
@@ -1021,45 +1149,85 @@ def build_eligible_population(
             allocation_row
         )
 
-        # Only genuine BUY NEW candidates enter the population.
         if action != "BUY NEW":
             continue
 
-        base = dict(
-            allocation_row
-        )
+        base = dict(allocation_row)
 
-        base[
-            "Existing Holding"
-        ] = False
+        # --------------------------------------------------------
+        # Preserve analytical decision data if available.
+        # --------------------------------------------------------
 
-        base[
-            "Owned"
-        ] = False
+        decision_row = decision_lookup.get(ticker)
 
-        base[
-            "Quantity"
-        ] = 0.0
+        if decision_row:
 
-        population[
-            ticker
-        ] = base
+            overlay_non_missing(
+                base,
+                decision_row,
+            )
+
+            # Explicitly preserve Investment Score.
+            decision_score = decision_row.get(
+                "Investment Score"
+            )
+
+            if not has_real_score(decision_score):
+
+                decision_score = decision_row.get(
+                    "investment_score"
+                )
+
+            if not has_real_score(decision_score):
+
+                decision_score = decision_row.get(
+                    "Score"
+                )
+
+            if has_real_score(decision_score):
+
+                base["Investment Score"] = (
+                    decision_score
+                )
+
+            decision_signal = decision_row.get(
+                "Signal"
+            )
+
+            if is_missing(decision_signal):
+
+                decision_signal = decision_row.get(
+                    "signal"
+                )
+
+            if is_missing(decision_signal):
+
+                decision_signal = decision_row.get(
+                    "Momentum Signal"
+                )
+
+            if not is_missing(decision_signal):
+
+                base["Signal"] = decision_signal
+
+        base["Existing Holding"] = False
+        base["Owned"] = False
+        base["Quantity"] = 0.0
+
+        population[ticker] = base
 
     # ============================================================
-    # FINAL SAFETY FILTER
-    #
-    # Even though CASH has already been removed at source, apply
-    # one final filter immediately before returning.
-    #
-    # This is deliberate defence-in-depth for FD-02.
+    # FINAL CASH SAFETY FILTER
     # ============================================================
 
     population = {
         ticker: record
         for ticker, record in population.items()
-        if ticker
-        and ticker != "CASH"
-        and get_ticker(record) != "CASH"
+        if (
+            ticker
+            and ticker != "CASH"
+            and get_ticker(record) != "CASH"
+        )
     }
 
     # ============================================================
@@ -1068,17 +1236,36 @@ def build_eligible_population(
 
     print(
         "HOLDING LOOKUP TICKERS:",
-        sorted(
-            holding_lookup.keys()
-        )
+        sorted(holding_lookup.keys()),
+    )
+
+    print(
+        "DECISION LOOKUP TICKERS:",
+        sorted(decision_lookup.keys()),
     )
 
     print(
         "ELIGIBLE POPULATION TICKERS:",
-        sorted(
-            population.keys()
-        )
+        sorted(population.keys()),
     )
+
+    # Targeted diagnostic for stock Investment Scores.
+    for ticker, record in population.items():
+
+        if get_asset_type(record) != "ETF":
+
+            print(
+                "ELIGIBLE STOCK SCORE:",
+                ticker,
+                "| Investment Score =",
+                record.get("Investment Score"),
+                "| Signal =",
+                record.get("Signal"),
+                "| Action =",
+                record.get("Capital Allocation Action"),
+                "| Proposed =",
+                record.get("Proposed Action"),
+            )
 
     # ============================================================
     # RETURN
@@ -1087,7 +1274,6 @@ def build_eligible_population(
     return list(
         population.values()
     )
-
 # ============================================================
 # CANDIDATE CONTEXT
 # ============================================================
@@ -1981,6 +2167,21 @@ def run_governed_chain(
     # RECONCILIATION
     # ============================================================
 
+    # Preserve the authoritative analytical Investment Score
+    # for reconciliation. The AI decision layer may not return it
+    # at the top level, but it is already present in candidate["analysis"].
+
+    if (
+        candidate.get("asset_type") != "ETF"
+        and isinstance(candidate.get("analysis"), dict)
+    ):
+        investment_score = candidate["analysis"].get(
+            "investment_score"
+        )
+
+        if investment_score is not None:
+            deterministic["Investment Score"] = investment_score
+
     reconciliation = reconcile_ai_decision(
         decision=deterministic,
         review=review,
@@ -2185,98 +2386,49 @@ def build_final_result(
     -----------------------
     Ticker / horizon learning is REPORTING ONLY.
 
-    It must NOT modify:
-
-        - Proposed Action
-        - Reconciled Decision
-        - Final Decision
-        - Confidence
-        - Evidence Score
-        - Investment Score
-        - Governance
-        - Capital Allocation
-        - Audit
-
-    Learning commentary uses the longest mature horizon available:
-
-        60D -> 10D -> 5D
-
-    A horizon is considered mature when it contains at least
-    MIN_LEARNING_OBSERVATIONS recommendations.
-
-    When no mature horizon exists, the 5D result is reported as
-    "Insufficient data".
-
-    Score relationship
-    ------------------
-    When available, the commentary also reports the relationship
-    between the current Investment Score and the historical
-    score-bucket win rate.
-
-    This is informational only.
-
     Audit
     -----
-    This function does NOT create, update or otherwise modify:
+    This function does NOT create, update or otherwise modify
+    audit_runs, audit_decisions or audit_reasons.
 
-        audit_runs
-        audit_decisions
-        audit_reasons
+    Governance Failure Transparency
+    -------------------------------
+    When the proposed action changes before reaching the final
+    action, preserve the exact deterministic governance failure
+    produced by the reconciliation layer.
 
-    Audit remains observational and is handled by the production
-    audit layer in generate_final_portfolio_decisions().
+    The report exposes:
+
+        Governance Test Failed
+        Governance Threshold
+        Governance Actual Value
+        Governance Failure Detail
+
+    These fields are observational only. They do not influence
+    the decision.
     """
 
-    result = dict(
-        base_row
-    )
+    result = dict(base_row)
 
     # ========================================================
     # CHAIN STAGES
     # ========================================================
 
-    deterministic = chain.get(
-        "deterministic",
-        {},
-    )
+    deterministic = chain.get("deterministic", {})
+    explanation = chain.get("explanation", {})
+    review = chain.get("review", {})
+    reconciliation = chain.get("reconciliation", {})
 
-    explanation = chain.get(
-        "explanation",
-        {},
-    )
-
-    review = chain.get(
-        "review",
-        {},
-    )
-
-    reconciliation = chain.get(
-        "reconciliation",
-        {},
-    )
-
-    if not isinstance(
-        deterministic,
-        dict,
-    ):
+    if not isinstance(deterministic, dict):
         deterministic = {}
 
-    if not isinstance(
-        explanation,
-        dict,
-    ):
+    if not isinstance(explanation, dict):
         explanation = {}
 
-    if not isinstance(
-        review,
-        dict,
-    ):
+    if not isinstance(review, dict):
         review = {}
 
-    if not isinstance(
-        reconciliation,
-        dict,
-    ):
+    if not isinstance(reconciliation, dict):
         reconciliation = {}
 
     evidence = deterministic.get(
@@ -2284,20 +2436,11 @@ def build_final_result(
         {},
     )
 
-    if not isinstance(
-        evidence,
-        dict,
-    ):
+    if not isinstance(evidence, dict):
         evidence = {}
 
     # ========================================================
     # CANDIDATE CONTEXT
-    #
-    # The production AI chain stores the authoritative candidate
-    # under chain["candidate"].
-    #
-    # Compatibility callers may not provide that nested candidate,
-    # so fall back to base_row.
     # ========================================================
 
     candidate = chain.get(
@@ -2305,16 +2448,10 @@ def build_final_result(
         base_row,
     )
 
-    if not isinstance(
-        candidate,
-        dict,
-    ):
+    if not isinstance(candidate, dict):
         candidate = base_row
 
-    if not isinstance(
-        candidate,
-        dict,
-    ):
+    if not isinstance(candidate, dict):
         candidate = {}
 
     ownership = candidate.get(
@@ -2322,10 +2459,7 @@ def build_final_result(
         {},
     )
 
-    if not isinstance(
-        ownership,
-        dict,
-    ):
+    if not isinstance(ownership, dict):
         ownership = {}
 
     analysis = candidate.get(
@@ -2333,92 +2467,58 @@ def build_final_result(
         {},
     )
 
-    if not isinstance(
-        analysis,
-        dict,
-    ):
+    if not isinstance(analysis, dict):
         analysis = {}
 
-    ticker = get_ticker(
-        base_row
-    )
+    ticker = get_ticker(base_row)
 
     # ========================================================
     # ASSET TYPE
-    #
-    # ETFs use ETF Score / ETF Signal.
-    # Stocks use Investment Score / Signal.
-    #
-    # Do not allow stock scoring information to leak into ETFs.
     # ========================================================
 
-    asset_type = get_asset_type(
-        base_row
-    )
+    asset_type = get_asset_type(base_row)
 
     if asset_type == "ETF":
 
         etf_score = safe_float(
             first_value(
-                base_row.get(
-                    "ETF Score"
-                ),
-                base_row.get(
-                    "etf_score"
-                ),
+                base_row.get("ETF Score"),
+                base_row.get("etf_score"),
                 0,
             )
         )
 
         etf_signal = upper_text(
             first_value(
-                base_row.get(
-                    "ETF Signal"
-                ),
-                base_row.get(
-                    "etf_signal"
-                ),
+                base_row.get("ETF Signal"),
+                base_row.get("etf_signal"),
                 default="HOLD",
             ),
             "HOLD",
         )
 
         signal = ""
-
         investment_score = 0.0
 
     else:
 
         etf_score = 0.0
-
         etf_signal = ""
 
         investment_score = safe_float(
             first_value(
-                base_row.get(
-                    "Investment Score"
-                ),
-                analysis.get(
-                    "investment_score"
-                ),
-                deterministic.get(
-                    "Investment Score"
-                ),
+                base_row.get("Investment Score"),
+                analysis.get("investment_score"),
+                deterministic.get("Investment Score"),
                 0,
             )
         )
 
         signal = upper_text(
             first_value(
-                base_row.get(
-                    "Signal"
-                ),
-                base_row.get(
-                    "signal"
-                ),
-                analysis.get(
-                    "signal"
-                ),
+                base_row.get("Signal"),
+                base_row.get("signal"),
+                analysis.get("signal"),
                 default="HOLD",
             ),
             "HOLD",
@@ -2426,30 +2526,16 @@ def build_final_result(
 
     # ========================================================
     # ORIGINAL PROPOSED ACTION
-    #
-    # Preserve REDUCE percentage variants exactly.
     # ========================================================
 
     proposed_action = upper_text(
         first_value(
-            base_row.get(
-                "Proposed Action"
-            ),
-            base_row.get(
-                "Final Action"
-            ),
-            base_row.get(
-                "Capital Allocation Action"
-            ),
-            base_row.get(
-                "Action"
-            ),
-            deterministic.get(
-                "Proposed Action"
-            ),
-            deterministic.get(
-                "Action"
-            ),
+            base_row.get("Proposed Action"),
+            base_row.get("Final Action"),
+            base_row.get("Capital Allocation Action"),
+            base_row.get("Action"),
+            deterministic.get("Proposed Action"),
+            deterministic.get("Action"),
             default="HOLD",
         ),
         "HOLD",
@@ -2457,17 +2543,11 @@ def build_final_result(
 
     # ========================================================
     # NORMALISED PROPOSED ACTION
-    #
-    # Governance compares the action category, not reduction size.
     # ========================================================
 
-    normalised_proposed_action = (
-        proposed_action
-    )
+    normalised_proposed_action = proposed_action
 
-    if normalised_proposed_action.startswith(
-        "REDUCE"
-    ):
+    if normalised_proposed_action.startswith("REDUCE"):
 
         normalised_proposed_action = "REDUCE"
 
@@ -2489,35 +2569,217 @@ def build_final_result(
         reconciliation
     )
 
-    reconciliation_status = (
-        get_reconciliation_status(
-            reconciliation
+    reconciliation_status = get_reconciliation_status(
+        reconciliation
+    )
+
+    reconciliation_reason = get_reconciliation_reason(
+        reconciliation
+    )
+
+    governance_flags = get_governance_flags(
+        reconciliation
+    )
+
+    # ========================================================
+    # GOVERNANCE FAILURE TRANSPARENCY
+    #
+    # IMPORTANT:
+    #
+    # Do not reconstruct the failed test from the final action.
+    #
+    # The reconciliation layer is the authoritative source of
+    # the governance result. Preserve whatever exact structured
+    # failure information it provides.
+    #
+    # Several field names are supported so this remains compatible
+    # with the existing reconciler output.
+    # ========================================================
+
+    governance_test_failed = safe_text(
+        first_value(
+            reconciliation.get(
+                "Governance Test Failed"
+            ),
+            reconciliation.get(
+                "Failed Test"
+            ),
+            reconciliation.get(
+                "Failed Requirement"
+            ),
+            reconciliation.get(
+                "Governance Failure Test"
+            ),
+            reconciliation.get(
+                "Failure Test"
+            ),
+            reconciliation.get(
+                "Failed Governance Requirement"
+            ),
+            default="",
         )
     )
 
-    reconciliation_reason = (
-        get_reconciliation_reason(
-            reconciliation
+    governance_threshold = first_value(
+        reconciliation.get(
+            "Governance Threshold"
+        ),
+        reconciliation.get(
+            "Threshold"
+        ),
+        reconciliation.get(
+            "Failed Threshold"
+        ),
+        reconciliation.get(
+            "Required Threshold"
+        ),
+        reconciliation.get(
+            "Governance Failure Threshold"
+        ),
+        default=None,
+    )
+
+    governance_actual_value = first_value(
+        reconciliation.get(
+            "Governance Actual Value"
+        ),
+        reconciliation.get(
+            "Actual Value"
+        ),
+        reconciliation.get(
+            "Actual"
+        ),
+        reconciliation.get(
+            "Failed Actual Value"
+        ),
+        reconciliation.get(
+            "Governance Failure Actual"
+        ),
+        default=None,
+    )
+
+    # Convert threshold / actual to numeric where possible.
+    # Preserve text where the failed test is non-numeric,
+    # e.g. "VALID DETERMINISTIC ACTION".
+    try:
+        if governance_threshold is not None:
+            governance_threshold = float(
+                governance_threshold
+            )
+            if pd.isna(governance_threshold):
+                governance_threshold = None
+    except (TypeError, ValueError):
+        governance_threshold = safe_text(
+            governance_threshold
+        )
+
+    try:
+        if governance_actual_value is not None:
+            governance_actual_value = float(
+                governance_actual_value
+            )
+            if pd.isna(governance_actual_value):
+                governance_actual_value = None
+    except (TypeError, ValueError):
+        governance_actual_value = safe_text(
+            governance_actual_value
+        )
+
+    # --------------------------------------------------------
+    # Some existing reconciliation implementations encode the
+    # structured failure only inside the reason text.
+    #
+    # Preserve the complete reason regardless.
+    #
+    # We deliberately do NOT attempt fragile parsing here unless
+    # the structured fields above are absent.
+    # --------------------------------------------------------
+
+    governance_failure_detail = safe_text(
+        first_value(
+            reconciliation.get(
+                "Governance Failure Detail"
+            ),
+            reconciliation.get(
+                "Failure Detail"
+            ),
+            reconciliation.get(
+                "Governance Failure"
+            ),
+            reconciliation.get(
+                "Governance Failure Reason"
+            ),
+            default="",
         )
     )
 
-    governance_flags = (
-        get_governance_flags(
-            reconciliation
+    # If there is no dedicated failure detail, the full
+    # reconciliation reason remains the authoritative fallback.
+    if (
+        not governance_failure_detail
+        and reconciliation_reason
+    ):
+        governance_failure_detail = (
+            reconciliation_reason
         )
-    )
+
+    # --------------------------------------------------------
+    # Build a concise human-readable failure expression.
+    #
+    # This gives the Excel report an immediately traceable
+    # representation even if the individual structured fields
+    # are populated.
+    # --------------------------------------------------------
+
+    governance_failure_summary = ""
+
+    if governance_test_failed:
+
+        governance_failure_summary = (
+            governance_test_failed
+        )
+
+        if governance_threshold is not None:
+
+            if isinstance(
+                governance_threshold,
+                (int, float),
+            ):
+
+                governance_failure_summary += (
+                    f" | threshold={governance_threshold:g}"
+                )
+
+            else:
+
+                governance_failure_summary += (
+                    f" | threshold={governance_threshold}"
+                )
+
+        if governance_actual_value is not None:
+
+            if isinstance(
+                governance_actual_value,
+                (int, float),
+            ):
+
+                governance_failure_summary += (
+                    f" | actual={governance_actual_value:g}"
+                )
+
+            else:
+
+                governance_failure_summary += (
+                    f" | actual={governance_actual_value}"
+                )
 
     # ========================================================
     # NORMALISED RECONCILED ACTION
     # ========================================================
 
-    normalised_reconciled_action = (
-        reconciled_action
-    )
+    normalised_reconciled_action = reconciled_action
 
-    if normalised_reconciled_action.startswith(
-        "REDUCE"
-    ):
+    if normalised_reconciled_action.startswith("REDUCE"):
 
         normalised_reconciled_action = "REDUCE"
 
@@ -2533,9 +2795,6 @@ def build_final_result(
 
     # ========================================================
     # FINAL ACTION
-    #
-    # Preserve REDUCE percentage whenever governance supports
-    # the REDUCE action.
     # ========================================================
 
     if normalised_proposed_action == "HOLD":
@@ -2554,15 +2813,10 @@ def build_final_result(
 
         else:
 
-            final_action = (
-                normalised_proposed_action
-            )
+            final_action = normalised_proposed_action
 
     else:
 
-        # Governance did not support the proposal.
-        #
-        # Conservative portfolio result.
         final_action = "HOLD"
 
     # ========================================================
@@ -2571,15 +2825,10 @@ def build_final_result(
 
     llm_assessment = upper_text(
         first_value(
-            review.get(
-                "LLM Assessment"
-            ),
-            review.get(
-                "Review Decision"
-            ),
-            review.get(
-                "LLM Decision"
-            ),
+            review.get("LLM Review"),
+            review.get("LLM Assessment"),
+            review.get("Review Decision"),
+            review.get("LLM Decision"),
             default="CHALLENGE",
         ),
         "CHALLENGE",
@@ -2587,24 +2836,16 @@ def build_final_result(
 
     llm_confidence = safe_float(
         first_value(
-            review.get(
-                "LLM Confidence"
-            ),
-            review.get(
-                "Confidence"
-            ),
+            review.get("LLM Confidence"),
+            review.get("Confidence"),
             default=0,
         )
     )
 
     llm_reason = safe_text(
         first_value(
-            review.get(
-                "LLM Reason"
-            ),
-            review.get(
-                "Reason"
-            ),
+            review.get("LLM Reason"),
+            review.get("Reason"),
             default="",
         )
     )
@@ -2622,24 +2863,16 @@ def build_final_result(
 
     evidence_score = safe_float(
         first_value(
-            deterministic.get(
-                "Evidence Score"
-            ),
-            evidence.get(
-                "Evidence Score"
-            ),
+            deterministic.get("Evidence Score"),
+            evidence.get("Evidence Score"),
             default=0,
         )
     )
 
     evidence_strength = safe_text(
         first_value(
-            deterministic.get(
-                "Evidence Strength"
-            ),
-            evidence.get(
-                "Evidence Strength"
-            ),
+            deterministic.get("Evidence Strength"),
+            evidence.get("Evidence Strength"),
             default="UNKNOWN",
         ),
         "UNKNOWN",
@@ -2647,12 +2880,8 @@ def build_final_result(
 
     decision_support = upper_text(
         first_value(
-            deterministic.get(
-                "Decision Support"
-            ),
-            evidence.get(
-                "Decision Support"
-            ),
+            deterministic.get("Decision Support"),
+            evidence.get("Decision Support"),
             default="UNKNOWN",
         ),
         "UNKNOWN",
@@ -2660,41 +2889,24 @@ def build_final_result(
 
     deterministic_confidence = safe_float(
         first_value(
-            deterministic.get(
-                "Confidence"
-            ),
-            deterministic.get(
-                "Decision Confidence"
-            ),
-            evidence.get(
-                "Confidence"
-            ),
+            deterministic.get("Confidence"),
+            deterministic.get("Decision Confidence"),
+            evidence.get("Confidence"),
             default=0,
         )
     )
 
     learning_adjusted_score = safe_float(
         first_value(
-            deterministic.get(
-                "Learning Adjusted Score"
-            ),
-            evidence.get(
-                "Learning Adjusted Score"
-            ),
-            base_row.get(
-                "Learning Adjusted Score"
-            ),
+            deterministic.get("Learning Adjusted Score"),
+            evidence.get("Learning Adjusted Score"),
+            base_row.get("Learning Adjusted Score"),
             default=0,
         )
     )
 
     # ========================================================
     # HISTORICAL SIGNAL EVIDENCE
-    #
-    # These are the existing historical evidence fields used by
-    # the governed decision layer.
-    #
-    # Do NOT replace these with ticker-horizon commentary.
     # ========================================================
 
     historical_observations = safe_float(
@@ -2757,26 +2969,10 @@ def build_final_result(
         )
     )
 
-    
-    # --------------------------------------------------------
-    # Ticker Horizon Learning
-    #
-    # At this point build_final_result() receives the learning
-    # dictionary for THIS ticker only.
-    #
-    # Expected structure:
-    #
-    #     {
-    #         5:  {...},
-    #         10: {...},
-    #         60: {...}
-    #     }
-    #
-    # The complete ticker lookup has already been resolved by
-    # generate_final_portfolio_decisions().
-    #
-    # Do NOT attempt to look up the ticker again here.
-    # --------------------------------------------------------
+    # ========================================================
+    # TICKER HORIZON LEARNING
+    # ========================================================
+
     learning_records = (
         ticker_horizon_learning
         if isinstance(
@@ -2785,12 +2981,6 @@ def build_final_result(
         )
         else {}
     )
-    
-    # --------------------------------------------------------
-    # Learning maturity threshold.
-    #
-    # Prefer the existing project constant when available.
-    # --------------------------------------------------------
 
     min_learning_observations = safe_float(
         globals().get(
@@ -2800,24 +2990,13 @@ def build_final_result(
     )
 
     if min_learning_observations <= 0:
-
         min_learning_observations = 20.0
-
-    # --------------------------------------------------------
-    # Helper to extract numeric learning fields.
-    #
-    # Supports the established learning schema and common
-    # compatibility field names.
-    # --------------------------------------------------------
 
     def learning_numeric(
         record,
         *names,
     ):
-        if not isinstance(
-            record,
-            dict,
-        ):
+        if not isinstance(record, dict):
             return None
 
         for name in names:
@@ -2825,22 +3004,16 @@ def build_final_result(
             if name not in record:
                 continue
 
-            value = record.get(
-                name
-            )
+            value = record.get(name)
 
             if value is None:
                 continue
 
             try:
 
-                numeric = float(
-                    value
-                )
+                numeric = float(value)
 
-                if pd.isna(
-                    numeric
-                ):
+                if pd.isna(numeric):
                     continue
 
                 return numeric
@@ -2853,13 +3026,6 @@ def build_final_result(
                 continue
 
         return None
-
-    # --------------------------------------------------------
-    # Locate horizon records.
-    #
-    # Horizon keys may be integers, strings such as "5D", or
-    # strings such as "5".
-    # --------------------------------------------------------
 
     def get_horizon_record(
         horizon,
@@ -2876,18 +3042,11 @@ def build_final_result(
 
         for key in possible_keys:
 
-            record = learning_records.get(
-                key
-            )
+            record = learning_records.get(key)
 
-            if isinstance(
-                record,
-                dict,
-            ):
-
+            if isinstance(record, dict):
                 return record
 
-        # Compatibility with records represented as a list.
         if isinstance(
             learning_records,
             list,
@@ -2895,10 +3054,7 @@ def build_final_result(
 
             for record in learning_records:
 
-                if not isinstance(
-                    record,
-                    dict,
-                ):
+                if not isinstance(record, dict):
                     continue
 
                 record_horizon = learning_numeric(
@@ -2916,10 +3072,6 @@ def build_final_result(
                     return record
 
         return None
-
-    # --------------------------------------------------------
-    # Select longest mature horizon.
-    # --------------------------------------------------------
 
     selected_horizon = None
     selected_record = None
@@ -2955,44 +3107,33 @@ def build_final_result(
         if (
             observations is not None
             and
-            observations >=
-            min_learning_observations
+            observations >= min_learning_observations
         ):
 
-            selected_horizon = (
-                horizon_number
-            )
-
+            selected_horizon = horizon_number
             selected_record = record
-
             break
 
     # ========================================================
-    # Build ticker-horizon commentary.
+    # BUILD TICKER-HORIZON COMMENTARY
     # ========================================================
 
     ticker_horizon_learning_commentary = ""
 
     if selected_record is None:
 
-        five_day_record = (
-            get_horizon_record(
-                5
-            )
-        )
+        five_day_record = get_horizon_record(5)
 
-        five_day_observations = (
-            learning_numeric(
-                five_day_record,
-                "Recommendations",
-                "Recommendation Count",
-                "Observations",
-                "Observation Count",
-                "Outcome Count",
-                "outcome_count",
-                "observations",
-                "observation_count",
-            )
+        five_day_observations = learning_numeric(
+            five_day_record,
+            "Recommendations",
+            "Recommendation Count",
+            "Observations",
+            "Observation Count",
+            "Outcome Count",
+            "outcome_count",
+            "observations",
+            "observation_count",
         )
 
         if five_day_observations is None:
@@ -3003,11 +3144,9 @@ def build_final_result(
 
         else:
 
-            if (
-                float(
-                    five_day_observations
-                ).is_integer()
-            ):
+            if float(
+                five_day_observations
+            ).is_integer():
 
                 observation_text = (
                     f"{int(five_day_observations)} "
@@ -3026,12 +3165,6 @@ def build_final_result(
             f"({observation_text}; "
             f"{int(min_learning_observations)} required)"
         )
-
-        # ----------------------------------------------------
-        # Even when horizon learning is immature, expose the
-        # current score relationship when score-bucket evidence
-        # is available.
-        # ----------------------------------------------------
 
         score_bucket_observations = learning_numeric(
             base_row,
@@ -3107,70 +3240,37 @@ def build_final_result(
 
         reliability = safe_text(
             first_value(
-                selected_record.get(
-                    "Reliability"
-                ),
-                selected_record.get(
-                    "reliability"
-                ),
+                selected_record.get("Reliability"),
+                selected_record.get("reliability"),
                 default="",
             )
         )
 
         learning_proposed_action = safe_text(
             first_value(
-                selected_record.get(
-                    "Initial Action"
-                ),
-                selected_record.get(
-                    "Proposed Action"
-                ),
-                selected_record.get(
-                    "Action"
-                ),
+                selected_record.get("Initial Action"),
+                selected_record.get("Proposed Action"),
+                selected_record.get("Action"),
                 proposed_action,
             )
         )
 
-        # ----------------------------------------------------
-        # Determine the historical outcome relationship.
-        #
-        # A positive average return means the recommendation
-        # generally preceded an increase in price.
-        #
-        # A negative average return means it generally preceded
-        # a decrease in price.
-        # ----------------------------------------------------
-
         if average_return is not None:
 
             if average_return > 0:
-
-                relationship = (
-                    "historically positive"
-                )
+                relationship = "historically positive"
 
             elif average_return < 0:
-
-                relationship = (
-                    "historically negative"
-                )
+                relationship = "historically negative"
 
             else:
-
-                relationship = (
-                    "historically neutral"
-                )
+                relationship = "historically neutral"
 
         else:
 
             relationship = (
                 "historical outcome unavailable"
             )
-
-        # ----------------------------------------------------
-        # Outcome text.
-        # ----------------------------------------------------
 
         if average_return is not None:
 
@@ -3188,13 +3288,7 @@ def build_final_result(
 
         else:
 
-            outcome_text = (
-                "outcome unavailable"
-            )
-
-        # ----------------------------------------------------
-        # Recommendation count text.
-        # ----------------------------------------------------
+            outcome_text = "outcome unavailable"
 
         if recommendations is None:
 
@@ -3224,27 +3318,12 @@ def build_final_result(
             f"({recommendation_text})"
         )
 
-        # ----------------------------------------------------
-        # Win-rate metric.
-        #
-        # Example:
-        #
-        #     win rate 72.5%
-        #
-        # This is the percentage of historical recommendations
-        # that met the learning system's definition of a win.
-        # ----------------------------------------------------
-
         if win_rate is not None:
 
             ticker_horizon_learning_commentary += (
                 f"; win rate "
                 f"{win_rate:.1f}%"
             )
-
-        # ----------------------------------------------------
-        # Reliability.
-        # ----------------------------------------------------
 
         if reliability:
 
@@ -3253,25 +3332,12 @@ def build_final_result(
                 f"{reliability}"
             )
 
-        # ----------------------------------------------------
-        # Median outcome.
-        # ----------------------------------------------------
-
         if median_return is not None:
 
             ticker_horizon_learning_commentary += (
                 f"; median outcome "
                 f"{median_return:+.2f}%"
             )
-
-        # ----------------------------------------------------
-        # Current score relationship.
-        #
-        # This explicitly connects today's Investment Score
-        # with the historical performance of the score bucket.
-        #
-        # It is INFORMATIONAL ONLY.
-        # ----------------------------------------------------
 
         score_bucket_observations = learning_numeric(
             base_row,
@@ -3330,20 +3396,13 @@ def build_final_result(
 
     # ========================================================
     # DECISION STATUS
-    #
-    # Compare governed action categories.
-    #
-    # REDUCE 25%, REDUCE 50%, REDUCE 75%, REDUCE 100%
-    # all compare as REDUCE.
     # ========================================================
 
     final_action_for_governance = (
         "REDUCE"
         if str(
             final_action
-        ).upper().startswith(
-            "REDUCE"
-        )
+        ).upper().startswith("REDUCE")
         else final_action
     )
 
@@ -3387,9 +3446,7 @@ def build_final_result(
 
         if reconciliation_reason:
 
-            final_reason = (
-                reconciliation_reason
-            )
+            final_reason = reconciliation_reason
 
         elif (
             normalised_proposed_action
@@ -3451,15 +3508,9 @@ def build_final_result(
 
     explanation_text = safe_text(
         first_value(
-            explanation.get(
-                "Summary"
-            ),
-            explanation.get(
-                "Decision Explanation"
-            ),
-            explanation.get(
-                "Explanation"
-            ),
+            explanation.get("Summary"),
+            explanation.get("Decision Explanation"),
+            explanation.get("Explanation"),
             default="",
         )
     )
@@ -3473,22 +3524,10 @@ def build_final_result(
 
             if final_action == "HOLD":
 
-                final_reason = (
-                    explanation_text
-                )
+                final_reason = explanation_text
 
     # ========================================================
     # FINAL RESULT CONTRACT
-    #
-    # IMPORTANT:
-    #
-    # Learning commentary is inserted here only as a reporting
-    # field.
-    #
-    # Nothing from ticker_horizon_learning is used to determine
-    # final_action.
-    #
-    # Nothing here writes to the audit database.
     # ========================================================
 
     result.update({
@@ -3566,944 +3605,26 @@ def build_final_result(
             governance_flags,
 
         # ----------------------------------------------------
-        # Deterministic evidence
-        # ----------------------------------------------------
-
-        "Evidence Score":
-            round(
-                evidence_score,
-                2,
-            ),
-
-        "Evidence Strength":
-            evidence_strength,
-
-        "Decision Support":
-            decision_support,
-
-        "Deterministic Confidence":
-            round(
-                deterministic_confidence,
-                2,
-            ),
-
-        "Confidence":
-            round(
-                deterministic_confidence,
-                2,
-            ),
-
-        # ----------------------------------------------------
-        # Historical evidence
-        # ----------------------------------------------------
-
-        "Historical Signal Observations":
-            int(
-                historical_observations
-            ),
-
-        "Historical Signal Win Rate %":
-            round(
-                historical_win_rate,
-                2,
-            ),
-
-        "Historical Signal Average Return %":
-            round(
-                historical_return,
-                2,
-            ),
-
-        "Historical Signal Reliability":
-            historical_reliability,
-
-        "Learning Adjusted Score":
-            round(
-                learning_adjusted_score,
-                2,
-            ),
-
-        # ----------------------------------------------------
-        # Ticker / horizon learning
+        # NEW GOVERNANCE FAILURE FIELDS
         #
-        # REPORTING ONLY.
+        # These are REPORTING ONLY.
+        # They do not influence final_action.
         # ----------------------------------------------------
 
-        "Ticker Horizon Learning Commentary":
-            ticker_horizon_learning_commentary,
+        "Governance Test Failed":
+            governance_test_failed,
 
-        # ----------------------------------------------------
-        # LLM review
-        # ----------------------------------------------------
+        "Governance Threshold":
+            governance_threshold,
 
-        "LLM Assessment":
-            llm_assessment,
+        "Governance Actual Value":
+            governance_actual_value,
 
-        "LLM Review Decision":
-            llm_assessment,
+        "Governance Failure Detail":
+            governance_failure_detail,
 
-        "LLM Review Valid":
-            (
-                reviewer_status
-                ==
-                "LLM REVIEW COMPLETE"
-            ),
-
-        "LLM Confidence":
-            round(
-                llm_confidence,
-                2,
-            ),
-
-        "LLM Review Confidence":
-            round(
-                llm_confidence,
-                2,
-            ),
-
-        "LLM Reason":
-            llm_reason,
-
-        "LLM Review Reason":
-            llm_reason,
-
-        "LLM Key Points":
-            review.get(
-                "LLM Key Points",
-                review.get(
-                    "Key Points",
-                    [],
-                ),
-            ),
-
-        "LLM Evidence Gaps":
-            review.get(
-                "LLM Evidence Gaps",
-                review.get(
-                    "Evidence Gaps",
-                    [],
-                ),
-            ),
-
-        # ----------------------------------------------------
-        # Final result
-        # ----------------------------------------------------
-
-        "Final Reason":
-            final_reason,
-
-        "Explanation":
-            final_reason,
-
-        # ----------------------------------------------------
-        # Authority / execution
-        #
-        # This function does not execute trades or allocate
-        # capital. Those remain downstream responsibilities.
-        # ----------------------------------------------------
-
-        "Decision Authority":
-            "GOVERNED AI DECISION LAYER",
-
-        "Capital Allocation":
-            "NOT PERFORMED",
-
-        "Trade Execution":
-            "NOT PERFORMED",
-    })
-
-    return result
-
-
-    def _learning_value(
-        record: dict,
-        *names,
-    ):
-        if not isinstance(
-            record,
-            dict,
-        ):
-            return None
-
-        for name in names:
-
-            if name not in record:
-                continue
-
-            value = record.get(
-                name
-            )
-
-            if value is None:
-                continue
-
-            try:
-                if pd.isna(
-                    value
-                ):
-                    continue
-            except Exception:
-                pass
-
-            return value
-
-        return None
-
-    def _learning_numeric(
-        record: dict,
-        *names,
-    ):
-        value = _learning_value(
-            record,
-            *names,
-        )
-
-        if value is None:
-            return None
-
-        try:
-
-            if isinstance(
-                value,
-                bool,
-            ):
-                return float(
-                    int(value)
-                )
-
-            return float(
-                value
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            return None
-
-    # --------------------------------------------------------
-    # Build a clean horizon lookup.
-    #
-    # Defensive support for:
-    #
-    #     {5: {...}, 10: {...}, 60: {...}}
-    #
-    # and:
-    #
-    #     {"5": {...}, "10": {...}, "60": {...}}
-    #
-    # and:
-    #
-    #     {"5D": {...}, "10D": {...}, "60D": {...}}
-    # --------------------------------------------------------
-
-    horizon_records = {}
-
-    for raw_horizon, record in (
-        ticker_horizon_learning.items()
-    ):
-
-        if not isinstance(
-            record,
-            dict,
-        ):
-            continue
-
-        try:
-
-            horizon_number = int(
-                float(
-                    raw_horizon
-                )
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            horizon_text = (
-                safe_text(
-                    raw_horizon
-                ).upper()
-            )
-
-            if horizon_text.startswith(
-                "5D"
-            ):
-                horizon_number = 5
-
-            elif horizon_text.startswith(
-                "10D"
-            ):
-                horizon_number = 10
-
-            elif horizon_text.startswith(
-                "60D"
-            ):
-                horizon_number = 60
-
-            else:
-                horizon_number = None
-
-        if horizon_number not in {
-            5,
-            10,
-            60,
-        }:
-            continue
-
-        horizon_records[
-            horizon_number
-        ] = record
-
-    # --------------------------------------------------------
-    # Select longest mature horizon.
-    #
-    # The agreed reporting hierarchy is:
-    #
-    #     60D -> 10D -> 5D
-    #
-    # A horizon is mature with >= 20 recommendations.
-    # --------------------------------------------------------
-
-    MIN_LEARNING_OBSERVATIONS = 20
-
-    selected_horizon = None
-    selected_record = None
-
-    for horizon_number in (
-        60,
-        10,
-        5,
-    ):
-
-        record = horizon_records.get(
-            horizon_number
-        )
-
-        if not isinstance(
-            record,
-            dict,
-        ):
-            continue
-
-        recommendations = _learning_numeric(
-            record,
-            "Recommendations",
-            "Recommendation Count",
-            "Observations",
-            "Observation Count",
-            "Outcome Count",
-            "outcome_count",
-            "observations",
-            "observation_count",
-        )
-
-        if (
-            recommendations is not None
-            and
-            recommendations
-            >=
-            MIN_LEARNING_OBSERVATIONS
-        ):
-
-            selected_horizon = (
-                horizon_number
-            )
-
-            selected_record = record
-
-            break
-
-    # --------------------------------------------------------
-    # If no horizon is mature, the terminal reporting state is
-    # the 5D horizon.
-    #
-    # This is intentionally conservative and transparent.
-    # --------------------------------------------------------
-
-    ticker_horizon_learning_commentary = ""
-
-    # --------------------------------------------------------
-    # Current recommendation context.
-    #
-    # Reporting only. These values do NOT influence the
-    # portfolio decision or governance.
-    # --------------------------------------------------------
-
-    current_investment_score = _learning_numeric(
-        base_row,
-        "Investment Score",
-        "investment_score",
-        "Score",
-    )
-
-    current_signal = upper_text(
-        first_value(
-            base_row.get("Signal"),
-            base_row.get("signal"),
-            default="",
-        ),
-        "",
-    )
-
-    if selected_record is None:
-
-        five_day_record = (
-            horizon_records.get(
-                5
-            )
-        )
-
-        five_day_observations = None
-
-        if isinstance(
-            five_day_record,
-            dict,
-        ):
-
-            five_day_observations = (
-                _learning_numeric(
-                    five_day_record,
-                    "Recommendations",
-                    "Recommendation Count",
-                    "Observations",
-                    "Observation Count",
-                    "Outcome Count",
-                    "outcome_count",
-                    "observations",
-                    "observation_count",
-                )
-            )
-
-            if five_day_observations is None:
-
-                ticker_horizon_learning_commentary = (
-                    "5D: Insufficient data "
-                    "(recommendation count is unknown; "
-                    "20 required)"
-                )
-
-            else:
-
-                ticker_horizon_learning_commentary = (
-                    "5D: Insufficient data "
-                    f"({int(five_day_observations)} "
-                    "recommendations; 20 required)"
-                )
-
-        # ----------------------------------------------------
-        # Even when the historical sample is immature, show
-        # the current score and signal so the user can see
-        # the relationship between today's recommendation
-        # and the available historical learning.
-        #
-        # Reporting only.
-        # ----------------------------------------------------
-
-        if current_investment_score is not None:
-
-            ticker_horizon_learning_commentary += (
-                f"; current Investment Score "
-                f"{current_investment_score:.0f}"
-            )
-
-        if current_signal:
-
-            ticker_horizon_learning_commentary += (
-                f"; current Signal "
-                f"{current_signal}"
-            )
-    else:
-
-        recommendations = _learning_numeric(
-            selected_record,
-            "Recommendations",
-            "Recommendation Count",
-            "Observations",
-            "Observation Count",
-            "Outcome Count",
-            "outcome_count",
-            "observations",
-            "observation_count",
-        )
-
-        average_return = _learning_numeric(
-            selected_record,
-            "Average Return %",
-            "Average Return",
-            "average_return",
-            "Mean Return",
-        )
-
-        median_return = _learning_numeric(
-            selected_record,
-            "Median Return %",
-            "Median Return",
-            "median_return",
-        )
-
-        win_rate = _learning_numeric(
-            selected_record,
-            "Win Rate %",
-            "Win Rate",
-            "win_rate",
-        )
-
-        reliability = safe_text(
-            _learning_value(
-                selected_record,
-                "Reliability",
-                "Learning Reliability",
-                "learning_reliability",
-                "Signal Reliability",
-            ),
-            "",
-        ).upper()
-
-        # ----------------------------------------------------
-        # Determine relationship between historical outcomes
-        # and the original recommendation.
-        #
-        # The learning record itself does not contain a
-        # separate "Learning Direction" field.
-        #
-        # Therefore:
-        #
-        #   positive average return -> supports
-        #   negative average return -> contradicts
-        #   zero / unavailable       -> historical result
-        #
-        # This is reporting language only.
-        # ----------------------------------------------------
-
-        if average_return is not None:
-
-            if average_return > 0:
-
-                relationship = "Supports"
-
-            elif average_return < 0:
-
-                relationship = "Contradicts"
-
-            else:
-
-                relationship = "Neutral"
-
-        else:
-
-            relationship = "Historical"
-
-        # ----------------------------------------------------
-        # Use the original proposal as the recommendation
-        # being evaluated.
-        #
-        # This is deliberately NOT the final governed action.
-        # ----------------------------------------------------
-
-        learning_proposed_action = (
-            proposed_action
-        )
-
-        if learning_proposed_action == "HOLD":
-
-            learning_proposed_action = "HOLD"
-
-        # ----------------------------------------------------
-        # Average outcome text.
-        # ----------------------------------------------------
-
-        if average_return is None:
-
-            outcome_text = (
-                "average outcome unavailable"
-            )
-
-        else:
-
-            outcome_text = (
-                f"average outcome "
-                f"{average_return:+.2f}%"
-            )
-
-        # ----------------------------------------------------
-        # Observation text.
-        # ----------------------------------------------------
-
-        if recommendations is None:
-
-            recommendation_text = (
-                "recommendations unknown"
-            )
-
-        elif recommendations.is_integer():
-
-            recommendation_text = (
-                f"{int(recommendations)} "
-                "recommendations"
-            )
-
-        else:
-
-            recommendation_text = (
-                f"{recommendations:g} "
-                "recommendations"
-            )
-
-        # ----------------------------------------------------
-        # Primary commentary.
-        # ----------------------------------------------------
-
-        ticker_horizon_learning_commentary = (
-            f"{selected_horizon}D: "
-            f"{relationship} initial "
-            f"{learning_proposed_action} — "
-            f"{outcome_text} "
-            f"({recommendation_text})"
-        )
-
-        # ----------------------------------------------------
-        # Optional win-rate information.
-        # ----------------------------------------------------
-
-        if win_rate is not None:
-
-            ticker_horizon_learning_commentary += (
-                f"; win rate "
-                f"{win_rate:.1f}%"
-            )
-
-        # ----------------------------------------------------
-        # Current score relationship.
-        #
-        # The current score is displayed alongside historical
-        # ticker/horizon learning but does not modify it.
-        # ----------------------------------------------------
-
-        if current_investment_score is not None:
-
-            ticker_horizon_learning_commentary += (
-                f"; current Investment Score "
-                f"{current_investment_score:.0f}"
-            )
-
-        if current_signal:
-
-            ticker_horizon_learning_commentary += (
-                f"; current Signal "
-                f"{current_signal}"
-            )
-
-        # ----------------------------------------------------
-        # Optional reliability information.
-        # ----------------------------------------------------
-
-        if reliability:
-
-            ticker_horizon_learning_commentary += (
-                f"; reliability "
-                f"{reliability}"
-            )
-
-        # ----------------------------------------------------
-        # Optional median return information.
-        # ----------------------------------------------------
-
-        if median_return is not None:
-
-            ticker_horizon_learning_commentary += (
-                f"; median outcome "
-                f"{median_return:+.2f}%"
-            )
-
-        # ----------------------------------------------------
-        # Show the next immature horizon's observation count.
-        #
-        # This gives useful visibility without making the
-        # commentary excessively verbose.
-        # ----------------------------------------------------
-
-        next_horizon = None
-
-        if selected_horizon == 60:
-
-            next_horizon = None
-
-        elif selected_horizon == 10:
-
-            next_horizon = 60
-
-        elif selected_horizon == 5:
-
-            next_horizon = 10
-
-        if next_horizon is not None:
-
-            next_record = horizon_records.get(
-                next_horizon
-            )
-
-            if isinstance(
-                next_record,
-                dict,
-            ):
-
-                next_observations = (
-                    _learning_numeric(
-                        next_record,
-                        "Recommendations",
-                        "Recommendation Count",
-                        "Observations",
-                        "Observation Count",
-                        "Outcome Count",
-                        "outcome_count",
-                        "observations",
-                        "observation_count",
-                    )
-                )
-
-                if next_observations is not None:
-
-                    if next_observations.is_integer():
-
-                        next_count_text = (
-                            str(
-                                int(
-                                    next_observations
-                                )
-                            )
-                        )
-
-                    else:
-
-                        next_count_text = (
-                            f"{next_observations:g}"
-                        )
-
-                    ticker_horizon_learning_commentary += (
-                        f"; {next_horizon}D: "
-                        f"{next_count_text} observations"
-                    )
-
-    # ========================================================
-    # DECISION STATUS
-    #
-    # Compare governed actions, not sizing variants.
-    #
-    # REDUCE 25%, REDUCE 50%, etc. are all the same governance
-    # action: REDUCE.
-    # ========================================================
-
-    final_action_for_governance = (
-        "REDUCE"
-        if str(
-            final_action
-        ).upper().startswith(
-            "REDUCE"
-        )
-        else final_action
-    )
-
-    decision_changed = (
-        final_action_for_governance
-        !=
-        normalised_proposed_action
-    )
-
-    if decision_changed:
-
-        decision_status = (
-            "GOVERNANCE OVERRIDE"
-        )
-
-    else:
-
-        decision_status = (
-            "FINAL AI DECISION"
-        )
-
-    # ========================================================
-    # FINAL REASON
-    # ========================================================
-
-    if final_action == "HOLD":
-
-        if reconciliation_reason:
-
-            final_reason = (
-                reconciliation_reason
-            )
-
-        elif (
-            normalised_proposed_action
-            !=
-            "HOLD"
-        ):
-
-            final_reason = (
-                f"{ticker} remains HOLD because the proposed "
-                f"{proposed_action} action did not survive the "
-                "complete governed AI decision chain."
-            )
-
-        else:
-
-            final_reason = (
-                f"{ticker} remains HOLD because there is no "
-                "sufficiently strong reason to change the portfolio."
-            )
-
-    elif final_action_for_governance == "REDUCE":
-
-        final_reason = (
-            f"{ticker} is approved for {final_action} after "
-            "passing the governed AI decision chain."
-        )
-
-    elif final_action == "SELL":
-
-        final_reason = (
-            f"{ticker} is approved for SELL after passing "
-            "the governed AI decision chain."
-        )
-
-    elif final_action == "BUY MORE":
-
-        final_reason = (
-            f"{ticker} is approved for BUY MORE after passing "
-            "the governed AI decision chain."
-        )
-
-    elif final_action == "BUY NEW":
-
-        final_reason = (
-            f"{ticker} is approved for BUY NEW after passing "
-            "the governed AI decision chain."
-        )
-
-    else:
-
-        final_reason = (
-            f"{ticker} remains HOLD because the proposed action "
-            "did not pass the governed decision process."
-        )
-
-    # ========================================================
-    # OPTIONAL EXPLANATION
-    # ========================================================
-
-    explanation_text = safe_text(
-        first_value(
-            explanation.get(
-                "Summary"
-            ),
-            explanation.get(
-                "Decision Explanation"
-            ),
-            explanation.get(
-                "Explanation"
-            ),
-            default="",
-        )
-    )
-
-    if explanation_text:
-
-        if final_action == "HOLD":
-
-            final_reason = (
-                explanation_text
-            )
-
-    # ========================================================
-    # BUILD FINAL RESULT
-    #
-    # The existing report contract is retained.
-    #
-    # The ticker horizon learning commentary is added as a
-    # reporting field only.
-    # ========================================================
-
-    result.update({
-
-        # ----------------------------------------------------
-        # Core identity
-        # ----------------------------------------------------
-
-        "Ticker":
-            ticker,
-
-        "Asset Type":
-            asset_type,
-
-        "Investment Score":
-            0.0
-            if asset_type == "ETF"
-            else safe_float(
-                base_row.get(
-                    "Investment Score",
-                    0,
-                )
-            ),
-
-        "ETF Score":
-            round(
-                etf_score,
-                2,
-            ),
-
-        "Signal":
-            signal,
-
-        "ETF Signal":
-            etf_signal,
-
-        # ----------------------------------------------------
-        # Governance action fields
-        # ----------------------------------------------------
-
-        "Original Action":
-            proposed_action,
-
-        "Proposed Action":
-            proposed_action,
-
-        "Original Decision":
-            proposed_action,
-
-        "Reconciled Decision":
-            reconciled_action,
-
-        "Final Decision":
-            final_action,
-
-        "Final Action":
-            final_action,
-
-        "Action":
-            final_action,
-
-        # ----------------------------------------------------
-        # State / governance
-        # ----------------------------------------------------
-
-        "Decision Changed":
-            decision_changed,
-
-        "Decision Status":
-            decision_status,
-
-        "Reconciliation Status":
-            reconciliation_status,
-
-        "Reconciliation Reason":
-            reconciliation_reason,
-
-        "Governance Reasons":
-            governance_flags,
+        "Governance Failure Summary":
+            governance_failure_summary,
 
         # ----------------------------------------------------
         # Deterministic evidence
@@ -4565,10 +3686,6 @@ def build_final_result(
 
         # ----------------------------------------------------
         # Ticker / horizon learning
-        #
-        # REPORTING ONLY.
-        #
-        # This field has no connection to final_action.
         # ----------------------------------------------------
 
         "Ticker Horizon Learning Commentary":
@@ -4654,827 +3771,7 @@ def build_final_result(
     return result
 
 
-    # --------------------------------------------------------
-    # Support both common naming conventions used by the
-    # learning layer.
-    # --------------------------------------------------------
 
-    def _learning_value(*names):
-        for name in names:
-            if name in ticker_horizon_learning:
-                return ticker_horizon_learning.get(
-                    name
-                )
-        return None
-
-    def _learning_numeric(*names):
-        raw_value = _learning_value(
-            *names
-        )
-
-        if raw_value is None:
-            return None
-
-        try:
-            if isinstance(
-                raw_value,
-                bool,
-            ):
-                return float(
-                    int(raw_value)
-                )
-
-            return float(
-                raw_value
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-            return None
-
-    # --------------------------------------------------------
-    # Resolve observations.
-    # --------------------------------------------------------
-
-    learning_observations = _learning_numeric(
-        "Observations",
-        "Observation Count",
-        "Outcome Count",
-        "outcome_count",
-        "observations",
-        "observation_count",
-    )
-
-    # --------------------------------------------------------
-    # Resolve horizon.
-    #
-    # This function is specifically concerned with the 5d
-    # recommendation horizon. If the supplied learning record
-    # explicitly identifies another horizon, it is not used.
-    # --------------------------------------------------------
-
-    learning_horizon = _learning_value(
-        "Horizon",
-        "horizon",
-        "Days",
-        "days_after",
-    )
-
-    try:
-
-        learning_horizon = int(
-            float(
-                learning_horizon
-            )
-        )
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-
-        learning_horizon = 5
-
-    # --------------------------------------------------------
-    # Resolve the learning recommendation / direction.
-    # --------------------------------------------------------
-
-    learning_recommendation = safe_text(
-        _learning_value(
-            "Recommendation",
-            "Learning Recommendation",
-            "Recommended Action",
-            "Learning Direction",
-            "Outcome",
-            "outcome",
-        ),
-        "",
-    )
-
-    learning_recommendation_upper = (
-        learning_recommendation.upper()
-    )
-
-    # --------------------------------------------------------
-    # Resolve whether the 5d learning explicitly supports
-    # BUY MORE.
-    #
-    # Prefer explicit boolean fields when supplied.
-    # Otherwise interpret the learning recommendation text.
-    # --------------------------------------------------------
-
-    supports_buy_more = _learning_value(
-        "Supports BUY MORE",
-        "Supports Buy More",
-        "supports_buy_more",
-        "buy_more_supported",
-        "Buy More Supported",
-    )
-
-    if isinstance(
-        supports_buy_more,
-        str,
-    ):
-
-        supports_buy_more_normalised = (
-            supports_buy_more.strip().upper()
-        )
-
-        if supports_buy_more_normalised in {
-            "TRUE",
-            "YES",
-            "Y",
-            "1",
-            "SUPPORTED",
-        }:
-
-            supports_buy_more = True
-
-        elif supports_buy_more_normalised in {
-            "FALSE",
-            "NO",
-            "N",
-            "0",
-            "NOT SUPPORTED",
-            "UNSUPPORTED",
-        }:
-
-            supports_buy_more = False
-
-        else:
-
-            supports_buy_more = None
-
-    elif isinstance(
-        supports_buy_more,
-        (int, float),
-    ):
-
-        supports_buy_more = bool(
-            supports_buy_more
-        )
-
-    elif not isinstance(
-        supports_buy_more,
-        bool,
-    ):
-
-        supports_buy_more = None
-
-    # --------------------------------------------------------
-    # If there is no explicit boolean, infer only from the
-    # learning recommendation itself.
-    #
-    # This remains informational and never changes the action.
-    # --------------------------------------------------------
-
-    if supports_buy_more is None:
-
-        if learning_recommendation_upper in {
-            "BUY MORE",
-            "BUY_MORE",
-            "SUPPORTS BUY MORE",
-            "BUY MORE SUPPORTED",
-            "POSITIVE",
-            "POSITIVE BUY MORE",
-        }:
-
-            supports_buy_more = True
-
-        elif (
-            "BUY MORE"
-            in learning_recommendation_upper
-            and
-            any(
-                phrase in learning_recommendation_upper
-                for phrase in {
-                    "SUPPORT",
-                    "FAVOUR",
-                    "FAVOR",
-                    "POSITIVE",
-                    "YES",
-                }
-            )
-        ):
-
-            supports_buy_more = True
-
-        elif learning_recommendation_upper:
-
-            supports_buy_more = False
-
-    # --------------------------------------------------------
-    # Minimum mature observation threshold.
-    #
-    # We require 20 observations before describing the 5d
-    # learning as sufficient information.
-    # --------------------------------------------------------
-
-    MIN_5D_OBSERVATIONS = 20
-
-    if (
-        learning_horizon != 5
-        or
-        learning_observations is None
-        or
-        learning_observations
-        <
-        MIN_5D_OBSERVATIONS
-    ):
-
-        five_day_recommendation_horizon = (
-            "Not enough information to produce "
-            "5d recommendation"
-        )
-
-    elif supports_buy_more is True:
-
-        five_day_recommendation_horizon = (
-            "5d recommendation horizon "
-            "supports BUY MORE"
-        )
-
-    else:
-
-        five_day_recommendation_horizon = (
-            "5d recommendation horizon "
-            "does not support BUY MORE"
-        )
-
-    # ========================================================
-    # LLM review fields
-    # ========================================================
-
-    llm_assessment = upper_text(
-        first_value(
-            review.get(
-                "LLM Assessment"
-            ),
-            review.get(
-                "Review Decision"
-            ),
-            review.get(
-                "LLM Decision"
-            ),
-            default="CHALLENGE",
-        ),
-        "CHALLENGE",
-    )
-
-    llm_confidence = safe_float(
-        first_value(
-            review.get(
-                "LLM Confidence"
-            ),
-            review.get(
-                "Confidence"
-            ),
-            default=0,
-        )
-    )
-
-    llm_reason = safe_text(
-        first_value(
-            review.get(
-                "LLM Reason"
-            ),
-            review.get(
-                "Reason"
-            ),
-            default="",
-        )
-    )
-
-    reviewer_status = upper_text(
-        review.get(
-            "Reviewer Status",
-            "",
-        )
-    )
-
-    # ========================================================
-    # Deterministic evidence
-    # ========================================================
-
-    evidence_score = safe_float(
-        first_value(
-            deterministic.get(
-                "Evidence Score"
-            ),
-            evidence.get(
-                "Evidence Score"
-            ),
-            default=0,
-        )
-    )
-
-    evidence_strength = safe_text(
-        first_value(
-            deterministic.get(
-                "Evidence Strength"
-            ),
-            evidence.get(
-                "Evidence Strength"
-            ),
-            default="UNKNOWN",
-        ),
-        "UNKNOWN",
-    )
-
-    decision_support = upper_text(
-        first_value(
-            deterministic.get(
-                "Decision Support"
-            ),
-            evidence.get(
-                "Decision Support"
-            ),
-            default="UNKNOWN",
-        ),
-        "UNKNOWN",
-    )
-
-    deterministic_confidence = safe_float(
-        first_value(
-            deterministic.get(
-                "Confidence"
-            ),
-            deterministic.get(
-                "Decision Confidence"
-            ),
-            evidence.get(
-                "Confidence"
-            ),
-            default=0,
-        )
-    )
-
-    learning_adjusted_score = safe_float(
-        first_value(
-            deterministic.get(
-                "Learning Adjusted Score"
-            ),
-            evidence.get(
-                "Learning Adjusted Score"
-            ),
-            base_row.get(
-                "Learning Adjusted Score"
-            ),
-            default=0,
-        )
-    )
-
-    # ========================================================
-    # Historical evidence
-    # ========================================================
-
-    historical_observations = safe_float(
-        first_value(
-            deterministic.get(
-                "Historical Signal Observations"
-            ),
-            evidence.get(
-                "Historical Signal Observations"
-            ),
-            base_row.get(
-                "Historical Signal Observations"
-            ),
-            default=0,
-        )
-    )
-
-    historical_win_rate = safe_float(
-        first_value(
-            deterministic.get(
-                "Historical Signal Win Rate %"
-            ),
-            evidence.get(
-                "Historical Signal Win Rate %"
-            ),
-            base_row.get(
-                "Historical Signal Win Rate %"
-            ),
-            default=0,
-        )
-    )
-
-    historical_return = safe_float(
-        first_value(
-            deterministic.get(
-                "Historical Signal Average Return %"
-            ),
-            evidence.get(
-                "Historical Signal Average Return %"
-            ),
-            base_row.get(
-                "Historical Signal Average Return %"
-            ),
-            default=0,
-        )
-    )
-
-    historical_reliability = safe_text(
-        first_value(
-            deterministic.get(
-                "Historical Signal Reliability"
-            ),
-            evidence.get(
-                "Historical Signal Reliability"
-            ),
-            base_row.get(
-                "Historical Signal Reliability"
-            ),
-            default="",
-        )
-    )
-
-    # ========================================================
-    # Decision status
-    #
-    # Compare governed actions, not sizing variants.
-    #
-    # REDUCE 25%, REDUCE 50%, etc. are all the same governance
-    # action: REDUCE.
-    # ========================================================
-
-    final_action_for_governance = (
-        "REDUCE"
-        if str(
-            final_action
-        ).upper().startswith(
-            "REDUCE"
-        )
-        else final_action
-    )
-
-    decision_changed = (
-        final_action_for_governance
-        !=
-        normalised_proposed_action
-    )
-
-    if final_action == "NO ACTION":
-
-        decision_status = (
-            "GOVERNANCE OVERRIDE TO NO ACTION"
-        )
-
-    elif decision_changed:
-
-        decision_status = (
-            "GOVERNANCE OVERRIDE"
-        )
-
-    else:
-
-        decision_status = (
-            "FINAL DECISION CONFIRMED"
-        )
-
-    # ========================================================
-    # Final reason
-    # ========================================================
-
-    if final_action == "NO ACTION":
-
-        final_reason = (
-            f"{ticker} is not currently held and the proposed "
-            "BUY NEW action did not pass the governed decision "
-            "process. No position should be established."
-        )
-
-    elif final_action == "HOLD":
-
-        if reconciliation_reason:
-
-            final_reason = (
-                reconciliation_reason
-            )
-
-        elif (
-            normalised_proposed_action
-            !=
-            "HOLD"
-        ):
-
-            final_reason = (
-                f"{ticker} remains HOLD because the proposed "
-                f"{proposed_action} action did not survive the "
-                "complete governed AI decision chain."
-            )
-
-        else:
-
-            final_reason = (
-                f"{ticker} remains HOLD because there is no "
-                "sufficiently strong reason to change the portfolio."
-            )
-
-    elif final_action_for_governance == "REDUCE":
-
-        final_reason = (
-            f"{ticker} is approved for {final_action} after "
-            "passing the governed AI decision chain."
-        )
-
-    elif final_action == "SELL":
-
-        final_reason = (
-            f"{ticker} is approved for SELL after passing "
-            "the governed AI decision chain."
-        )
-
-    elif final_action == "BUY MORE":
-
-        final_reason = (
-            f"{ticker} is approved for BUY MORE after passing "
-            "the governed AI decision chain."
-        )
-
-    elif final_action == "BUY NEW":
-
-        final_reason = (
-            f"{ticker} is approved for BUY NEW after passing "
-            "the governed AI decision chain."
-        )
-
-    else:
-
-        final_reason = (
-            f"{ticker} remains HOLD because the proposed action "
-            "did not pass the governed decision process."
-        )
-
-    # ========================================================
-    # Optional explanation
-    # ========================================================
-
-    explanation_text = safe_text(
-        first_value(
-            explanation.get(
-                "Summary"
-            ),
-            explanation.get(
-                "Decision Explanation"
-            ),
-            explanation.get(
-                "Explanation"
-            ),
-            default="",
-        )
-    )
-
-    # Use the generated explanation only when it is appropriate.
-    if explanation_text:
-
-        if final_action in {
-            "HOLD",
-            "NO ACTION",
-        }:
-
-            final_reason = (
-                explanation_text
-                if final_action == "HOLD"
-                else final_reason
-            )
-
-    # ========================================================
-    # Build final result
-    #
-    # IMPORTANT:
-    # Existing report fields are preserved.
-    #
-    # The only new reporting field is:
-    #
-    #     "5d Recommendation Horizon"
-    #
-    # It is informational only.
-    #
-    # Audit fields and audit behaviour are not modified here.
-    # ========================================================
-
-    result.update({
-
-        # ----------------------------------------------------
-        # Core identity
-        # ----------------------------------------------------
-
-        "Ticker":
-            ticker,
-
-        "Asset Type":
-            asset_type,
-
-        "Investment Score":
-            0.0
-            if asset_type == "ETF"
-            else safe_float(
-                base_row.get(
-                    "Investment Score",
-                    0,
-                )
-            ),
-
-        "ETF Score":
-            round(
-                etf_score,
-                2,
-            ),
-
-        "Signal":
-            signal,
-
-        "ETF Signal":
-            etf_signal,
-
-        # ----------------------------------------------------
-        # Governance action fields
-        # ----------------------------------------------------
-
-        "Proposed Action":
-            proposed_action,
-
-        "Original Decision":
-            proposed_action,
-
-        "Reconciled Decision":
-            reconciled_action,
-
-        "Final Decision":
-            final_action,
-
-        "Final Action":
-            final_action,
-
-        "Action":
-            final_action,
-
-        # ----------------------------------------------------
-        # State / governance
-        # ----------------------------------------------------
-
-        "Decision Changed":
-            decision_changed,
-
-        "Decision Status":
-            decision_status,
-
-        "Reconciliation Status":
-            reconciliation_status,
-
-        "Reconciliation Reason":
-            reconciliation_reason,
-
-        "Governance Reasons":
-            governance_flags,
-
-        # ----------------------------------------------------
-        # Deterministic evidence
-        # ----------------------------------------------------
-
-        "Evidence Score":
-            round(
-                evidence_score,
-                2,
-            ),
-
-        "Evidence Strength":
-            evidence_strength,
-
-        "Decision Support":
-            decision_support,
-
-        "Deterministic Confidence":
-            round(
-                deterministic_confidence,
-                2,
-            ),
-
-        "Confidence":
-            round(
-                deterministic_confidence,
-                2,
-            ),
-
-        # ----------------------------------------------------
-        # Historical evidence
-        # ----------------------------------------------------
-
-        "Historical Signal Observations":
-            int(
-                historical_observations
-            ),
-
-        "Historical Signal Win Rate %":
-            round(
-                historical_win_rate,
-                2,
-            ),
-
-        "Historical Signal Average Return %":
-            round(
-                historical_return,
-                2,
-            ),
-
-        "Historical Signal Reliability":
-            historical_reliability,
-
-        "Learning Adjusted Score":
-            round(
-                learning_adjusted_score,
-                2,
-            ),
-
-        # ----------------------------------------------------
-        # 5d recommendation horizon learning
-        #
-        # INFORMATIONAL ONLY.
-        # ----------------------------------------------------
-
-        "5d Recommendation Horizon":
-            five_day_recommendation_horizon,
-
-        # ----------------------------------------------------
-        # LLM review
-        # ----------------------------------------------------
-
-        "LLM Assessment":
-            llm_assessment,
-
-        "LLM Review Decision":
-            llm_assessment,
-
-        "LLM Review Valid":
-            (
-                reviewer_status
-                ==
-                "LLM REVIEW COMPLETE"
-            ),
-
-        "LLM Confidence":
-            round(
-                llm_confidence,
-                2,
-            ),
-
-        "LLM Review Confidence":
-            round(
-                llm_confidence,
-                2,
-            ),
-
-        "LLM Reason":
-            llm_reason,
-
-        "LLM Review Reason":
-            llm_reason,
-
-        "LLM Key Points":
-            review.get(
-                "LLM Key Points",
-                review.get(
-                    "Key Points",
-                    [],
-                ),
-            ),
-
-        "LLM Evidence Gaps":
-            review.get(
-                "LLM Evidence Gaps",
-                review.get(
-                    "Evidence Gaps",
-                    [],
-                ),
-            ),
-
-        # ----------------------------------------------------
-        # Final result
-        # ----------------------------------------------------
-
-        "Final Reason":
-            final_reason,
-
-        "Explanation":
-            final_reason,
-
-        # ----------------------------------------------------
-        # Authority / execution
-        # ----------------------------------------------------
-
-        "Decision Authority":
-            "GOVERNED AI DECISION LAYER",
-
-        "Capital Allocation":
-            "NOT PERFORMED",
-
-        "Trade Execution":
-            "NOT PERFORMED",
-    })
-
-    return result
 # ============================================================
 # SINGLE DECISION COMPATIBILITY API
 # ============================================================

@@ -1291,6 +1291,17 @@ def _normalise_candidate(
         )
     )
 
+    semantic_evidence = candidate.get(
+        "semantic_evidence",
+        {},
+    )
+
+    if not isinstance(
+        semantic_evidence,
+        dict,
+    ):
+        semantic_evidence = {}
+
     # ========================================================
     # Flattened scoring context
     # ========================================================
@@ -1304,6 +1315,9 @@ def _normalise_candidate(
 
         "Action":
             proposed_action,
+
+        "semantic_evidence":
+            semantic_evidence,
 
         "Signal":
             signal,
@@ -1414,7 +1428,6 @@ def _score_candidate(
 
     The normalised candidate is authoritative for portfolio context,
     particularly:
-
         - Quantity
         - Allocation %
         - Portfolio Allocation %
@@ -1422,6 +1435,7 @@ def _score_candidate(
         - Investment Score
         - Signal
         - Proposed Action
+        - Semantic Evidence
 
     The scoring layer calculates evidence and confidence but must not
     overwrite or lose the authoritative portfolio context.
@@ -1507,6 +1521,24 @@ def _score_candidate(
         "STOCK",
     ).upper()
 
+    # ------------------------------------------------------------
+    # Capture authoritative semantic evidence BEFORE scoring.
+    #
+    # Semantic evidence is a governance/consistency signal. It is
+    # deliberately kept separate from the numeric evidence score.
+    # ------------------------------------------------------------
+
+    authoritative_semantic_evidence = scoring_context.get(
+        "semantic_evidence",
+        {},
+    )
+
+    if not isinstance(
+        authoritative_semantic_evidence,
+        dict,
+    ):
+        authoritative_semantic_evidence = {}
+
     print(
         f"ALLOCATION TRACE: {ticker} | "
         f"BEFORE SCORING | "
@@ -1520,13 +1552,11 @@ def _score_candidate(
     # ------------------------------------------------------------
 
     try:
-
         result = score_ai_decision(
             scoring_context
         )
 
     except Exception as exc:
-
         print(
             f"AI DECISION TRACE: {ticker} | "
             f"SCORING ERROR={exc}"
@@ -1553,6 +1583,9 @@ def _score_candidate(
             "Investment Score": authoritative_investment_score,
             "Signal": authoritative_signal,
             "Asset Type": authoritative_asset_type,
+
+            # Preserve semantic evidence even when scoring fails.
+            "semantic_evidence": authoritative_semantic_evidence,
 
             "_scoring_error": str(exc),
         }
@@ -1661,25 +1694,19 @@ def _score_candidate(
     # ------------------------------------------------------------
 
     decision["Ticker"] = ticker
-
     decision["Action"] = proposed_action
     decision["Proposed Action"] = proposed_action
     decision["Deterministic Action"] = deterministic_action
-
     decision["Deterministic Confidence"] = (
         deterministic_confidence
     )
-
     decision["Confidence"] = (
         deterministic_confidence
     )
-
     decision["Evidence Score"] = evidence_score
-
     decision["Evidence Strength"] = (
         evidence_strength
     )
-
     decision["Decision Support"] = (
         decision_support
     )
@@ -1691,37 +1718,41 @@ def _score_candidate(
     # ------------------------------------------------------------
 
     decision["Quantity"] = authoritative_quantity
-
     decision["Allocation %"] = (
         authoritative_allocation
     )
-
     decision["Portfolio Allocation %"] = (
         authoritative_allocation
     )
-
     decision["allocation_pct"] = (
         authoritative_allocation
     )
-
     decision["allocation_percent"] = (
         authoritative_allocation
     )
-
     decision["Existing Holding"] = (
         authoritative_owned
     )
-
     decision["Investment Score"] = (
         authoritative_investment_score
     )
-
     decision["Signal"] = (
         authoritative_signal
     )
-
     decision["Asset Type"] = (
         authoritative_asset_type
+    )
+
+    # ------------------------------------------------------------
+    # Preserve semantic evidence from the authoritative context.
+    #
+    # Semantic evidence is a governance/consistency signal. It is
+    # deliberately preserved separately from the numeric evidence
+    # score and is NOT folded into the evidence weighting.
+    # ------------------------------------------------------------
+
+    decision["semantic_evidence"] = (
+        authoritative_semantic_evidence
     )
 
     # ------------------------------------------------------------
@@ -1774,7 +1805,6 @@ def _score_candidate(
     )
 
     return decision
-
 # ============================================================
 # Governance
 # ============================================================

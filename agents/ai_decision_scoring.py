@@ -2402,7 +2402,6 @@ def calculate_buy_evidence(
         score
     )
 
-
 def calculate_hold_evidence(
     context,
 ):
@@ -2612,7 +2611,6 @@ def determine_decision_support(
         "BUY NEW",
         "BUY MORE",
     }:
-
         if evidence_score >= STRONG_BUY_EVIDENCE_THRESHOLD:
             return "SUPPORTED"
 
@@ -2622,7 +2620,6 @@ def determine_decision_support(
         return "NOT SUPPORTED"
 
     if action == "REDUCE":
-
         if evidence_score >= REDUCE_EVIDENCE_THRESHOLD:
             return "SUPPORTED"
 
@@ -2632,7 +2629,6 @@ def determine_decision_support(
         return "NOT SUPPORTED"
 
     if action == "SELL":
-
         if evidence_score >= SELL_EVIDENCE_THRESHOLD:
             return "SUPPORTED"
 
@@ -2645,7 +2641,6 @@ def determine_decision_support(
         return "SUPPORTED"
 
     return "CONDITIONAL"
-
 
 # ============================================================
 # Evidence completeness
@@ -3209,6 +3204,11 @@ def score_ai_decision(
 
         "Investment Score":
             investment_score,
+
+        "Signal":
+            get_signal(
+                context
+            ),
 
         "Learning Adjusted Score":
             learning_adjusted_score,

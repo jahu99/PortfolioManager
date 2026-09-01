@@ -32,24 +32,40 @@ def _cache_file(ticker, period):
 
 def _latest_cached_date(df):
     """
-    Return the latest trading date contained in cached data.
-    """
+    Return the latest trading date containing a usable Close price.
 
+    A row may exist for the current trading session while the daily
+    candle is still incomplete. Such a row must not be treated as
+    the latest completed market observation.
+
+    The Close price is the minimum requirement because the technical
+    indicator pipeline depends on it.
+    """
     if df is None or df.empty:
         return None
 
     try:
+        if "Close" not in df.columns:
+            return None
+
+        usable = df.loc[
+            pd.to_numeric(
+                df["Close"],
+                errors="coerce"
+            ).notna()
+        ]
+
+        if usable.empty:
+            return None
 
         index = pd.to_datetime(
-            df.index
+            usable.index
         )
 
         return index.max().date()
 
     except Exception:
-
         return None
-
 
 def _latest_completed_us_trading_date():
     """

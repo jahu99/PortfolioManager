@@ -74,6 +74,9 @@ interface was removed or renamed in production.
 
 from __future__ import annotations
 
+
+
+
 import importlib
 import inspect
 import sys
@@ -82,6 +85,9 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import agents.ai_decision_reconciler as ai_decision_reconciler
+
+
 
 
 # ============================================================================
@@ -97,7 +103,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # ============================================================================
 # PRODUCTION IMPORTS
 # ============================================================================
-
+import agents.ai_portfolio_reviewer as ai_portfolio_reviewer
 from agents.ai_decision_context import (
     validate_ai_decision_context,
 )
@@ -1417,10 +1423,14 @@ def build_ai_candidate(
     action: str = "BUY NEW",
 ) -> dict[str, Any]:
 
+    is_held = action == "BUY MORE"
+
+    allocation_pct = 7.0 if is_held else 0.0
+    quantity = 8.0 if is_held else 0.0
+
     return {
         "ticker": ticker_name,
         "Ticker": ticker_name,
-
         "asset_type": "STOCK",
         "Asset Type": "STOCK",
 
@@ -1454,9 +1464,9 @@ def build_ai_candidate(
         "Proposed Action": action,
 
         "ownership": {
-            "owned": False,
-            "quantity": 0.0,
-            "allocation_pct": 0.0,
+            "owned": is_held,
+            "quantity": quantity,
+            "allocation_pct": allocation_pct,
         },
     }
 
@@ -2114,6 +2124,285 @@ def test_llm_decision_review() -> None:
             "LLM independently reviews the governed portfolio proposal",
             exc,
         )
+
+def test_llm_review_prompt_preserves_buy_more_action() -> None:
+    section(
+        "TEST 9A — LLM PROMPT PRESERVES BUY MORE ACTION"
+    )
+
+    candidate = build_ai_candidate(
+        "NVDA",
+        "BUY MORE",
+    )
+
+    portfolio = build_ai_portfolio_context()
+
+    decision = {
+        "Proposed Action": "BUY MORE",
+        "Investment Score": 88.0,
+        "Evidence Score": 72.71,
+        "Evidence Strength": "STRONG",
+        "Decision Support": "CONDITIONAL",
+        "Confidence": 69.37,
+        "Reason": "Synthetic BUY MORE proposal.",
+    }
+
+    captured_prompt = {}
+
+    def fake_call_ollama(prompt: str) -> dict:
+        captured_prompt["prompt"] = prompt
+
+        return {
+            "review_decision": "CHALLENGE",
+            "confidence": 70,
+            "challenge": True,
+            "reason": (
+                "The supplied evidence does not establish that "
+                "incremental capital is preferable to HOLD."
+            ),
+        }
+
+    original_call_ollama = ai_portfolio_reviewer.call_ollama
+
+    try:
+        ai_portfolio_reviewer.call_ollama = fake_call_ollama
+
+        review = review_ai_decision(
+            candidate,
+            portfolio,
+            decision,
+        )
+
+        prompt = captured_prompt.get("prompt", "")
+
+        if "ACTION: BUY MORE" not in prompt:
+            raise AssertionError(
+                "LLM prompt did not contain ACTION: BUY MORE"
+            )
+
+        if "ACTION: HOLD" in prompt:
+            raise AssertionError(
+                "LLM prompt incorrectly contained ACTION: HOLD"
+            )
+
+        if review.get("LLM Assessment") != "CHALLENGE":
+            raise AssertionError(
+                "Unexpected mocked LLM assessment: "
+                f"{review.get('LLM Assessment')}"
+            )
+
+        passed(
+            "LLM prompt preserves deterministic BUY MORE action"
+        )
+
+    finally:
+        ai_portfolio_reviewer.call_ollama = original_call_ollama
+
+
+# ============================================================================
+# TEST 9B — BUY MORE MATERIAL CONTRADICTION GOVERNANCE
+# ============================================================================
+
+def test_buy_more_material_contradiction_moves_to_hold() -> None:
+    section(
+        "TEST 9B — BUY MORE MATERIAL CONTRADICTION MOVES TO HOLD"
+    )
+
+    decision = {
+        "Ticker": "NVDA",
+        "Proposed Action": "BUY MORE",
+        "Action": "BUY MORE",
+        "Investment Score": 88.0,
+        "Evidence Score": 80.0,
+        "Evidence Strength": "STRONG",
+        "Confidence": 85.0,
+        "Decision Support": "SUPPORTED",
+        "Signal": "BUY",
+        "Quantity": 8.0,
+        "Asset Type": "STOCK",
+    }
+
+    review = {
+        "Ticker": "NVDA",
+        "LLM Assessment": "CHALLENGE",
+        "LLM Confidence": 70.0,
+        "LLM Reason": (
+            "There is material risk in increasing the position. "
+            "The current valuation creates a material negative "
+            "risk/reward imbalance and the evidence is contradictory."
+        ),
+        "LLM Evidence Gaps": [],
+        "LLM Key Points": [],
+    }
+
+    try:
+        result = ai_decision_reconciler.reconcile_ai_decision(
+            decision=decision,
+            review=review,
+        )
+
+        if not isinstance(result, dict):
+            raise AssertionError(
+                "Production reconciler did not return a dictionary"
+            )
+
+        reconciled_action = result.get(
+            "Reconciled Action",
+            result.get("reconciled_action"),
+        )
+
+        if reconciled_action != "HOLD":
+            raise AssertionError(
+                "BUY MORE with a material contradiction was not "
+                f"moved to HOLD: {reconciled_action}"
+            )
+
+        passed(
+            "BUY MORE material contradiction moves recommendation to HOLD"
+        )
+
+    except Exception as exc:
+        failed(
+            "BUY MORE material contradiction moves recommendation to HOLD",
+            exc,
+        )
+
+
+# ============================================================================
+# TEST 9C — BUY MORE WITHOUT MATERIAL CONTRADICTION
+# ============================================================================
+
+def test_buy_more_without_material_contradiction_can_qualify() -> None:
+    section(
+        "TEST 9C — BUY MORE WITHOUT MATERIAL CONTRADICTION"
+    )
+
+    decision = {
+        "Ticker": "NVDA",
+        "Proposed Action": "BUY MORE",
+        "Action": "BUY MORE",
+        "Investment Score": 88.0,
+        "Evidence Score": 80.0,
+        "Evidence Strength": "STRONG",
+        "Confidence": 85.0,
+        "Decision Support": "SUPPORTED",
+        "Signal": "BUY",
+        "Quantity": 8.0,
+        "Asset Type": "STOCK",
+    }
+
+    review = {
+        "Ticker": "NVDA",
+        "LLM Assessment": "CHALLENGE",
+        "LLM Confidence": 70.0,
+        "LLM Reason": (
+            "The independent review questions whether incremental "
+            "capital is preferable to HOLD, but does not identify "
+            "any material contradiction, material negative evidence, "
+            "or unsupported thesis."
+        ),
+        "LLM Evidence Gaps": [
+            "Additional valuation evidence would improve confidence."
+        ],
+        "LLM Key Points": [
+            "Incremental purchase should be monitored."
+        ],
+    }
+
+    try:
+        result = ai_decision_reconciler.reconcile_ai_decision(
+            decision=decision,
+            review=review,
+        )
+
+        if not isinstance(result, dict):
+            raise AssertionError(
+                "Production reconciler did not return a dictionary"
+            )
+
+        reconciled_action = result.get(
+            "Reconciled Action",
+            result.get("reconciled_action"),
+        )
+
+        if reconciled_action != "BUY MORE":
+            raise AssertionError(
+                "BUY MORE without a material contradiction was not "
+                f"qualified: {reconciled_action}"
+            )
+
+        status = result.get(
+            "Status",
+            result.get("status"),
+        )
+
+        if status != "SUPPORTED WITH CHALLENGE":
+            raise AssertionError(
+                "Expected BUY MORE with LLM challenge to produce "
+                f"'SUPPORTED WITH CHALLENGE', got: {status}"
+            )
+
+        passed(
+            "BUY MORE without material contradiction remains qualified "
+            "despite advisory LLM challenge"
+        )
+
+    except Exception as exc:
+        failed(
+            "BUY MORE without material contradiction remains qualified "
+            "despite advisory LLM challenge",
+            exc,
+        )
+
+
+# ============================================================================
+# TEST 9D — EVIDENCE GAP IS NOT MATERIAL CONTRADICTION
+# ============================================================================
+
+def test_buy_more_evidence_gap_is_not_material_contradiction() -> None:
+    section(
+        "TEST 9D — EVIDENCE GAP IS NOT MATERIAL CONTRADICTION"
+    )
+
+    review = {
+        "Ticker": "NVDA",
+        "LLM Assessment": "CHALLENGE",
+        "LLM Confidence": 65.0,
+        "LLM Reason": (
+            "The available evidence is incomplete and additional "
+            "information would be useful before increasing the position."
+        ),
+        "LLM Evidence Gaps": [
+            "No recent valuation comparison was supplied.",
+            "Additional forward-growth evidence would be useful.",
+        ],
+        "LLM Key Points": [
+            "Evidence is incomplete.",
+        ],
+    }
+
+    try:
+        contradiction = (
+            ai_decision_reconciler
+            .review_indicates_material_contradiction(review)
+        )
+
+        if contradiction:
+            raise AssertionError(
+                "Ordinary evidence gaps were incorrectly classified "
+                "as a material contradiction"
+            )
+
+        passed(
+            "Ordinary evidence gaps do not count as material contradiction"
+        )
+
+    except Exception as exc:
+        failed(
+            "Ordinary evidence gaps do not count as material contradiction",
+            exc,
+        )
+
 
 
 # ============================================================================
@@ -2876,6 +3165,7 @@ def run_all_tests() -> None:
         test_production_final_decision_interface,
         test_llm_reconciliation_interface,
         test_complete_ai_decision_interface,
+        test_llm_review_prompt_preserves_buy_more_action
     ]
 
     for test in tests:
