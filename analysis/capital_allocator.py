@@ -1152,6 +1152,71 @@ def generate_capital_allocation(
                 "Investment Score":
                     allocation_score,
 
+                # ------------------------------------------------
+                # BUY NEW entry-quality telemetry.
+                #
+                # These fields are calculated upstream in main.py
+                # and are used here only to prevent an extended
+                # BUY NEW from consuming a selection slot.
+                #
+                # BUY MORE is unaffected.
+                # ------------------------------------------------
+                "Entry Quality":
+                    str(
+                        row.get(
+                            "Entry Quality",
+                            ""
+                        )
+                    ).strip().upper(),
+
+                "Extension SMA50 %":
+                    safe_float(
+                        row.get(
+                            "Extension SMA50 %",
+                            0
+                        )
+                    ),
+
+                "Extension SMA200 %":
+                    safe_float(
+                        row.get(
+                            "Extension SMA200 %",
+                            0
+                        )
+                    ),
+
+                "Return 5D %":
+                    safe_float(
+                        row.get(
+                            "Return 5D %",
+                            0
+                        )
+                    ),
+
+                "Return 10D %":
+                    safe_float(
+                        row.get(
+                            "Return 10D %",
+                            0
+                        )
+                    ),
+
+                "Return 20D %":
+                    safe_float(
+                        row.get(
+                            "Return 20D %",
+                            0
+                        )
+                    ),
+
+                "Entry Quality Mode":
+                    str(
+                        row.get(
+                            "Entry Quality Mode",
+                            ""
+                        )
+                    ).strip().upper(),
+
                 # Internal field used only before final output.
 
                 "_Allocation Score":
@@ -1196,6 +1261,28 @@ def generate_capital_allocation(
         for ticker, candidate
         in buy_candidates.items()
         if ticker not in sold_tickers
+    }
+
+    # ========================================================
+    # BUY NEW ENTRY QUALITY FILTER
+    #
+    # BUY NEW candidates that are already extended are not
+    # eligible for selection.
+    #
+    # UNDER_EXTENDED and GOOD remain eligible.
+    #
+    # EXTENDED and SEVERELY_EXTENDED are excluded.
+    #
+    # BUY MORE candidates are deliberately unaffected.
+    # ========================================================
+
+    buy_candidates = {
+        ticker: candidate
+        for ticker, candidate in buy_candidates.items()
+        if (
+            candidate["Action"] != "BUY NEW"
+            or candidate.get("Entry Quality", "").strip().upper() == "REASONABLE"
+        )
     }
 
     # ========================================================
