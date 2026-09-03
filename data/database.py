@@ -44,6 +44,7 @@ def get_connection():
         DATABASE_PATH
     )
 
+
 # =====================================================
 # AUDIT DATABASE
 # =====================================================
@@ -316,6 +317,9 @@ def initialise_database():
     # Stores the evidence available when a recommendation was
     # created. Kept separate from recommendations for backwards
     # compatibility with all existing consumers.
+    #
+    # Entry Quality fields are SHADOW MODE telemetry only.
+    # They do not influence recommendation decisions.
     # -------------------------------------------------
 
     cursor.execute(
@@ -323,42 +327,94 @@ def initialise_database():
         CREATE TABLE IF NOT EXISTS recommendation_evidence
         (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+
             recommendation_id INTEGER NOT NULL,
+
             ticker TEXT,
+
             capture_date TEXT,
+
             signal TEXT,
+
             investment_score REAL,
+
             technical_score REAL,
+
             quality_score REAL,
+
             growth_score REAL,
+
             confidence_score REAL,
+
             entry_price REAL,
+
             rsi REAL,
+
             sma50 REAL,
+
             sma200 REAL,
+
             return_3m REAL,
+
+            extension_sma50_pct REAL,
+
+            extension_sma200_pct REAL,
+
+            return_5d_pct REAL,
+
+            return_10d_pct REAL,
+
+            return_20d_pct REAL,
+
+            entry_quality TEXT,
+
+            entry_quality_mode TEXT,
+
             trend TEXT,
+
             trend_score REAL,
+
             momentum_score REAL,
+
             volume_score REAL,
+
             risk_score REAL,
+
             revenue_growth REAL,
+
             profit_margin REAL,
+
             return_on_equity REAL,
+
             debt_to_equity REAL,
+
             sector TEXT,
+
             industry TEXT,
+
             technical_reasons TEXT,
+
             technical_risks TEXT,
+
             recommendation_reasons TEXT,
+
             recommendation_risks TEXT,
+
             ai_decision TEXT,
+
             ai_conviction TEXT,
+
             ai_conviction_score REAL,
+
             ai_action TEXT,
+
             ai_investment_thesis TEXT,
+
             ai_risks TEXT,
-            FOREIGN KEY(recommendation_id) REFERENCES recommendations(id),
+
+            FOREIGN KEY(recommendation_id)
+                REFERENCES recommendations(id),
+
             UNIQUE(recommendation_id)
         )
         """
@@ -471,6 +527,68 @@ def initialise_database():
             )
 
     # -------------------------------------------------
+    # Check recommendation evidence columns
+    # -------------------------------------------------
+
+    cursor.execute(
+        "PRAGMA table_info(recommendation_evidence)"
+    )
+
+    recommendation_evidence_columns = {
+        row[1]
+        for row in cursor.fetchall()
+    }
+
+    # -------------------------------------------------
+    # Add missing recommendation evidence columns
+    #
+    # This makes the migration safe for:
+    #
+    #   1. New databases
+    #   2. Existing databases
+    #   3. The current database where the seven
+    #      columns have already been added manually
+    # -------------------------------------------------
+
+    missing_recommendation_evidence_columns = {
+
+        "extension_sma50_pct":
+            "REAL",
+
+        "extension_sma200_pct":
+            "REAL",
+
+        "return_5d_pct":
+            "REAL",
+
+        "return_10d_pct":
+            "REAL",
+
+        "return_20d_pct":
+            "REAL",
+
+        "entry_quality":
+            "TEXT",
+
+        "entry_quality_mode":
+            "TEXT"
+
+    }
+
+    for column, data_type in (
+        missing_recommendation_evidence_columns.items()
+    ):
+
+        if column not in recommendation_evidence_columns:
+
+            cursor.execute(
+                f"""
+                ALTER TABLE recommendation_evidence
+                ADD COLUMN {column} {data_type}
+                """
+            )
+
+    # -------------------------------------------------
     # Check evaluation columns
     # -------------------------------------------------
 
@@ -547,10 +665,6 @@ def initialise_database():
 # SAVE RECOMMENDATIONS
 # =====================================================
 
-# =====================================================
-# SAVE RECOMMENDATIONS
-# =====================================================
-
 def save_recommendations(
     stock_results
 ):
@@ -573,8 +687,11 @@ def save_recommendations(
     backfill a missing evidence snapshot without creating a new
     recommendation row.
 
-    This keeps the existing recommendations table and downstream
-    logic backwards compatible.
+    Entry Quality
+    -------------
+    Entry Quality fields are persisted as SHADOW MODE telemetry.
+    They do not influence BUY NEW, BUY MORE, HOLD, REDUCE or SELL
+    decisions.
     """
 
     if not stock_results:
@@ -694,7 +811,6 @@ def save_recommendations(
                 )
 
                 if evidence_exists:
-
                     continue
 
                 # ---------------------------------------------
@@ -722,6 +838,14 @@ def save_recommendations(
                         sma50,
                         sma200,
                         return_3m,
+
+                        extension_sma50_pct,
+                        extension_sma200_pct,
+                        return_5d_pct,
+                        return_10d_pct,
+                        return_20d_pct,
+                        entry_quality,
+                        entry_quality_mode,
 
                         trend,
                         trend_score,
@@ -752,13 +876,23 @@ def save_recommendations(
 
                     VALUES (
                         ?, ?, ?,
+
                         ?,
+
                         ?, ?, ?, ?, ?,
+
                         ?, ?, ?, ?, ?,
+
+                        ?, ?, ?, ?, ?, ?, ?,
+
                         ?, ?, ?, ?, ?,
+
                         ?, ?, ?, ?,
+
                         ?, ?,
+
                         ?, ?, ?, ?,
+
                         ?, ?, ?, ?, ?, ?
                     )
                     """,
@@ -821,7 +955,38 @@ def save_recommendations(
 
                         stock.get(
                             "Return_3m",
-                            0
+                            stock.get(
+                                "3M Return %",
+                                0
+                            )
+                        ),
+
+                        stock.get(
+                            "Extension SMA50 %"
+                        ),
+
+                        stock.get(
+                            "Extension SMA200 %"
+                        ),
+
+                        stock.get(
+                            "Return 5D %"
+                        ),
+
+                        stock.get(
+                            "Return 10D %"
+                        ),
+
+                        stock.get(
+                            "Return 20D %"
+                        ),
+
+                        stock.get(
+                            "Entry Quality"
+                        ),
+
+                        stock.get(
+                            "Entry Quality Mode"
                         ),
 
                         stock.get(
@@ -1070,6 +1235,14 @@ def save_recommendations(
                     sma200,
                     return_3m,
 
+                    extension_sma50_pct,
+                    extension_sma200_pct,
+                    return_5d_pct,
+                    return_10d_pct,
+                    return_20d_pct,
+                    entry_quality,
+                    entry_quality_mode,
+
                     trend,
                     trend_score,
                     momentum_score,
@@ -1099,13 +1272,23 @@ def save_recommendations(
 
                 VALUES (
                     ?, ?, ?,
+
                     ?,
+
                     ?, ?, ?, ?, ?,
+
                     ?, ?, ?, ?, ?,
+
+                    ?, ?, ?, ?, ?, ?, ?,
+
                     ?, ?, ?, ?, ?,
+
                     ?, ?, ?, ?,
+
                     ?, ?,
+
                     ?, ?, ?, ?,
+
                     ?, ?, ?, ?, ?, ?
                 )
                 """,
@@ -1169,7 +1352,38 @@ def save_recommendations(
 
                     stock.get(
                         "Return_3m",
-                        0
+                        stock.get(
+                            "3M Return %",
+                            0
+                        )
+                    ),
+
+                    stock.get(
+                        "Extension SMA50 %"
+                    ),
+
+                    stock.get(
+                        "Extension SMA200 %"
+                    ),
+
+                    stock.get(
+                        "Return 5D %"
+                    ),
+
+                    stock.get(
+                        "Return 10D %"
+                    ),
+
+                    stock.get(
+                        "Return 20D %"
+                    ),
+
+                    stock.get(
+                        "Entry Quality"
+                    ),
+
+                    stock.get(
+                        "Entry Quality Mode"
                     ),
 
                     stock.get(
@@ -1307,7 +1521,6 @@ def save_recommendations(
         # Commit recommendation/evidence changes together
         # -------------------------------------------------
 
-
         # -------------------------------------------------
         # Epic 1: Decision audit database
         # -------------------------------------------------
@@ -1333,11 +1546,14 @@ def save_recommendations(
 
         conn.close()
 
+
 # =====================================================
 # GET RECOMMENDATION EVIDENCE
 # =====================================================
 
-def get_recommendation_evidence(recommendation_id):
+def get_recommendation_evidence(
+    recommendation_id
+):
     """
     Return the immutable evidence snapshot for a recommendation.
 
@@ -1348,14 +1564,18 @@ def get_recommendation_evidence(recommendation_id):
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
+
         cursor.execute(
             """
             SELECT *
             FROM recommendation_evidence
             WHERE recommendation_id = ?
             """,
-            (recommendation_id,)
+            (
+                recommendation_id,
+            )
         )
 
         row = cursor.fetchone()
@@ -1368,7 +1588,12 @@ def get_recommendation_evidence(recommendation_id):
             for description in cursor.description
         ]
 
-        result = dict(zip(columns, row))
+        result = dict(
+            zip(
+                columns,
+                row
+            )
+        )
 
         json_fields = [
             "technical_reasons",
@@ -1381,18 +1606,33 @@ def get_recommendation_evidence(recommendation_id):
         ]
 
         for field in json_fields:
-            value = result.get(field)
+
+            value = result.get(
+                field
+            )
+
             if not value:
+
                 result[field] = []
+
                 continue
+
             try:
-                result[field] = json.loads(value)
+
+                result[field] = json.loads(
+                    value
+                )
+
             except Exception:
-                result[field] = [value]
+
+                result[field] = [
+                    value
+                ]
 
         return result
 
     finally:
+
         conn.close()
 
 
@@ -1559,7 +1799,6 @@ def save_recommendation_evaluations(
         exists = cursor.fetchone()[0]
 
         if exists:
-
             continue
 
         # ---------------------------------------------
@@ -1586,13 +1825,18 @@ def save_recommendation_evaluations(
         if pd.notna(
             evaluation_date
         ):
+
             evaluation_date = (
                 pd.Timestamp(
                     evaluation_date
                 )
-                .strftime("%Y-%m-%d")
+                .strftime(
+                    "%Y-%m-%d"
+                )
             )
+
         else:
+
             evaluation_date = None
 
         price = row.get(
@@ -1948,6 +2192,7 @@ def get_evaluation_history():
     conn.close()
 
     return df
+
 
 # =====================================================
 # GET LATEST RECOMMENDATION ID

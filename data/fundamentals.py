@@ -45,6 +45,15 @@ def get_fundamentals(ticker):
 
     fundamentals = {
 
+        "Name":
+        info.get(
+            "longName",
+            info.get(
+                "shortName",
+                ticker
+            )
+        ),
+
         "Revenue Growth":
             info.get(
                 "revenueGrowth",

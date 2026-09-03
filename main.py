@@ -129,6 +129,8 @@ from analysis.final_portfolio_decision import (
     generate_final_portfolio_decisions,
 )
 
+from analysis.entry_quality import assess_entry_quality
+
 
 def main():
 
@@ -641,6 +643,18 @@ def main():
                 )
             )
 
+            entry_quality = assess_entry_quality(df)
+
+            print(
+                f"ENTRY QUALITY DEBUG | {ticker} | "
+                f"EQ={entry_quality.get('Entry Quality')} | "
+                f"SMA50={entry_quality.get('Extension SMA50 %')} | "
+                f"SMA200={entry_quality.get('Extension SMA200 %')} | "
+                f"5D={entry_quality.get('Return 5D %')} | "
+                f"10D={entry_quality.get('Return 10D %')} | "
+                f"20D={entry_quality.get('Return 20D %')}"
+            )
+
             print(
                 "About to append"
             )
@@ -649,6 +663,11 @@ def main():
                 {
                     "Ticker":
                         ticker,
+                    "Name":
+                        fundamentals.get(
+                            "Name",
+                            ticker
+                        ),
 
                     "Signal":
                         signal,
@@ -729,6 +748,44 @@ def main():
                             ) * 100,
                             2
                         ),
+
+                    # ---------------------------------
+                    # BUY NEW Entry Quality — SHADOW
+                    # ---------------------------------
+                    "Extension SMA50 %":
+                        entry_quality[
+                            "Extension SMA50 %"
+                        ],
+
+                    "Extension SMA200 %":
+                        entry_quality[
+                            "Extension SMA200 %"
+                        ],
+
+                    "Return 5D %":
+                        entry_quality[
+                            "Return 5D %"
+                        ],
+
+                    "Return 10D %":
+                        entry_quality[
+                            "Return 10D %"
+                        ],
+
+                    "Return 20D %":
+                        entry_quality[
+                            "Return 20D %"
+                        ],
+
+                    "Entry Quality":
+                        entry_quality[
+                            "Entry Quality"
+                        ],
+
+                    "Entry Quality Mode":
+                        entry_quality[
+                            "Entry Quality Mode"
+                        ],
 
                     # Fundamentals
                     "Revenue Growth":
@@ -964,6 +1021,19 @@ def main():
     # ---------------------------------
     # Save recommendation history
     # ---------------------------------
+
+    print("\nPRE-SAVE EQ DEBUG")
+
+    for stock in results[:20]:
+        print(
+            f"PRE-SAVE EQ DEBUG | "
+            f"{stock.get('Ticker')} | "
+            f"EQ={stock.get('Entry Quality')} | "
+            f"SMA50={stock.get('Extension SMA50 %')} | "
+            f"SMA200={stock.get('Extension SMA200 %')}"
+        )
+
+
 
     save_recommendations(
         results

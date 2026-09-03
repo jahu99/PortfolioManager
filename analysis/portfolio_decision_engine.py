@@ -1313,7 +1313,13 @@ def generate_portfolio_decisions(
 
                 "Ticker":
                     ticker,
-
+                "Name":
+                    get_value(
+                        row,
+                        "Name",
+                        "name",
+                        default=""
+                    ),
                 "Action":
                     action,
 

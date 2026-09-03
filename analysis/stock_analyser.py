@@ -348,6 +348,11 @@ def analyse_stock(ticker):
             "Ticker":
                 ticker,
 
+            "Name":
+                fundamentals.get(
+                    "Name",
+                    ticker
+                ),
 
             "Signal":
                 signal,
