@@ -131,6 +131,10 @@ from analysis.final_portfolio_decision import (
 
 from analysis.entry_quality import assess_entry_quality
 
+from analysis.market_intelligence import (
+    assess_market_intelligence,
+)
+
 
 def main():
 
@@ -1152,6 +1156,48 @@ def main():
                 decision
             )
 
+        # ---------------------------------
+        # MARKET & EVENT INTELLIGENCE
+        # Shadow mode — does not alter
+        # portfolio decisions
+        # ---------------------------------
+
+        print(
+            "\nMARKET & EVENT INTELLIGENCE"
+        )
+
+        market_intelligence = (
+            assess_market_intelligence(
+                holdings,
+                portfolio_decisions,
+                force_refresh=True
+
+            )
+        )
+
+        print(
+            f"Market intelligence records: "
+            f"{len(market_intelligence)}"
+        )
+
+        if not market_intelligence.empty:
+
+            print(
+                market_intelligence[
+                    [
+                        "Ticker",
+                        "Name",
+                        "Current Portfolio Action",
+                        "Existing Holding",
+                        "Analyst Recommendation",
+                        "Analyst Target Upside %",
+                        "Earnings Status",
+                    ]
+                ].to_string(
+                    index=False
+                )
+            )
+
         # Convert stock results into dataframe for capital allocator
 
         if isinstance(
@@ -1768,6 +1814,7 @@ def main():
         rebalance_recommendations,
         portfolio_health,
         capital_allocation,
+        market_intelligence,
         decisions,
         trade_plan,
         performance_summary,

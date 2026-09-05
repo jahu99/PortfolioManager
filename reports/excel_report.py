@@ -339,6 +339,90 @@ def create_capital_allocation_sheet(
 
     print("Capital Allocation sheet created")
 
+
+def add_article_hyperlinks(
+
+    worksheet,
+
+    news_report,
+
+    first_news_data_row
+
+):
+
+    """
+    Convert Article URLs in the news table into
+    clickable Excel hyperlinks.
+    """
+
+    if news_report.empty:
+
+        return
+
+
+    if "Article" not in news_report.columns:
+
+        return
+
+
+    article_column = (
+
+        news_report.columns.get_loc(
+
+            "Article"
+
+        )
+
+        + 1
+
+    )
+
+
+    for row_number in range(
+
+        first_news_data_row,
+
+        first_news_data_row + len(news_report)
+
+    ):
+
+        article_cell = worksheet.cell(
+
+            row=row_number,
+
+            column=article_column
+
+        )
+
+
+        article_url = article_cell.value
+
+
+        if not article_url:
+
+            continue
+
+
+        article_cell.hyperlink = (
+
+            str(article_url)
+
+        )
+
+
+        article_cell.value = (
+
+            "Open Article"
+
+        )
+
+
+        article_cell.style = (
+
+            "Hyperlink"
+
+        )
+
 def create_report(
     results,
     portfolio_summary,
@@ -349,8 +433,9 @@ def create_report(
     rebalance_recommendations,
     portfolio_health,
     capital_allocation,
-    decisions,
-    trade_plan,
+    market_intelligence=None,
+    decisions=None,
+    trade_plan=None,
     performance_summary=None,
     signal_performance=None,
     horizon_performance=None,
@@ -393,6 +478,7 @@ def create_report(
 
     if rebalance_recommendations is None:
         rebalance_recommendations = pd.DataFrame()
+
 
     if decisions is None:
         decisions = pd.DataFrame()
@@ -439,6 +525,9 @@ def create_report(
     if recommendation_learning is None:
         recommendation_learning = {}
 
+    if market_intelligence is None:
+        market_intelligence = pd.DataFrame()
+
     # =========================================================
     # NORMALISE DATAFRAMES
     # =========================================================
@@ -450,6 +539,7 @@ def create_report(
         "portfolio_actions",
         "portfolio_optimisation",
         "rebalance_recommendations",
+        "market_intelligence",
         "decisions",
         "trade_plan",
         "performance_summary",
@@ -929,6 +1019,194 @@ def create_report(
             writer,
             capital_allocation
         )
+
+        # =====================================================
+        # MARKET INTELLIGENCE
+        # =====================================================
+
+        # =====================================================
+        # MARKET INTELLIGENCE
+        # =====================================================
+
+        print(
+            "Creating Market Intelligence"
+        )
+
+        market_intelligence_report = (
+            market_intelligence.copy()
+        )
+
+        preferred_columns = [
+            "Ticker",
+            "Name",
+            "Current Portfolio Action",
+            "Existing Holding",
+            "Investment Score",
+            "Allocation %",
+            "Analyst Recommendation",
+            "Analyst Mean Score",
+            "Current Price",
+            "Analyst Target Mean",
+            "Analyst Target High",
+            "Analyst Target Low",
+            "Analyst Target Upside %",
+            "Earnings Status",
+            "Next Earnings Date",
+            "News Count",
+            "News Headlines",
+            "Collected At",
+            "Source",
+        ]
+
+        available_columns = [
+            column
+            for column in preferred_columns
+            if column in market_intelligence_report.columns
+        ]
+
+        remaining_columns = [
+            column
+            for column in market_intelligence_report.columns
+            if (
+                column not in available_columns
+                and column != "Recent News"
+            )
+        ]
+
+        market_intelligence_report = (
+            market_intelligence_report[
+                available_columns
+                + remaining_columns
+            ]
+        )
+
+        market_intelligence_sheet_name = (
+            "Market Intelligence"
+        )
+
+        # -----------------------------------------------------
+        # MARKET INTELLIGENCE SUMMARY TABLE
+        # -----------------------------------------------------
+
+        market_intelligence_report.to_excel(
+            writer,
+            sheet_name=market_intelligence_sheet_name,
+            index=False
+        )
+
+        # -----------------------------------------------------
+        # DETAILED MARKET & EVENT NEWS
+        # -----------------------------------------------------
+
+        if (
+            market_intelligence is not None
+            and not market_intelligence.empty
+        ):
+
+            print(
+                "Adding detailed Market & Event News"
+            )
+
+            news_rows = []
+
+            for _, intelligence_row in (
+                market_intelligence.iterrows()
+            ):
+
+                ticker = intelligence_row.get(
+                    "Ticker",
+                    ""
+                )
+
+                news_items = intelligence_row.get(
+                    "Recent News",
+                    []
+                )
+
+                if not isinstance(
+                    news_items,
+                    list
+                ):
+                    continue
+
+                for article in news_items:
+
+                    if not isinstance(
+                        article,
+                        dict
+                    ):
+                        continue
+
+                    news_rows.append(
+                        {
+                            "Ticker": ticker,
+                            "Title": article.get(
+                                "Title",
+                                ""
+                            ),
+                            "Description": article.get(
+                                "Description",
+                                ""
+                            ),
+                            "Publisher": article.get(
+                                "Publisher",
+                                ""
+                            ),
+                            "Published At": article.get(
+                                "Published At",
+                                ""
+                            ),
+                            "Article": article.get(
+                                "Link",
+                                ""
+                            ),
+                        }
+                    )
+
+            if news_rows:
+
+                news_report = pd.DataFrame(
+                    news_rows
+                )
+
+                # Leave two blank rows after the summary table
+                news_heading_row = (
+                    len(market_intelligence_report)
+                    + 4
+                )
+
+                worksheet = writer.sheets[
+                    market_intelligence_sheet_name
+                ]
+
+                worksheet.cell(
+                    row=news_heading_row,
+                    column=1,
+                    value="MARKET & EVENT NEWS"
+                )
+
+                news_start_row = (
+                    news_heading_row + 2
+                )
+
+                news_report.to_excel(
+                    writer,
+                    sheet_name=market_intelligence_sheet_name,
+                    startrow=news_start_row - 1,
+                    index=False
+                )
+
+                add_article_hyperlinks(
+
+                    worksheet=worksheet,
+
+                    news_report=news_report,
+
+                    first_news_data_row=(
+                        news_start_row + 1
+                    )
+
+                )
 
         # =====================================================
         # STOCK RANKINGS
