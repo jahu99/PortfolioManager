@@ -1790,6 +1790,7 @@ def run_governed_chain(
     base_row: dict,
     capital_allocation: Any = None,
     recommendation_intelligence: Any = None,
+    market_intelligence: Any = None,
 ) -> dict:
     """
     Run the complete governed AI decision chain for one candidate.
@@ -1906,6 +1907,63 @@ def run_governed_chain(
             )
         ]
     )
+
+    # ============================================================
+    # MARKET & EVENT INTELLIGENCE
+    #
+    # Shadow-mode contextual evidence for the LLM reviewer.
+    #
+    # This does NOT alter deterministic scoring, evidence scoring,
+    # historical learning or the rules-based decision.
+    #
+    # Select only the intelligence record for the current ticker.
+    # ============================================================
+
+    market_intelligence_record = None
+
+    if market_intelligence is not None:
+
+        try:
+
+            if hasattr(market_intelligence, "empty"):
+
+                if not market_intelligence.empty:
+
+                    matching = market_intelligence[
+                        market_intelligence["Ticker"]
+                        .astype(str)
+                        .str.upper()
+                        == str(ticker).upper()
+                    ]
+
+                    if not matching.empty:
+
+                        market_intelligence_record = (
+                            matching.iloc[0].to_dict()
+                        )
+
+            elif isinstance(market_intelligence, list):
+
+                for record in market_intelligence:
+
+                    if (
+                        isinstance(record, dict)
+                        and str(record.get("Ticker", "")).upper()
+                        == str(ticker).upper()
+                    ):
+
+                        market_intelligence_record = record
+
+                        break
+
+        except Exception as exc:
+
+            print(
+                f"Market intelligence selection failed "
+                f"for {ticker}: {exc}"
+            )
+
+            market_intelligence_record = None
 
     # ============================================================
     # CANDIDATE DECISION INPUT
@@ -2125,6 +2183,18 @@ def run_governed_chain(
     ] = candidate_input[
         "rules_based_decision"
     ]
+
+    # ============================================================
+    # MARKET & EVENT INTELLIGENCE
+    #
+    # Attach contextual intelligence for the LLM reviewer only.
+    #
+    # It must not overwrite deterministic analytical evidence.
+    # ============================================================
+
+    candidate[
+        "market_intelligence"
+    ] = market_intelligence_record
 
     # ============================================================
     # AI DECISION LAYER
@@ -4649,6 +4719,7 @@ def generate_final_portfolio_decisions(
     capital_allocation,
     recommendation_intelligence=None,
     learning_ticker_horizon_performance=None,
+    market_intelligence=None,
     **kwargs,
 ):
     """
@@ -4944,12 +5015,21 @@ def generate_final_portfolio_decisions(
         try:
 
             chain = run_governed_chain(
+
                 portfolio_summary=portfolio_summary,
+
                 base_row=base_row,
+
                 capital_allocation=capital_allocation,
+
                 recommendation_intelligence=(
+
                     recommendation_intelligence
+
                 ),
+
+                market_intelligence=market_intelligence,
+
             )
 
             result = build_final_result(

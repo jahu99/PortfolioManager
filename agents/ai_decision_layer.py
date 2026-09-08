@@ -1871,9 +1871,12 @@ def _govern_buy(
     if decision_support == "CONDITIONAL":
 
         return (
-            "HOLD",
+            
+            proposed_action,
             [
-                "Buy evidence is conditional; HOLD is preferred",
+                "Buy evidence is conditional and contains caveats, "
+                "but deterministic governance requirements for the "
+                "proposed action have been satisfied",
             ],
         )
 

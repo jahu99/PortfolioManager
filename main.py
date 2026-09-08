@@ -1616,7 +1616,9 @@ def main():
                 ),
                 learning_ticker_horizon_performance=(
                     learning_ticker_horizon_performance
-                )
+                ),
+                market_intelligence=market_intelligence,
+
             )
         )
 

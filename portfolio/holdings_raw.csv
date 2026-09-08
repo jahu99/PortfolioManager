@@ -1,23 +1,27 @@
 Ticker,Name,Quantity,Market Value
-NVDA,NVIDIA Corp,0.491323,72.31
+NVDA,NVIDIA Corp,0.51342044,87.02
 IWDA.L,iShares Core MSCI World UCITS ETF,0.428629,45.93
-AEMD.L,Aethlon Medical Inc,0.629127,38.49
-MSFT,Microsoft Corp,0.139998,36.98
-GOOGL,Alphabet Inc,0.108624,29.26
-IONQ,IonQ Inc,0.957193,25.87
-VRDN,Viridian Therapeutics Inc,1.692801,23.53
-VUAA.L,Vanguard S&P 500 UCITS ETF,0.210181,22.69
-APLD,Applied Digital Corp,1.084604,21.85
-AAPL,Apple Inc,0.097,17.57
-PLTR,Palantir Technologies Inc,0.135272,12.69
-AMZN,Amazon Inc,0.069491,10.73
-SEC0.DE,iShares MSCI Global Semiconductors UCITS ETF,0.711762,9.72
+AEMD.L,Amundi Core MSCI Emerging Markets ETF,0.629127,38.49
+MSFT,Microsoft Corp,0.1191756,36.98
+GOOGL,Alphabet Inc,0.13224501,33.09
+IONQ,IonQ Inc,0.71789498,21.03
+VRDN,Viridian Therapeutics Inc,0.95220055,23.53
+VUAA.L,Vanguard S&P 500 UCITS ETF,0.210181,16.12
+AAPL,Apple Inc,0.07622245,18.02
+PLTR,Palantir Technologies Inc,0.14945327,19.26
+AMZN,Amazon Inc,0.08242464,15.73
 STX,Seagate Technology,0.013725,8.42
 MELI,MercadoLibre Inc,0.005557,7.83
-GE,General Electric,0.02,7.64
 ARM,Arm Holdings,0.044092,7.61
-CSX,CSX Corporation,0.0423,4.23
-CASH,Revolut Cash Balance,0.0,5.91
+CASH,Revolut Cash Balance,0.0,2.81
 DXCM,DexCom,0.09,6.36
-BBVA,Bianco Bilbao Vizcaya Argentaria ,0.32,6.9
 CA.PA,Carrefour SA ,0.25,3.47
+ANET,Arista Networks Inc,0.09627033,13.78
+TGTX,TG Therapeutics Inc,0.30531158,12.68
+LLY, Eli Lilly and Co,0.01475213,12.49
+AMG, Affiliated Managers Group Inc,0.04131093,11.92
+TNK, Teekay Tankers Ltd,0.15085591,10.41
+HNGE, Hinge Health Inc,0.12774621,8.70
+DLO, DLocal Ltd,0.87488225,10.03
+ESTC, Elastic N.V.,0.09964141,6.83
+ABUS, Arbutus Biopharma Corp,0.18180422,7.08

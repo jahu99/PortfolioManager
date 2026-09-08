@@ -44,9 +44,23 @@ from __future__ import annotations
 
 import json
 import os
+
+import hashlib
+from pathlib import Path
+
 from typing import Any
 
 import requests
+
+from google import genai
+
+from config.llm_config import (
+    LLM_PROVIDER,
+    LLM_CACHE_ENABLED,
+    LLM_CACHE_PATH,
+    GEMINI_MODEL,
+)
+
 
 
 # ============================================================
@@ -180,7 +194,10 @@ def _build_compact_candidate(candidate: dict) -> dict:
     decision layer, not synthetic defaults.
 
     Design rules:
+
     - Preserve the canonical proposed action when supplied.
+    - Structured ownership is authoritative for held status.
+    - Structured candidate decision is authoritative for proposed action.
     - Support both flattened and nested candidate structures.
     - Preserve genuine absence as None/omitted.
     - Never convert missing technical evidence into fake values.
@@ -246,16 +263,16 @@ def _build_compact_candidate(candidate: dict) -> dict:
         asset_type = "STOCK"
 
     # ------------------------------------------------------------
-    # Basic identity / portfolio evidence
+    # Basic identity
     # ------------------------------------------------------------
 
     ticker = _clean_text(
         _first_value(
-            candidate,
+            ownership,
             "Ticker",
             "ticker",
             default=_first_value(
-                ownership,
+                candidate,
                 "Ticker",
                 "ticker",
                 default="",
@@ -265,11 +282,11 @@ def _build_compact_candidate(candidate: dict) -> dict:
 
     name = _clean_text(
         _first_value(
-            candidate,
+            ownership,
             "Name",
             "name",
             default=_first_value(
-                ownership,
+                candidate,
                 "Name",
                 "name",
                 default="",
@@ -277,13 +294,20 @@ def _build_compact_candidate(candidate: dict) -> dict:
         )
     )
 
+    # ------------------------------------------------------------
+    # Ownership
+    #
+    # Structured ownership is authoritative. Flattened candidate
+    # fields may be stale from an earlier pipeline stage.
+    # ------------------------------------------------------------
+
     held_value = _first_value(
-        candidate,
+        ownership,
         "Held?",
         "held",
         "is_held",
         default=_first_value(
-            ownership,
+            candidate,
             "Held?",
             "held",
             "is_held",
@@ -302,41 +326,41 @@ def _build_compact_candidate(candidate: dict) -> dict:
 
     sector = _clean_text(
         _first_value(
-            candidate,
+            ownership,
             "Sector",
             "sector",
             default=_first_value(
-                ownership,
+                candidate,
                 "Sector",
                 "sector",
                 default="",
             ),
         )
     )
+
     compact = {
         "ticker": ticker,
         "name": name,
         "asset_type": asset_type,
         "held": held,
-        "sector": sector
+        "sector": sector,
     }
 
     # ------------------------------------------------------------
     # Proposed action
     #
-    # This is important: preserve the action if it exists anywhere
-    # in the candidate. Do not manufacture HOLD unless absolutely
-    # nothing is available.
+    # Structured candidate decision is authoritative over flattened
+    # candidate fields, which may contain stale values.
     # ------------------------------------------------------------
 
     proposed_action = _first_value(
-        candidate,
+        decision,
         "Proposed Action",
         "proposed_action",
         "Action",
         "action",
         default=_first_value(
-            decision,
+            candidate,
             "Proposed Action",
             "proposed_action",
             "Action",
@@ -345,9 +369,9 @@ def _build_compact_candidate(candidate: dict) -> dict:
         ),
     )
 
-    compact["proposed_action"] = _clean_text(
-        proposed_action
-    ).upper() or "HOLD"
+    compact["proposed_action"] = (
+        _clean_text(proposed_action).upper() or "HOLD"
+    )
 
     # ------------------------------------------------------------
     # ETF evidence
@@ -379,11 +403,9 @@ def _build_compact_candidate(candidate: dict) -> dict:
             ),
         )
 
-        # Preserve ETF score if actually supplied.
         if etf_score is not None:
             compact["etf_score"] = _safe_float(etf_score)
 
-        # Preserve ETF signal if actually supplied.
         if etf_signal is not None:
             compact["etf_signal"] = _clean_text(etf_signal)
 
@@ -392,10 +414,6 @@ def _build_compact_candidate(candidate: dict) -> dict:
     # ------------------------------------------------------------
 
     else:
-
-        # --------------------------------------------------------
-        # Core stock scores
-        # --------------------------------------------------------
 
         stock_fields = {
             "investment_score": (
@@ -436,7 +454,7 @@ def _build_compact_candidate(candidate: dict) -> dict:
                 compact[output_key] = _safe_float(value)
 
         # --------------------------------------------------------
-        # Stock signal
+        # Signal
         # --------------------------------------------------------
 
         signal = _first_value(
@@ -446,356 +464,260 @@ def _build_compact_candidate(candidate: dict) -> dict:
             "Momentum Signal",
             default=_first_value(
                 candidate,
+                "signal",
                 "Signal",
                 "Momentum Signal",
-                "signal",
                 default=None,
             ),
         )
 
         if signal is not None:
-            compact["signal"] = _clean_text(signal)
+            compact["signal"] = _clean_text(signal).upper()
 
         # --------------------------------------------------------
-        # Optional current price
+        # Price / technical evidence
         # --------------------------------------------------------
 
-        current_price = _first_value(
-            analysis,
-            "current_price",
-            "price",
-            "close",
-            default=_first_value(
-                candidate,
-                "Current Price",
-                "Price",
-                "Close",
+        technical_fields = {
+            "current_price": (
                 "current_price",
+                "Current Price",
                 "price",
-                "close",
-                default=None,
+                "Price",
             ),
-        )
-
-        if current_price is not None:
-            compact["current_price"] = _safe_float(
-                current_price
-            )
-
-        # --------------------------------------------------------
-        # Optional MA50
-        # --------------------------------------------------------
-
-        ma50 = _first_value(
-            analysis,
-            "ma50",
-            "sma50",
-            default=_first_value(
-                candidate,
+            "ma50": (
+                "ma50",
                 "MA50",
                 "SMA50",
-                "ma50",
-                "sma50",
-                default=None,
             ),
-        )
-
-        if ma50 is not None:
-            compact["ma50"] = _safe_float(ma50)
-
-        # --------------------------------------------------------
-        # Optional MA200
-        # --------------------------------------------------------
-
-        ma200 = _first_value(
-            analysis,
-            "ma200",
-            "sma200",
-            default=_first_value(
-                candidate,
+            "ma200": (
+                "ma200",
                 "MA200",
                 "SMA200",
-                "ma200",
-                "sma200",
-                default=None,
             ),
-        )
-
-        if ma200 is not None:
-            compact["ma200"] = _safe_float(ma200)
-
-        # --------------------------------------------------------
-        # Optional RSI
-        # --------------------------------------------------------
-
-        rsi = _first_value(
-            analysis,
-            "rsi",
-            default=_first_value(
-                candidate,
-                "RSI",
+            "rsi": (
                 "rsi",
-                default=None,
+                "RSI",
             ),
-        )
-
-        if rsi is not None:
-            compact["rsi"] = _safe_float(rsi)
-
-        # --------------------------------------------------------
-        # Optional 3-month return
-        # --------------------------------------------------------
-
-        return_3m = _first_value(
-            analysis,
-            "return_3m",
-            "return_3m_pct",
-            default=_first_value(
-                candidate,
-                "Return_3m",
-                "3M Return %",
-                "return_3m",
+            "return_3m_pct": (
                 "return_3m_pct",
-                default=None,
+                "Return 3M %",
+                "3M Return %",
             ),
-        )
+        }
 
-        if return_3m is not None:
-            compact["return_3m_pct"] = _safe_float(
-                return_3m
+        for output_key, source_keys in technical_fields.items():
+
+            value = _first_value(
+                analysis,
+                *source_keys,
+                default=_first_value(
+                    candidate,
+                    *source_keys,
+                    default=None,
+                ),
             )
+
+            if value is not None:
+                compact[output_key] = _safe_float(value)
 
     # ------------------------------------------------------------
     # Historical / learning evidence
     # ------------------------------------------------------------
 
-    observations = _first_value(
+    historical = _first_value(
         intelligence,
-        "historical_signal_observations",
-        "observations",
+        "historical_evidence",
+        "Historical Evidence",
+        "learning",
+        "Learning",
         default=_first_value(
-            candidate,
-            "Historical Signal Observations",
-            "historical_signal_observations",
-            default=None,
+            analysis,
+            "historical_evidence",
+            "Historical Evidence",
+            "learning",
+            "Learning",
+            default=_first_value(
+                candidate,
+                "historical_evidence",
+                "Historical Evidence",
+                "learning",
+                "Learning",
+                default={},
+            ),
         ),
     )
 
-    win_rate = _first_value(
-        intelligence,
-        "historical_signal_win_rate_pct",
-        "win_rate_pct",
-        default=_first_value(
-            candidate,
-            "Historical Signal Win Rate %",
-            "historical_signal_win_rate_pct",
-            default=None,
-        ),
-    )
+    if isinstance(historical, dict) and historical:
 
-    avg_return = _first_value(
-        intelligence,
-        "historical_signal_average_return_pct",
-        "average_return_pct",
-        default=_first_value(
-            candidate,
-            "Historical Signal Average Return %",
-            "historical_signal_average_return_pct",
-            default=None,
-        ),
-    )
+        compact_historical = {}
 
-    reliability = _first_value(
-        intelligence,
-        "historical_signal_reliability",
-        "reliability",
-        default=_first_value(
-            candidate,
-            "Historical Signal Reliability",
-            "historical_signal_reliability",
-            default=None,
-        ),
-    )
+        historical_fields = {
+            "observations": (
+                "observations",
+                "Observations",
+            ),
+            "win_rate_pct": (
+                "win_rate_pct",
+                "Win Rate %",
+                "win_rate",
+            ),
+            "average_return_pct": (
+                "average_return_pct",
+                "Average Return %",
+                "average_return",
+            ),
+            "reliability": (
+                "reliability",
+                "Reliability",
+            ),
+            "score_bucket_observations": (
+                "score_bucket_observations",
+                "Score Bucket Observations",
+            ),
+            "score_bucket_win_rate_pct": (
+                "score_bucket_win_rate_pct",
+                "Score Bucket Win Rate %",
+            ),
+            "learning_adjusted_score": (
+                "learning_adjusted_score",
+                "Learning Adjusted Score",
+            ),
+        }
 
-    bucket_obs = _first_value(
-        intelligence,
-        "score_bucket_observations",
-        default=_first_value(
-            candidate,
-            "Score Bucket Observations",
-            "score_bucket_observations",
-            default=None,
-        ),
-    )
+        for output_key, source_keys in historical_fields.items():
 
-    bucket_win = _first_value(
-        intelligence,
-        "score_bucket_win_rate_pct",
-        default=_first_value(
-            candidate,
-            "Score Bucket Win Rate %",
-            "score_bucket_win_rate_pct",
-            default=None,
-        ),
-    )
+            value = _first_value(
+                historical,
+                *source_keys,
+                default=None,
+            )
 
-    learning_adjusted = _first_value(
-        intelligence,
-        "learning_adjusted_score",
-        default=_first_value(
-            candidate,
-            "Learning Adjusted Score",
-            "learning_adjusted_score",
-            default=None,
-        ),
-    )
+            if value is not None:
 
-    compact["historical_evidence"] = {
-        "observations": (
-            int(_safe_float(observations))
-            if observations is not None
-            else None
-        ),
-        "win_rate_pct": (
-            _safe_float(win_rate)
-            if win_rate is not None
-            else None
-        ),
-        "average_return_pct": (
-            _safe_float(avg_return)
-            if avg_return is not None
-            else None
-        ),
-        "reliability": (
-            _clean_text(reliability)
-            if reliability is not None
-            else None
-        ),
-        "score_bucket_observations": (
-            int(_safe_float(bucket_obs))
-            if bucket_obs is not None
-            else None
-        ),
-        "score_bucket_win_rate_pct": (
-            _safe_float(bucket_win)
-            if bucket_win is not None
-            else None
-        ),
-        "learning_adjusted_score": (
-            _safe_float(learning_adjusted)
-            if learning_adjusted is not None
-            else None
-        ),
-    }
+                if output_key == "reliability":
+                    compact_historical[output_key] = _clean_text(value).upper()
+                else:
+                    compact_historical[output_key] = _safe_float(value)
+
+        if compact_historical:
+            compact["historical_evidence"] = compact_historical
 
     # ------------------------------------------------------------
     # Deterministic confidence
+    #
+    # Structured decision confidence is authoritative.
+    # Do not emit a synthetic 0.0 where no genuine value exists.
     # ------------------------------------------------------------
 
-    confidence = _first_value(
-        rules,
-        "confidence",
+    deterministic_confidence = _first_value(
+        decision,
+        "Deterministic Confidence",
         "deterministic_confidence",
+        "Confidence",
+        "confidence",
         default=_first_value(
-            decision,
-            "confidence",
+            candidate,
+            "Deterministic Confidence",
+            "deterministic_confidence",
             "Confidence",
-            default=_first_value(
-                candidate,
-                "Confidence",
-                "confidence",
-                "Decision Confidence",
-                "deterministic_confidence",
-                default=0.0,
-            ),
+            "confidence",
+            default=None,
         ),
     )
 
-    compact["deterministic_confidence"] = _safe_float(
-        confidence,
-        default=0.0,
-    )
+    if deterministic_confidence is not None:
+        compact["deterministic_confidence"] = _safe_float(
+            deterministic_confidence
+        )
 
     # ------------------------------------------------------------
-    # Deterministic decision reason
+    # Decision reason
     # ------------------------------------------------------------
 
-    reason = _first_value(
-        rules,
-        "reason",
-        "decision_reason",
-        default=_first_value(
+    decision_reason = _clean_text(
+        _first_value(
             decision,
-            "reason",
             "Reason",
+            "reason",
             "Decision Reason",
+            "decision_reason",
             default=_first_value(
                 candidate,
                 "Reason",
-                "Original Reason",
-                "Final Reason",
-                "Decision Reason",
                 "reason",
+                "Decision Reason",
+                "decision_reason",
                 default="",
             ),
+        )
+    )
+
+    if decision_reason:
+        compact["decision_reason"] = decision_reason
+
+    # ------------------------------------------------------------
+    # Technical reasons / risks
+    # ------------------------------------------------------------
+
+    technical_reasons = _first_value(
+        analysis,
+        "technical_reasons",
+        "Technical Reasons",
+        default=_first_value(
+            candidate,
+            "technical_reasons",
+            "Technical Reasons",
+            default=None,
         ),
     )
 
-    compact["decision_reason"] = _clean_text(reason)
+    if isinstance(technical_reasons, list) and technical_reasons:
+        compact["technical_reasons"] = technical_reasons
 
-    # ------------------------------------------------------------
-    # Technical reasons / risks — stocks only
-    # ------------------------------------------------------------
-
-    if asset_type == "STOCK":
-
-        compact["technical_reasons"] = _normalise_list(
-            _first_value(
-                analysis,
-                "technical_reasons",
-                default=_first_value(
-                    candidate,
-                    "Technical Reasons",
-                    "technical_reasons",
-                    default=[],
-                ),
-            )
-        )
-
-        compact["technical_risks"] = _normalise_list(
-            _first_value(
-                analysis,
-                "technical_risks",
-                default=_first_value(
-                    candidate,
-                    "Technical Risks",
-                    "technical_risks",
-                    default=[],
-                ),
-            )
-        )
-
-    else:
-
-        compact["technical_reasons"] = []
-        compact["technical_risks"] = []
-
-    # ------------------------------------------------------------
-    # Recommendation risks
-    # ------------------------------------------------------------
-
-    compact["recommendation_risks"] = _normalise_list(
-        _first_value(
+    technical_risks = _first_value(
+        analysis,
+        "technical_risks",
+        "Technical Risks",
+        default=_first_value(
             candidate,
-            "Recommendation Risks",
-            "recommendation_risks",
-            default=_first_value(
-                intelligence,
-                "recommendation_risks",
-                default=[],
-            ),
-        )
+            "technical_risks",
+            "Technical Risks",
+            default=None,
+        ),
     )
+
+    if isinstance(technical_risks, list) and technical_risks:
+        compact["technical_risks"] = technical_risks
+
+    recommendation_risks = _first_value(
+        intelligence,
+        "recommendation_risks",
+        "Recommendation Risks",
+        default=_first_value(
+            candidate,
+            "recommendation_risks",
+            "Recommendation Risks",
+            default=None,
+        ),
+    )
+
+    if isinstance(recommendation_risks, list) and recommendation_risks:
+        compact["recommendation_risks"] = recommendation_risks
+
+    # ------------------------------------------------------------
+    # Market intelligence
+    # ------------------------------------------------------------
+
+    market_intelligence = candidate.get(
+        "market_intelligence",
+        {},
+    )
+
+    if not isinstance(market_intelligence, dict):
+        market_intelligence = {}
+
+    compact["market_intelligence"] = market_intelligence
 
     return compact
 
@@ -843,21 +765,76 @@ def _build_compact_portfolio(portfolio: dict) -> dict:
 
 def _build_compact_decision(decision: dict) -> dict:
     """Extract the deterministic decision fields."""
+
     if not isinstance(decision, dict):
         decision = {}
 
     evidence = decision.get("Evidence Assessment", {})
+
     if not isinstance(evidence, dict):
         evidence = {}
 
+    proposed_action = _clean_text(
+        _first_value(
+            decision,
+            "Proposed Action",
+            default="HOLD",
+        )
+    ).upper() or "HOLD"
+
+    decision_support = _clean_text(
+        _first_value(
+            decision,
+            "Decision Support",
+            default=_first_value(
+                evidence,
+                "Decision Support",
+                default="UNKNOWN",
+            ),
+        )
+    ).upper() or "UNKNOWN"
+
+    # ------------------------------------------------------------
+    # Explain the deterministic meaning of Decision Support.
+    #
+    # This prevents an LLM from interpreting CONDITIONAL as an
+    # instruction to prefer HOLD. The proposed action remains the
+    # deterministic portfolio action unless governance says otherwise.
+    # ------------------------------------------------------------
+
+    if decision_support == "SUPPORTED":
+
+        decision_support_interpretation = (
+            "The deterministic evidence supports the proposed action."
+        )
+
+    elif decision_support == "CONDITIONAL":
+
+        decision_support_interpretation = (
+            "The proposed action passed deterministic governance, but "
+            "the supporting evidence contains caveats or uncertainty that "
+            "should be independently reviewed. CONDITIONAL does not mean "
+            "that HOLD is preferred and does not, by itself, contradict "
+            "the proposed action."
+        )
+
+    elif decision_support == "UNSUPPORTED":
+
+        decision_support_interpretation = (
+            "The deterministic evidence does not adequately support the "
+            "proposed action."
+        )
+
+    else:
+
+        decision_support_interpretation = (
+            "The deterministic decision support classification is unknown."
+        )
+
     return {
-         "proposed_action": _clean_text(
-            _first_value(
-                decision,
-                "Proposed Action",
-                default="HOLD",
-            )
-        ).upper() or "HOLD",
+
+        "proposed_action": proposed_action,
+
         "evidence_score": _safe_float(
             _first_value(
                 decision,
@@ -869,24 +846,25 @@ def _build_compact_decision(decision: dict) -> dict:
                 ),
             )
         ),
-        "evidence_strength": _first_value(
-            decision,
-            "Evidence Strength",
-            default=_first_value(
-                evidence,
+
+        "evidence_strength": _clean_text(
+            _first_value(
+                decision,
                 "Evidence Strength",
-                default="UNKNOWN",
-            ),
+                default=_first_value(
+                    evidence,
+                    "Evidence Strength",
+                    default="UNKNOWN",
+                ),
+            )
+        ).upper() or "UNKNOWN",
+
+        "decision_support": decision_support,
+
+        "decision_support_interpretation": (
+            decision_support_interpretation
         ),
-        "decision_support": _first_value(
-            decision,
-            "Decision Support",
-            default=_first_value(
-                evidence,
-                "Decision Support",
-                default="UNKNOWN",
-            ),
-        ),
+
         "confidence": _safe_float(
             _first_value(
                 decision,
@@ -898,11 +876,12 @@ def _build_compact_decision(decision: dict) -> dict:
                 ),
             )
         ),
+
         "reason": _clean_text(
             decision.get("Reason", "")
         ),
-    }
 
+    }
 
 # ============================================================
 # Review prompt
@@ -1000,7 +979,8 @@ def build_review_prompt(
     return f"""You are an independent portfolio governance reviewer.
 
 Review the deterministic proposed action using ONLY the supplied CANDIDATE,
-PORTFOLIO and DETERMINISTIC DECISION evidence.
+
+PORTFOLIO, DETERMINISTIC DECISION and MARKET & EVENT INTELLIGENCE evidence.
 
 Do not generate a new recommendation. Review the proposed ACTION exactly as
 given.
@@ -1026,6 +1006,27 @@ investment evidence.
 For ETFs, use only the ETF-specific evidence actually supplied.
 
 Never invent, reconstruct or assume a missing field.
+
+MARKET & EVENT INTELLIGENCE:
+
+Market & Event Intelligence is contextual shadow-mode evidence supplied to
+provide current market, company or event context.
+
+It does NOT replace, modify or override deterministic scores, signals,
+evidence scoring, historical learning or portfolio governance.
+
+Use it only where a specific supplied contextual fact materially supports,
+weakens or contradicts the proposed action.
+
+Missing Market & Event Intelligence is neutral. Do not treat its absence as
+negative evidence.
+
+Do not invent current events, news, earnings information, sentiment or market
+conditions that are not explicitly supplied.
+
+Contextual intelligence may strengthen confidence in an action, identify a
+material risk, or provide a specific action-relevant contradiction. It must
+not be used to invent a new investment thesis or recommendation.
 
 IMPORTANT REVIEW CLASSIFICATION:
 
@@ -1135,6 +1136,10 @@ PORTFOLIO
 
 DETERMINISTIC DECISION
 {_safe_json(d)}
+
+MARKET & EVENT INTELLIGENCE
+{_safe_json(c.get("market_intelligence", {}))}
+
 
 Return ONLY valid JSON with exactly these four fields:
 
@@ -1301,6 +1306,270 @@ def _validate_llm_response(
         raise ValueError(
             "LLM response reason must not be empty"
         )
+
+
+
+
+# ============================================================
+# LLM PROVIDER AND RESPONSE CACHE
+# ============================================================
+
+def _get_cache_path() -> Path:
+    """Return the configured LLM response cache path."""
+
+    return Path(LLM_CACHE_PATH)
+
+
+def _load_llm_cache() -> dict:
+    """Load the LLM response cache safely."""
+
+    cache_path = _get_cache_path()
+
+    if not cache_path.exists():
+        return {}
+
+    try:
+
+        with cache_path.open(
+            "r",
+            encoding="utf-8",
+        ) as handle:
+
+            data = json.load(handle)
+
+        return data if isinstance(data, dict) else {}
+
+    except Exception as exc:
+
+        print(
+            f"LLM cache read failed: {exc}"
+        )
+
+        return {}
+
+
+def _save_llm_cache(cache: dict) -> None:
+    """Persist the LLM response cache safely."""
+
+    cache_path = _get_cache_path()
+
+    try:
+
+        cache_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        with cache_path.open(
+            "w",
+            encoding="utf-8",
+        ) as handle:
+
+            json.dump(
+                cache,
+                handle,
+                indent=2,
+                default=str,
+            )
+
+    except Exception as exc:
+
+        print(
+            f"LLM cache write failed: {exc}"
+        )
+
+
+def _get_cache_key(prompt: str) -> str:
+    """Create a stable cache key for provider/model/prompt."""
+
+    provider = _clean_text(
+        LLM_PROVIDER
+    ).lower()
+
+    if provider == "gemini":
+
+        model = _clean_text(
+            GEMINI_MODEL
+        )
+
+    elif provider == "ollama":
+
+        model = _clean_text(
+            OLLAMA_MODEL
+        )
+
+    else:
+
+        model = ""
+
+    cache_input = json.dumps(
+        {
+            "provider": provider,
+            "model": model,
+            "prompt": prompt,
+        },
+        sort_keys=True,
+    )
+
+    return hashlib.sha256(
+        cache_input.encode("utf-8")
+    ).hexdigest()
+
+
+def _call_gemini_once(prompt: str) -> dict:
+    """Send one portfolio review request to Gemini."""
+
+    api_key = os.getenv(
+        "GEMINI_API_KEY",
+        "",
+    ).strip()
+
+    if not api_key:
+        raise ValueError(
+            "GEMINI_API_KEY environment variable is not configured"
+        )
+
+    client = genai.Client(
+        api_key=api_key
+    )
+
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config={
+            "response_mime_type": "application/json",
+            "temperature": 0,
+        },
+    )
+
+    content = _clean_text(
+        getattr(
+            response,
+            "text",
+            "",
+        )
+    )
+
+    if not content:
+        raise ValueError(
+            "Gemini returned an empty response"
+        )
+
+    try:
+        result = json.loads(
+            content.strip()
+        )
+
+    except json.JSONDecodeError as exc:
+
+        raise ValueError(
+            "Gemini returned malformed JSON: "
+            f"{exc}. Raw response: {content[:500]!r}"
+        ) from exc
+
+    if not isinstance(result, dict):
+
+        raise ValueError(
+            "Gemini response was not a JSON object"
+        )
+
+    return result
+
+def call_llm(prompt: str) -> dict:
+    """Call the configured LLM provider with optional response caching."""
+
+    provider = _clean_text(
+        LLM_PROVIDER
+    ).lower()
+
+    if provider not in {
+        "gemini",
+        "ollama",
+    }:
+
+        raise ValueError(
+            "Invalid LLM_PROVIDER configuration: "
+            f"{LLM_PROVIDER!r}. "
+            "Valid values are 'gemini' or 'ollama'."
+        )
+
+    cache_key = _get_cache_key(
+        prompt
+    )
+
+    if LLM_CACHE_ENABLED:
+
+        cache = _load_llm_cache()
+
+        cached = cache.get(
+            cache_key
+        )
+
+        if isinstance(
+            cached,
+            dict,
+        ):
+
+            response = cached.get(
+                "response"
+            )
+
+            if isinstance(
+                response,
+                dict,
+            ):
+
+                print(
+                    f"LLM CACHE HIT: {provider.upper()}"
+                )
+
+                return response
+
+    print(
+        f"CALLING LLM PROVIDER: {provider.upper()}"
+    )
+
+    if provider == "gemini":
+
+        result = _call_gemini_once(
+            prompt
+        )
+
+    else:
+
+        result = _call_ollama_once(
+            prompt
+        )
+
+    _validate_llm_response(
+        result
+    )
+
+    if LLM_CACHE_ENABLED:
+
+        cache = _load_llm_cache()
+
+        cache[cache_key] = {
+            "provider": provider,
+            "model": (
+                GEMINI_MODEL
+                if provider == "gemini"
+                else OLLAMA_MODEL
+            ),
+            "response": result,
+        }
+
+        _save_llm_cache(
+            cache
+        )
+
+        print(
+            f"LLM CACHE SAVED: {provider.upper()}"
+        )
+
+    return result
+
+
 
 
 def call_ollama(prompt: str) -> dict:
@@ -1505,331 +1774,542 @@ _call_ollama = _call_ollama_once
 # ============================================================
 
 def _normalise_llm_response(
+
     llm_response: dict,
+
     candidate: dict,
+
     decision: dict,
+
 ) -> dict:
+
     """
+
     Convert raw model JSON to the stable reviewer contract.
 
-    ```
-    The normaliser interprets the semantic meaning of the LLM response.
-    It does not independently decide whether the portfolio action should
-    change.
+    Ollama is subject to an additional semantic translation layer because
 
-    Review semantics:
-        - ACCEPT:
-            The evidence supports the proposed action and there is no
-            substantive evidence against it.
-        - CHALLENGE:
-            The evidence is insufficient, uncertain, or inconclusive.
-            This does NOT mean the proposed action is wrong.
-        - REJECT:
-            The evidence materially indicates that the proposed action
-            is wrong, normally because an alternative action is explicitly
-            supported.
+    the local model has demonstrated that it can use REJECT to express
 
-    In particular, BUY NEW requires action-aware interpretation:
-        - "insufficient grounds to justify BUY NEW" alone -> CHALLENGE
-        - "HOLD is supported and BUY NEW is wrong" -> REJECT
+    uncertainty or insufficient evidence.
+
+    Other providers are trusted to return the reviewer contract directly.
 
     The final portfolio decision remains the responsibility of the
+
     deterministic governance / reconciliation layer.
+
     """
 
     if not isinstance(llm_response, dict):
+
         llm_response = {}
 
     # ------------------------------------------------------------
+
     # Extract and validate the raw LLM response
+
     # ------------------------------------------------------------
 
     review_decision = _clean_text(
+
         llm_response.get(
+
             "review_decision",
+
             "CHALLENGE",
+
         )
+
     ).upper()
 
     if review_decision not in VALID_REVIEW_DECISIONS:
+
         review_decision = "CHALLENGE"
 
     confidence = _safe_confidence(
+
         llm_response.get("confidence", 0.0)
+
     )
 
     challenge = llm_response.get(
+
         "challenge",
+
         review_decision != "ACCEPT",
+
     )
 
     if isinstance(challenge, str):
+
         challenge = challenge.strip().lower() in {
+
             "true",
+
             "yes",
+
             "1",
+
         }
+
     else:
+
         challenge = bool(challenge)
 
     reason = _clean_text(
+
         llm_response.get("reason", "")
+
     )
 
     if not reason:
+
         reason = "LLM review returned no detailed reason."
+
         confidence = min(confidence, 50.0)
 
     # ------------------------------------------------------------
+
     # Determine the proposed action
+
     # ------------------------------------------------------------
 
     proposed_action = _first_value(
+
         decision,
+
         "Proposed Action",
+
         default=_first_value(
+
             candidate,
+
             "Proposed Action",
+
             "Action",
+
             default="HOLD",
+
         ),
+
     )
 
     proposed_action = _clean_text(
+
         proposed_action
+
     ).upper()
 
     # ------------------------------------------------------------
-    # Deterministic semantic classification
+
+    # Provider-specific semantic translation
     #
-    # The LLM may return an incorrect REJECT when the reason itself
-    # describes uncertainty or insufficient evidence. Python owns
-    # the final interpretation of that semantic distinction.
+    # Ollama requires a compatibility layer because it can incorrectly
+    # use REJECT where the underlying reason expresses uncertainty or
+    # insufficient evidence.
+    #
+    # Other providers are trusted to return ACCEPT / CHALLENGE / REJECT
+    # directly and are not reinterpreted here.
     # ------------------------------------------------------------
 
-    reason_lower = reason.lower()
+    provider = _clean_text(
 
-    insufficient_evidence_phrases = (
-        "insufficient evidence",
-        "evidence is insufficient",
-        "insufficient grounds",
-        "insufficient information",
-        "not enough evidence",
-        "not enough information",
-        "does not provide sufficient grounds",
-        "does not provide enough evidence",
-        "does not establish",
-        "cannot establish",
-        "unable to establish",
-        "cannot determine",
-        "unable to determine",
-        "not sufficiently supported",
-        "not sufficiently justified",
-        "insufficiently supported",
-        "evidence is mixed",
-        "evidence is uncertain",
-        "evidence is ambiguous",
-        "evidence is incomplete",
-        "mixed evidence",
-        "uncertain evidence",
-        "ambiguous evidence",
-    )
+        LLM_PROVIDER
 
-    clearly_insufficient = any(
-        phrase in reason_lower
-        for phrase in insufficient_evidence_phrases
-    )
+    ).lower()
 
-    # Explicit affirmative contradiction is qualitatively different
-    # from simply having a weak or incomplete investment case.
-    contradiction_phrases = (
-        "contradicts the proposed action",
-        "contradicts the action",
-        "contradicts buy more",
-        "contradict the proposed action",
-        "contradictory to the proposed action",
-        "against the proposed action",
-        "against buy more",
-        "should not be added",
-        "should not add capital",
-        "should not add additional capital",
-        "additional capital should not",
-        "additional capital should not be added",
-        "adding capital should not",
-        "adding capital is inappropriate",
-        "adding capital is not appropriate",
-        "buy more is inappropriate",
-        "buy more is not appropriate",
-        "buy more is wrong",
-        "buy more is incorrect",
-        "buy more should not",
-        "proposed action is wrong",
-        "proposed action itself is wrong",
-        "position should instead be retained",
-        "position should be retained",
-        "should instead hold",
-        "should be held instead",
-    )
+    if provider == "ollama":
 
-    explicit_contradiction = any(
-        phrase in reason_lower
-        for phrase in contradiction_phrases
-    )
+        # --------------------------------------------------------
 
-    # ------------------------------------------------------------
-    # BUY MORE semantic gate
-    #
-    # Deterministic evidence thresholds prevent the LLM from turning
-    # objectively weak BUY MORE evidence into ACCEPT.
-    #
-    # REJECT requires affirmative contradictory evidence.
-    # Weak/insufficient evidence means CHALLENGE.
-    # ------------------------------------------------------------
-    if proposed_action == "BUY MORE":
-        candidate_signal = _clean_text(
-            _first_value(
-                candidate,
-                "signal",
-                "Signal",
-                "Momentum Signal",
-                default="",
-            )
-        ).upper()
+        # Deterministic semantic classification
+        #
+        # The local model may return an incorrect REJECT when the
+        # reason itself describes uncertainty or insufficient evidence.
+        # Python owns the final interpretation of that distinction
+        # for Ollama compatibility.
+        # --------------------------------------------------------
 
-        evidence_score = _safe_float(
-            _first_value(
-                decision,
-                "Evidence Score",
-                default=_first_value(
+        reason_lower = reason.lower()
+
+        insufficient_evidence_phrases = (
+
+            "insufficient evidence",
+
+            "evidence is insufficient",
+
+            "insufficient grounds",
+
+            "insufficient information",
+
+            "not enough evidence",
+
+            "not enough information",
+
+            "does not provide sufficient grounds",
+
+            "does not provide enough evidence",
+
+            "does not establish",
+
+            "cannot establish",
+
+            "unable to establish",
+
+            "cannot determine",
+
+            "unable to determine",
+
+            "not sufficiently supported",
+
+            "not sufficiently justified",
+
+            "insufficiently supported",
+
+            "evidence is mixed",
+
+            "evidence is uncertain",
+
+            "evidence is ambiguous",
+
+            "evidence is incomplete",
+
+            "mixed evidence",
+
+            "uncertain evidence",
+
+            "ambiguous evidence",
+
+        )
+
+        clearly_insufficient = any(
+
+            phrase in reason_lower
+
+            for phrase in insufficient_evidence_phrases
+
+        )
+
+        # Explicit affirmative contradiction is qualitatively
+        # different from simply having a weak or incomplete
+        # investment case.
+
+        contradiction_phrases = (
+
+            "contradicts the proposed action",
+
+            "contradicts the action",
+
+            "contradicts buy more",
+
+            "contradict the proposed action",
+
+            "contradictory to the proposed action",
+
+            "against the proposed action",
+
+            "against buy more",
+
+            "should not be added",
+
+            "should not add capital",
+
+            "should not add additional capital",
+
+            "additional capital should not",
+
+            "additional capital should not be added",
+
+            "adding capital should not",
+
+            "adding capital is inappropriate",
+
+            "adding capital is not appropriate",
+
+            "buy more is inappropriate",
+
+            "buy more is not appropriate",
+
+            "buy more is wrong",
+
+            "buy more is incorrect",
+
+            "buy more should not",
+
+            "proposed action is wrong",
+
+            "proposed action itself is wrong",
+
+            "position should instead be retained",
+
+            "position should be retained",
+
+            "should instead hold",
+
+            "should be held instead",
+
+        )
+
+        explicit_contradiction = any(
+
+            phrase in reason_lower
+
+            for phrase in contradiction_phrases
+
+        )
+
+        # --------------------------------------------------------
+
+        # BUY MORE semantic gate
+        #
+        # Deterministic evidence thresholds prevent Ollama from
+        # turning objectively weak BUY MORE evidence into ACCEPT.
+        #
+        # REJECT requires affirmative contradictory evidence.
+        # Weak/insufficient evidence means CHALLENGE.
+        # --------------------------------------------------------
+
+        if proposed_action == "BUY MORE":
+
+            candidate_signal = _clean_text(
+
+                _first_value(
+
                     candidate,
-                    "evidence_score",
-                    "Evidence Score",
-                    default=0.0,
-                ),
-            )
-        )
 
-        deterministic_confidence = _safe_float(
-            _first_value(
-                candidate,
-                "deterministic_confidence",
-                "Deterministic Confidence",
-                "confidence",
-                "Confidence",
-                default=_first_value(
-                    decision,
-                    "Confidence",
-                    default=0.0,
-                ),
-            )
-        )
+                    "signal",
 
-        evidence_strength = _clean_text(
-            _first_value(
-                candidate,
-                "evidence_strength",
-                "Evidence Strength",
-                default=_first_value(
-                    decision,
-                    "Evidence Strength",
+                    "Signal",
+
+                    "Momentum Signal",
+
                     default="",
-                ),
+
+                )
+
+            ).upper()
+
+            evidence_score = _safe_float(
+
+                _first_value(
+
+                    decision,
+
+                    "Evidence Score",
+
+                    default=_first_value(
+
+                        candidate,
+
+                        "evidence_score",
+
+                        "Evidence Score",
+
+                        default=0.0,
+
+                    ),
+
+                )
+
             )
-        ).upper()
 
-        signal_contradiction = candidate_signal in {
-            "SELL",
-            "STRONG SELL",
-        }
+            deterministic_confidence = _safe_float(
 
-        weak_deterministic_evidence = (
-            evidence_score < 60.0
-            or deterministic_confidence < 70.0
-            or evidence_strength == "WEAK"
-        )
+                _first_value(
 
-        if signal_contradiction:
-            review_decision = "REJECT"
-            challenge = False
+                    candidate,
 
-        elif weak_deterministic_evidence:
-            review_decision = "CHALLENGE"
-            challenge = True
+                    "deterministic_confidence",
 
-        elif clearly_insufficient:
-            review_decision = "CHALLENGE"
-            challenge = True
+                    "Deterministic Confidence",
+
+                    "confidence",
+
+                    "Confidence",
+
+                    default=_first_value(
+
+                        decision,
+
+                        "Confidence",
+
+                        default=0.0,
+
+                    ),
+
+                )
+
+            )
+
+            evidence_strength = _clean_text(
+
+                _first_value(
+
+                    candidate,
+
+                    "evidence_strength",
+
+                    "Evidence Strength",
+
+                    default=_first_value(
+
+                        decision,
+
+                        "Evidence Strength",
+
+                        default="",
+
+                    ),
+
+                )
+
+            ).upper()
+
+            signal_contradiction = candidate_signal in {
+
+                "SELL",
+
+                "STRONG SELL",
+
+            }
+
+            weak_deterministic_evidence = (
+
+                evidence_score < 60.0
+
+                or deterministic_confidence < 70.0
+
+                or evidence_strength == "WEAK"
+
+            )
+
+            if signal_contradiction:
+
+                review_decision = "REJECT"
+
+                challenge = False
+
+            elif weak_deterministic_evidence:
+
+                review_decision = "CHALLENGE"
+
+                challenge = True
+
+            elif clearly_insufficient:
+
+                review_decision = "CHALLENGE"
+
+                challenge = True
+
+            elif (
+
+                review_decision == "REJECT"
+
+                and not explicit_contradiction
+
+            ):
+
+                review_decision = "CHALLENGE"
+
+                challenge = True
+
+            elif explicit_contradiction:
+
+                review_decision = "REJECT"
+
+                challenge = False
+
+        # --------------------------------------------------------
+
+        # Generic insufficiency handling
+        #
+        # For Ollama, insufficient evidence is CHALLENGE,
+        # not REJECT.
+        # --------------------------------------------------------
 
         elif (
+
             review_decision == "REJECT"
+
+            and clearly_insufficient
+
             and not explicit_contradiction
+
         ):
+
             review_decision = "CHALLENGE"
+
             challenge = True
 
-        elif explicit_contradiction:
-            review_decision = "REJECT"
-            challenge = False
-
     # ------------------------------------------------------------
-    # Generic insufficiency handling
+
+    # Keep challenge flag consistent with the final review decision.
     #
-    # Applies the same governance principle to other actions:
-    # insufficient evidence is CHALLENGE, not REJECT.
-    # ------------------------------------------------------------
-
-    elif (
-        review_decision == "REJECT"
-        and clearly_insufficient
-        and not explicit_contradiction
-    ):
-        review_decision = "CHALLENGE"
-        challenge = True
-
-    # ------------------------------------------------------------
-    # Keep challenge flag consistent with the interpreted decision.
+    # This does not reinterpret the provider's decision. It only keeps
+    # the stable output contract internally consistent.
     # ------------------------------------------------------------
 
     if review_decision == "ACCEPT":
+
         challenge = False
+
     elif review_decision == "CHALLENGE":
+
         challenge = True
+
     elif review_decision == "REJECT":
+
         challenge = False
 
     # ------------------------------------------------------------
+
     # Ticker
+
     # ------------------------------------------------------------
 
     ticker = _clean_text(
+
         _first_value(
+
             candidate,
+
             "ticker",
+
             "Ticker",
+
             default="",
+
         )
+
     )
 
     # ------------------------------------------------------------
+
     # Stable reviewer contract
+
     # ------------------------------------------------------------
 
     return {
+
         "Ticker": ticker,
+
         "LLM Assessment": review_decision,
+
         "LLM Confidence": confidence,
+
         "LLM Reason": reason,
+
         "LLM Decision": review_decision,
+
         "Review Decision": review_decision,
-        "Confidence": confidence,
-        "Challenge": challenge,
-        "Reason": reason,
-        "Key Points": [reason],
-        "LLM Key Points": [reason],
-        "Evidence Gaps": [],
-        "LLM Evidence Gaps": [],
-        "Proposed Action": proposed_action,
-        "Reviewer Status": "LLM REVIEW COMPLETE",
+
+        "Review Confidence": confidence,
+
+        "Review Challenge": challenge,
+
+        "Review Reason": reason,
+
     }
 
 
@@ -1906,7 +2386,7 @@ def review_ai_decision(
 
             print(f"\n===== LLM PROMPT: {ticker} =====\n{prompt}\n===== END LLM PROMPT =====\n")
 
-            llm_response = call_ollama(prompt)
+            llm_response = call_llm(prompt)
 
             print(
                 f"RAW LLM RESPONSE: {ticker} | "
@@ -1928,7 +2408,7 @@ def review_ai_decision(
             )
 
             try:
-                llm_response = call_ollama(retry_prompt)
+                llm_response = call_llm(retry_prompt)
                 _validate_review_semantics(llm_response, candidate)
                 review_status = "LLM REVIEW RETRIED"
 
@@ -1949,15 +2429,28 @@ def review_ai_decision(
                     status="LLM REVIEW FAILED",
                 )
 
-        llm_review = str(
-            llm_response.get("review_decision", "CHALLENGE")
-        ).strip().upper()
-
         review = _normalise_llm_response(
             llm_response=llm_response,
             candidate=candidate,
             decision=decision,
         )
+
+        # The normalised governance decision is canonical.
+        # Do not allow a raw model field to contradict the
+        # validated/normalised review outcome.
+        llm_review = str(
+            review.get(
+                "Review Decision",
+                review.get(
+                    "LLM Decision",
+                    review.get(
+                        "LLM Assessment",
+                        "CHALLENGE",
+                    ),
+                ),
+            )
+        ).strip().upper()
+
 
         review["LLM Review"] = llm_review
         review["Reviewer Status"] = review_status
