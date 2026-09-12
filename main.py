@@ -135,6 +135,10 @@ from analysis.market_intelligence import (
     assess_market_intelligence,
 )
 
+from analysis.portfolio_recalibration import (
+    generate_portfolio_reallocation
+)
+
 
 def main():
 
@@ -1658,6 +1662,47 @@ def main():
         final_portfolio_decisions
     )
 
+
+    # ---------------------------------
+    # Portfolio Reallocation
+    # ---------------------------------
+
+    print(
+        "\nGENERATING PORTFOLIO REALLOCATION"
+    )
+
+    try:
+
+
+        portfolio_reallocation = generate_portfolio_reallocation(
+            final_portfolio_decisions=final_portfolio_decisions,
+            portfolio_value=portfolio_summary["Current Value"].sum()
+        )
+
+        print(
+            "PORTFOLIO REALLOCATION GENERATED:",
+            type(portfolio_reallocation)
+        )
+
+    except Exception as e:
+
+        print(
+            "PORTFOLIO REALLOCATION ERROR:",
+            e
+        )
+
+        traceback.print_exc()
+
+        portfolio_reallocation = pd.DataFrame()
+
+    print(
+        "\nPORTFOLIO REALLOCATION"
+    )
+
+    print(
+        portfolio_reallocation
+    )
+
     # ---------------------------------
     # Alerts
     # ---------------------------------
@@ -1803,6 +1848,18 @@ def main():
         growth_plan = pd.DataFrame()
 
     # ---------------------------------
+    # Portfolio Reallocation Safety
+    # ---------------------------------
+
+    if "portfolio_reallocation" not in locals():
+
+        portfolio_reallocation = {
+            "reallocation": pd.DataFrame(),
+            "summary": {}
+        }
+
+
+    # ---------------------------------
     # Excel report
     # ---------------------------------
 
@@ -1817,6 +1874,7 @@ def main():
         portfolio_health,
         capital_allocation,
         market_intelligence,
+        portfolio_reallocation,
         decisions,
         trade_plan,
         performance_summary,

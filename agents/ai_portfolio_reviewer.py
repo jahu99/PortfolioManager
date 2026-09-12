@@ -1380,7 +1380,40 @@ def _save_llm_cache(cache: dict) -> None:
 
 
 def _get_cache_key(prompt: str) -> str:
-    """Create a stable cache key for provider/model/prompt."""
+    """
+    Create a stable daily cache key for LLM portfolio decisions.
+
+    The LLM is normally called at most once per ticker per day.
+
+    Intraday market-data movement should not invalidate the cache.
+    Material changes to the governed decision context should.
+
+    The key is based on:
+    - provider
+    - model
+    - trading / decision date
+    - ticker
+    - proposed action
+    - deterministic action
+    - signal
+    - score buckets
+    - evidence / governance buckets
+    - material event fingerprint
+
+    This deliberately avoids using the complete rendered prompt,
+    because prices, RSI, timestamps, allocations and news feeds can
+    change intraday without representing a materially new decision.
+    """
+
+    import re
+    import json
+    import hashlib
+    from datetime import datetime, timezone
+
+
+    # ============================================================
+    # PROVIDER / MODEL
+    # ============================================================
 
     provider = _clean_text(
         LLM_PROVIDER
@@ -1402,19 +1435,399 @@ def _get_cache_key(prompt: str) -> str:
 
         model = ""
 
-    cache_input = json.dumps(
-        {
-            "provider": provider,
-            "model": model,
-            "prompt": prompt,
-        },
-        sort_keys=True,
+
+    # ============================================================
+    # DAILY CACHE BOUNDARY
+    #
+    # One substantive LLM review per ticker per calendar day.
+    # ============================================================
+
+    decision_date = datetime.now(
+        timezone.utc
+    ).date().isoformat()
+
+
+    # ============================================================
+    # HELPER FUNCTIONS
+    # ============================================================
+
+    def _extract_text_value(
+        label: str,
+        default: str = "",
+    ) -> str:
+
+        pattern = (
+            rf"(?im)^\s*"
+            rf"{re.escape(label)}"
+            rf"\s*[:=]\s*"
+            rf"(.+?)\s*$"
+        )
+
+        match = re.search(
+            pattern,
+            prompt,
+        )
+
+        if not match:
+
+            return default
+
+        return _clean_text(
+            match.group(1)
+        )
+
+
+    def _extract_json_value(
+        field: str,
+        default=None,
+    ):
+
+        pattern = (
+            rf'"{re.escape(field)}"'
+            rf'\s*:\s*'
+            rf'"([^"]*)"'
+        )
+
+        match = re.search(
+            pattern,
+            prompt,
+        )
+
+        if match:
+
+            return _clean_text(
+                match.group(1)
+            )
+
+        numeric_pattern = (
+            rf'"{re.escape(field)}"'
+            rf'\s*:\s*'
+            rf'(-?\d+(?:\.\d+)?)'
+        )
+
+        match = re.search(
+            numeric_pattern,
+            prompt,
+        )
+
+        if match:
+
+            try:
+
+                return float(
+                    match.group(1)
+                )
+
+            except ValueError:
+
+                return default
+
+        return default
+
+
+    def _score_bucket(
+        value,
+    ) -> str:
+        """
+        Convert volatile numeric scores into stable
+        decision-relevant buckets.
+
+        Small intraday movements should not invalidate
+        the daily LLM review.
+        """
+
+        try:
+
+            score = float(
+                value
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            return "UNKNOWN"
+
+
+        if score >= 85:
+
+            return "85_PLUS"
+
+        if score >= 70:
+
+            return "70_84"
+
+        if score >= 45:
+
+            return "45_69"
+
+        if score >= 30:
+
+            return "30_44"
+
+        return "UNDER_30"
+
+
+    def _evidence_bucket(
+        value,
+    ) -> str:
+        """
+        Bucket evidence according to governance-relevant
+        thresholds.
+        """
+
+        try:
+
+            evidence = float(
+                value
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            return "UNKNOWN"
+
+
+        if evidence >= 80:
+
+            return "VERY_STRONG"
+
+        if evidence >= 75:
+
+            return "STRONG"
+
+        if evidence >= 65:
+
+            return "MODERATE_PLUS"
+
+        if evidence >= 60:
+
+            return "MODERATE"
+
+        return "WEAK"
+
+
+    # ============================================================
+    # EXTRACT TICKER
+    # ============================================================
+
+    ticker = _extract_json_value(
+        "ticker",
+        "",
     )
 
-    return hashlib.sha256(
-        cache_input.encode("utf-8")
-    ).hexdigest()
+    if not ticker:
 
+        ticker = _extract_text_value(
+            "Ticker",
+            "",
+        )
+
+    ticker = _clean_text(
+        ticker
+    ).upper()
+
+
+    # ============================================================
+    # EXTRACT GOVERNED DECISION CONTEXT
+    # ============================================================
+
+    proposed_action = _extract_json_value(
+        "proposed_action",
+        "",
+    )
+
+    if not proposed_action:
+
+        proposed_action = _extract_text_value(
+            "ACTION",
+            "",
+        )
+
+    proposed_action = _clean_text(
+        proposed_action
+    ).upper()
+
+
+    final_decision = _extract_json_value(
+        "final_decision",
+        "",
+    )
+
+    final_decision = _clean_text(
+        final_decision
+    ).upper()
+
+
+    signal = _extract_json_value(
+        "signal",
+        "",
+    )
+
+    signal = _clean_text(
+        signal
+    ).upper()
+
+
+    investment_score = _extract_json_value(
+        "investment_score",
+        None,
+    )
+
+    technical_score = _extract_json_value(
+        "technical_score",
+        None,
+    )
+
+    quality_score = _extract_json_value(
+        "quality_score",
+        None,
+    )
+
+    growth_score = _extract_json_value(
+        "growth_score",
+        None,
+    )
+
+
+    evidence_score = _extract_json_value(
+        "evidence_score",
+        None,
+    )
+
+
+    # ============================================================
+    # MATERIAL EVENT DETECTION
+    #
+    # This deliberately does NOT include the whole news feed.
+    #
+    # Only events that materially change the investment case
+    # should invalidate the same-day cache.
+    # ============================================================
+
+    material_event = "NONE"
+
+
+    prompt_upper = prompt.upper()
+
+
+    material_event_patterns = {
+
+        "EARNINGS_RELEASED": [
+            "EARNINGS RELEASED",
+            "EARNINGS RESULTS",
+            "QUARTERLY RESULTS",
+            "REPORTED EARNINGS",
+            "REPORTED RESULTS",
+        ],
+
+        "GUIDANCE_CHANGED": [
+            "RAISED GUIDANCE",
+            "LOWERED GUIDANCE",
+            "CUT GUIDANCE",
+            "WITHDREW GUIDANCE",
+            "GUIDANCE INCREASE",
+            "GUIDANCE REDUCTION",
+        ],
+
+        "MAJOR_CORPORATE_EVENT": [
+            "ACQUISITION",
+            "MERGER",
+            "TAKEOVER",
+            "BANKRUPTCY",
+            "CHAPTER 11",
+            "DELISTING",
+        ],
+
+    }
+
+
+    for event_name, patterns in (
+        material_event_patterns.items()
+    ):
+
+        if any(
+            pattern in prompt_upper
+            for pattern in patterns
+        ):
+
+            material_event = event_name
+
+            break
+
+
+    # ============================================================
+    # BUILD CANONICAL DAILY DECISION CONTEXT
+    # ============================================================
+
+    decision_context = {
+
+        "provider": provider,
+
+        "model": model,
+
+        "decision_date": decision_date,
+
+        "ticker": ticker,
+
+        "proposed_action": proposed_action,
+
+        "final_decision": final_decision,
+
+        "signal": signal,
+
+        "investment_score_bucket":
+            _score_bucket(
+                investment_score
+            ),
+
+        "technical_score_bucket":
+            _score_bucket(
+                technical_score
+            ),
+
+        "quality_score_bucket":
+            _score_bucket(
+                quality_score
+            ),
+
+        "growth_score_bucket":
+            _score_bucket(
+                growth_score
+            ),
+
+        "evidence_bucket":
+            _evidence_bucket(
+                evidence_score
+            ),
+
+        "material_event": material_event,
+
+    }
+
+
+    # ============================================================
+    # HASH CANONICAL CONTEXT
+    # ============================================================
+
+    cache_input = json.dumps(
+        decision_context,
+        sort_keys=True,
+        separators=(
+            ",",
+            ":",
+        ),
+    )
+
+
+    return hashlib.sha256(
+        cache_input.encode(
+            "utf-8"
+        )
+    ).hexdigest()
 
 def _call_gemini_once(prompt: str) -> dict:
     """Send one portfolio review request to Gemini."""
@@ -1521,9 +1934,16 @@ def call_llm(prompt: str) -> dict:
 
                 print(
                     f"LLM CACHE HIT: {provider.upper()}"
+                    f"KEY={cache_key[:12]}"
                 )
 
                 return response
+
+        print(
+            f"LLM CACHE MISS: {provider.upper()}"
+            f"KEY={cache_key[:12]}"
+        )
+
 
     print(
         f"CALLING LLM PROVIDER: {provider.upper()}"

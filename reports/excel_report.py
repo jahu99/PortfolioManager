@@ -434,6 +434,7 @@ def create_report(
     portfolio_health,
     capital_allocation,
     market_intelligence=None,
+    portfolio_reallocation=None,
     decisions=None,
     trade_plan=None,
     performance_summary=None,
@@ -527,6 +528,16 @@ def create_report(
 
     if market_intelligence is None:
         market_intelligence = pd.DataFrame()
+
+    if portfolio_reallocation is None:
+
+        portfolio_reallocation = {
+
+            "reallocation": pd.DataFrame(),
+
+            "summary": {}
+
+        }
 
     # =========================================================
     # NORMALISE DATAFRAMES
@@ -1207,6 +1218,226 @@ def create_report(
                     )
 
                 )
+
+        # =====================================================
+        # PORTFOLIO REALLOCATION
+        # =====================================================
+
+        print(
+
+            "Creating Portfolio Reallocation"
+
+        )
+
+        # -----------------------------------------------------
+        # Extract reallocation detail and summary safely.
+        # -----------------------------------------------------
+
+        if isinstance(
+
+            portfolio_reallocation,
+
+            dict
+
+        ):
+
+            reallocation_report = (
+
+                portfolio_reallocation.get(
+
+                    "reallocation",
+
+                    pd.DataFrame()
+
+                )
+
+            )
+
+            reallocation_summary = (
+
+                portfolio_reallocation.get(
+
+                    "summary",
+
+                    {}
+
+                )
+
+            )
+
+        elif isinstance(
+
+            portfolio_reallocation,
+
+            pd.DataFrame
+
+        ):
+
+            reallocation_report = (
+
+                portfolio_reallocation.copy()
+
+            )
+
+            reallocation_summary = {}
+
+        else:
+
+            reallocation_report = pd.DataFrame()
+
+            reallocation_summary = {}
+
+        # -----------------------------------------------------
+        # Ensure the detail is always a DataFrame.
+        # -----------------------------------------------------
+
+        if reallocation_report is None:
+
+            reallocation_report = pd.DataFrame()
+
+        elif not isinstance(
+
+            reallocation_report,
+
+            pd.DataFrame
+
+        ):
+
+            reallocation_report = pd.DataFrame(
+
+                reallocation_report
+
+            )
+
+        portfolio_reallocation_sheet_name = (
+
+            "Portfolio Reallocation"
+
+        )
+
+        # -----------------------------------------------------
+        # Summary section.
+        # -----------------------------------------------------
+
+        if isinstance(
+
+            reallocation_summary,
+
+            dict
+
+        ) and reallocation_summary:
+
+            summary_report = pd.DataFrame(
+
+                [
+
+                    reallocation_summary
+
+                ]
+
+            )
+
+        else:
+
+            summary_report = pd.DataFrame(
+
+                [
+
+                    {
+
+                        "Total Released": 0.0,
+
+                        "Total Reallocated": 0.0,
+
+                        "Funding Sources": 0,
+
+                        "Destinations": 0
+
+                    }
+
+                ]
+
+            )
+
+        summary_report.to_excel(
+
+            writer,
+
+            sheet_name=portfolio_reallocation_sheet_name,
+
+            index=False
+
+        )
+
+        # -----------------------------------------------------
+        # Reallocation detail section.
+        # -----------------------------------------------------
+
+        worksheet = writer.sheets[
+
+            portfolio_reallocation_sheet_name
+
+        ]
+
+        detail_heading_row = (
+
+            len(summary_report)
+
+            + 4
+
+        )
+
+        worksheet.cell(
+
+            row=detail_heading_row,
+
+            column=1,
+
+            value="PORTFOLIO REALLOCATION DETAIL"
+
+        )
+
+        if reallocation_report.empty:
+
+            no_reallocation_report = pd.DataFrame(
+
+                {
+
+                    "Status": [
+
+                        "No portfolio reallocation transactions were generated"
+
+                    ]
+
+                }
+
+            )
+
+            no_reallocation_report.to_excel(
+
+                writer,
+
+                sheet_name=portfolio_reallocation_sheet_name,
+
+                startrow=detail_heading_row,
+
+                index=False
+
+            )
+
+        else:
+
+            reallocation_report.to_excel(
+
+                writer,
+
+                sheet_name=portfolio_reallocation_sheet_name,
+
+                startrow=detail_heading_row,
+
+                index=False
+
+            )
 
         # =====================================================
         # STOCK RANKINGS

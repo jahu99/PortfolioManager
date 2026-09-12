@@ -76,6 +76,7 @@ from config.investment_config import (
     DISCRETIONARY_SPEND_LIMIT,
     MAX_NEW_BUYS,
     MAX_BUY_MORE,
+    MAX_POSITION_PERCENT,
 )
 
 
@@ -333,6 +334,42 @@ def load_actual_holdings():
         }
 
     return ownership
+
+
+def get_total_portfolio_value(ownership):
+    """
+    Calculate the total value of actual investment holdings.
+
+    CASH is excluded because it is not an investment position.
+    """
+
+    return round(
+
+        sum(
+
+            safe_float(
+
+                holding.get(
+                    "market_value",
+                    0
+                )
+
+            )
+
+            for ticker, holding in ownership.items()
+
+            if ticker != "CASH"
+
+            and holding.get(
+                "owned",
+                False
+            )
+
+        ),
+
+        2
+
+    )
 
 
 # ============================================================
