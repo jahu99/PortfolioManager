@@ -2422,6 +2422,233 @@ def get_governance_flags(
         )
     ]
 
+# ============================================================
+# DECISION QUALIFICATION
+# ============================================================
+
+def get_governance_failed_checks(
+    reconciliation: dict,
+) -> list:
+    """
+    Extract structured governance failed checks.
+
+    These records preserve the authoritative audit evidence,
+    including actual values and required thresholds.
+    """
+
+    if not isinstance(
+        reconciliation,
+        dict,
+    ):
+        return []
+
+    failed_checks = first_value(
+        reconciliation.get(
+            "Governance Failed Checks"
+        ),
+        reconciliation.get(
+            "Failed Checks"
+        ),
+        default=[],
+    )
+
+    if not isinstance(
+        failed_checks,
+        list,
+    ):
+        return []
+
+    return failed_checks
+
+
+def get_governance_failed_check_count(
+    reconciliation: dict,
+) -> int:
+    """
+    Return the number of structured governance failures.
+    """
+
+    failed_checks = get_governance_failed_checks(
+        reconciliation
+    )
+
+    return len(
+        failed_checks
+    )
+
+
+def get_decision_qualification(
+    proposed_action: str,
+    final_decision: str,
+    reconciliation: dict,
+) -> str:
+    """
+    Classify the governed investment outcome.
+
+    IMPORTANT
+    ---------
+
+    This does NOT modify Final Decision.
+
+    Final Decision remains the authoritative trading decision.
+
+    Qualification provides downstream portfolio intelligence
+    distinguishing:
+
+        FULLY APPROVED
+        QUALIFIED BUY MORE
+        QUALIFIED BUY NEW
+        REJECTED
+        NOT APPLICABLE
+    """
+
+    proposed_action = str(
+        proposed_action or ""
+    ).strip().upper()
+
+    final_decision = str(
+        final_decision or ""
+    ).strip().upper()
+
+    # --------------------------------------------------------
+    # Fully approved actions.
+    # --------------------------------------------------------
+
+    if (
+        proposed_action in {
+            "BUY MORE",
+            "BUY NEW",
+        }
+        and final_decision == proposed_action
+    ):
+
+        return "FULLY APPROVED"
+
+    # --------------------------------------------------------
+    # Only BUY opportunities may receive qualified status.
+    #
+    # Qualified SELL / REDUCE remains reporting intelligence
+    # only and must not automatically create funding authority.
+    # --------------------------------------------------------
+
+    if proposed_action not in {
+        "BUY MORE",
+        "BUY NEW",
+    }:
+
+        return "NOT APPLICABLE"
+
+    # --------------------------------------------------------
+    # A qualified candidate must have been changed to HOLD.
+    # --------------------------------------------------------
+
+    if final_decision != "HOLD":
+
+        return "NOT APPLICABLE"
+
+    failed_checks = get_governance_failed_checks(
+        reconciliation
+    )
+
+    failed_check_count = len(
+        failed_checks
+    )
+
+    # --------------------------------------------------------
+    # Conservative qualification rule.
+    #
+    # The opportunity remains relevant only when exactly one
+    # deterministic governance requirement prevented approval.
+    #
+    # Multiple failed gates means the recommendation is rejected.
+    # --------------------------------------------------------
+
+    if failed_check_count != 1:
+
+        return "REJECTED"
+
+    if proposed_action == "BUY MORE":
+
+        return "QUALIFIED BUY MORE"
+
+    if proposed_action == "BUY NEW":
+
+        return "QUALIFIED BUY NEW"
+
+    return "REJECTED"
+
+
+def get_qualification_reason(
+    qualification: str,
+    reconciliation_reason: str,
+    reconciliation: dict,
+) -> str:
+    """
+    Provide a concise qualification explanation.
+
+    The existing Reconciliation Reason remains authoritative
+    and must preserve actual values and required thresholds.
+    """
+
+    qualification = safe_text(
+        qualification
+    ).upper()
+
+    reconciliation_reason = safe_text(
+        reconciliation_reason
+    )
+
+    failed_checks = get_governance_failed_checks(
+        reconciliation
+    )
+
+    if qualification == "FULLY APPROVED":
+
+        return (
+            "The proposed investment action passed "
+            "deterministic governance."
+        )
+
+    if qualification in {
+        "QUALIFIED BUY MORE",
+        "QUALIFIED BUY NEW",
+    }:
+
+        if reconciliation_reason:
+
+            return (
+                "The underlying investment opportunity remains "
+                "credible but was not authorised because one "
+                "deterministic governance requirement failed. "
+                + reconciliation_reason
+            )
+
+        return (
+            "The underlying investment opportunity remains "
+            "credible but was not authorised because one "
+            "deterministic governance requirement failed."
+        )
+
+    if qualification == "REJECTED":
+
+        if reconciliation_reason:
+
+            return reconciliation_reason
+
+        if failed_checks:
+
+            return (
+                "The proposed investment action failed multiple "
+                "or material governance requirements."
+            )
+
+        return (
+            "The proposed investment action did not qualify "
+            "for approval."
+        )
+
+    return ""
+
 
 def build_final_result(
     base_row: dict,
@@ -2600,12 +2827,11 @@ def build_final_result(
 
     proposed_action = upper_text(
         first_value(
-            base_row.get("Proposed Action"),
-            base_row.get("Final Action"),
-            base_row.get("Capital Allocation Action"),
-            base_row.get("Action"),
             deterministic.get("Proposed Action"),
             deterministic.get("Action"),
+            base_row.get("Proposed Action"),
+            base_row.get("Capital Allocation Action"),
+            base_row.get("Action"),
             default="HOLD",
         ),
         "HOLD",
@@ -2863,31 +3089,35 @@ def build_final_result(
 
         normalised_reconciled_action = "HOLD"
 
+
+
     # ========================================================
     # FINAL ACTION
+    #
+    # The reconciled action is authoritative.
+    #
+    # The deterministic proposal is the starting point, but the
+    # reconciliation layer determines whether the proposal is:
+    #
+    #   - SUPPORTED
+    #   - QUALIFIED
+    #   - REJECTED / overridden to HOLD
+    #
     # ========================================================
 
-    if normalised_proposed_action == "HOLD":
+    if normalised_reconciled_action == "REDUCE":
 
-        final_action = "HOLD"
+        # Preserve percentage variants such as:
+        #
+        # REDUCE 25%
+        # REDUCE 50%
+        # REDUCE 75%
 
-    elif (
-        normalised_reconciled_action
-        ==
-        normalised_proposed_action
-    ):
-
-        if normalised_proposed_action == "REDUCE":
-
-            final_action = proposed_action
-
-        else:
-
-            final_action = normalised_proposed_action
+        final_action = reconciled_action
 
     else:
 
-        final_action = "HOLD"
+        final_action = normalised_reconciled_action
 
     # ========================================================
     # LLM REVIEW
@@ -3501,6 +3731,42 @@ def build_final_result(
         )
 
     # ========================================================
+    # QUALIFIED APPROVAL STATUS
+    # ========================================================
+
+    executable_actions = {
+
+        "BUY MORE",
+        "BUY NEW",
+        "SELL",
+        "REDUCE",
+    }
+
+    if final_action_for_governance in executable_actions:
+
+        qualified_approval_status = (
+
+            "QUALIFIED APPROVAL"
+
+        )
+
+    elif normalised_proposed_action in executable_actions:
+
+        qualified_approval_status = (
+
+            "NOT QUALIFIED"
+
+        )
+
+    else:
+
+        qualified_approval_status = (
+
+            "NOT APPLICABLE"
+
+        )
+
+    # ========================================================
     # FINAL REASON
     # ========================================================
 
@@ -3664,6 +3930,10 @@ def build_final_result(
 
         "Decision Status":
             decision_status,
+
+        "Qualified Approval Status":
+
+            qualified_approval_status,
 
         "Reconciliation Status":
             reconciliation_status,
@@ -3956,6 +4226,15 @@ def calculate_final_portfolio_decision(
     ):
         analysis = {}
 
+    deterministic = (
+        decision
+        if isinstance(
+            decision,
+            dict,
+        )
+        else {}
+    )
+
     # ========================================================
     # PRESERVE THE ORIGINAL PROPOSED ACTION
     #
@@ -3967,30 +4246,14 @@ def calculate_final_portfolio_decision(
 
     proposed_action = upper_text(
         first_value(
-            decision.get(
-                "Proposed Action"
-            ),
-
-            candidate.get(
-                "Proposed Action"
-            ),
-
-            candidate.get(
-                "proposed_action"
-            ),
-
-            candidate.get(
-                "Capital Allocation Action"
-            ),
-
-            candidate.get(
-                "capital_allocation_action"
-            ),
-
-            decision.get(
-                "Action"
-            ),
-
+            candidate.get("Proposed Action"),
+            candidate.get("Final Action"),
+            candidate.get("Capital Allocation Action"),
+            candidate.get("Action"),
+            decision.get("Proposed Action"),
+            decision.get("Action"),
+            deterministic.get("Proposed Action"),
+            deterministic.get("Action"),
             default="HOLD",
         ),
         "HOLD",

@@ -94,6 +94,8 @@ MIN_EVIDENCE_SCORE = 60.0
 STRONG_EVIDENCE_SCORE = 75.0
 SELL_EVIDENCE_SCORE = 75.0
 
+REDUCE_MIN_EVIDENCE = 70.0
+
 # ------------------------------------------------------------
 # LLM thresholds
 #
@@ -112,7 +114,7 @@ STRONG_LLM_CONFIDENCE = 75.0
 # ------------------------------------------------------------
 
 BUY_MORE_MIN_EVIDENCE = 65.0
-BUY_MORE_MIN_CONFIDENCE = 65.0
+BUY_MORE_MIN_CONFIDENCE = 60.0
 BUY_MORE_MIN_INVESTMENT_SCORE = 75.0
 BUY_MORE_MAX_ALLOCATION_PERCENT = 20.0
 
@@ -129,6 +131,9 @@ BUY_NEW_IMMATURE_MIN_EVIDENCE = 65.0
 BUY_NEW_IMMATURE_MIN_INVESTMENT_SCORE = 85.0
 BUY_NEW_IMMATURE_MIN_SCORE_BUCKET_WIN_RATE = 60.0
 BUY_NEW_IMMATURE_MIN_SCORE_BUCKET_OBSERVATIONS = 20
+
+BUY_NEW_MIN_EVIDENCE = 70.0
+BUY_NEW_MIN_CONFIDENCE = 65.0
 
 # ------------------------------------------------------------
 # REDUCE challenge / strength compatibility constants
@@ -1173,17 +1178,28 @@ def _evaluate_buy_more_governance(
     """
     Evaluate BUY MORE using deterministic rules only.
 
+    BUY MORE answers whether the investment case is sufficiently
+    credible to increase an existing position.
+
+    Position sizing and capital allocation are handled separately
+    downstream and must not determine whether BUY MORE qualifies.
+
+    Required deterministic conditions:
+
+        - Existing holding
+        - Evidence >= BUY_MORE_MIN_EVIDENCE
+        - Deterministic confidence >= BUY_MORE_MIN_CONFIDENCE
+        - Investment score >= BUY_MORE_MIN_INVESTMENT_SCORE
+        - BUY or STRONG BUY signal
+
     Returns
     -------
     qualified, flags, reasons, failed_checks
     """
+
     flags: list[str] = []
     reasons: list[str] = []
     failed_checks: list[dict[str, Any]] = []
-
-    allocation_pct = get_allocation_percent(
-        decision
-    )
 
     evidence_score = get_evidence_score(
         decision
@@ -1203,7 +1219,12 @@ def _evaluate_buy_more_governance(
         decision
     )
 
+    # ========================================================
+    # EXISTING HOLDING
+    # ========================================================
+
     if not existing_holding:
+
         flags.append(
             "BUY MORE REQUIRES EXISTING HOLDING"
         )
@@ -1226,40 +1247,19 @@ def _evaluate_buy_more_governance(
             unit="boolean",
         )
 
-    if allocation_pct > BUY_MORE_MAX_ALLOCATION_PERCENT:
-        flags.append(
-            "BUY MORE ALLOCATION ABOVE LIMIT"
-        )
-
-        reasons.append(
-            f"Current allocation of {allocation_pct:.2f}% "
-            f"exceeds the maximum permitted allocation of "
-            f"{BUY_MORE_MAX_ALLOCATION_PERCENT:.2f}%."
-        )
-
-        _record_failed_check(
-            failed_checks,
-            check_def="BUY_MORE_GOVERNANCE",
-            check_code=(
-                "BUY_MORE_ALLOCATION_ABOVE_LIMIT"
-            ),
-            reason=(
-                "BUY MORE allocation exceeds the maximum permitted "
-                "portfolio allocation."
-            ),
-            actual_value=allocation_pct,
-            threshold_value=BUY_MORE_MAX_ALLOCATION_PERCENT,
-            unit="percent",
-        )
+    # ========================================================
+    # EVIDENCE
+    # ========================================================
 
     if evidence_score < BUY_MORE_MIN_EVIDENCE:
+
         flags.append(
             "BUY MORE EVIDENCE BELOW THRESHOLD"
         )
 
         reasons.append(
-            f"Evidence score of {evidence_score:.2f} is below "
-            f"the BUY MORE minimum of "
+            f"Evidence score of {evidence_score:.2f} "
+            f"is below the BUY MORE minimum of "
             f"{BUY_MORE_MIN_EVIDENCE:.2f}."
         )
 
@@ -1277,10 +1277,15 @@ def _evaluate_buy_more_governance(
             unit="score",
         )
 
+    # ========================================================
+    # DETERMINISTIC CONFIDENCE
+    # ========================================================
+
     if (
         deterministic_confidence
         < BUY_MORE_MIN_CONFIDENCE
     ):
+
         flags.append(
             "BUY MORE CONFIDENCE BELOW THRESHOLD"
         )
@@ -1306,7 +1311,12 @@ def _evaluate_buy_more_governance(
             unit="percent",
         )
 
+    # ========================================================
+    # INVESTMENT SCORE
+    # ========================================================
+
     if investment_score < BUY_MORE_MIN_INVESTMENT_SCORE:
+
         flags.append(
             "BUY MORE INVESTMENT SCORE BELOW THRESHOLD"
         )
@@ -1331,7 +1341,12 @@ def _evaluate_buy_more_governance(
             unit="score",
         )
 
+    # ========================================================
+    # SIGNAL
+    # ========================================================
+
     if signal not in BUY_MORE_SUPPORTING_SIGNALS:
+
         flags.append(
             "BUY MORE SIGNAL NOT SUPPORTIVE"
         )
@@ -1354,6 +1369,10 @@ def _evaluate_buy_more_governance(
             threshold_value="BUY / STRONG BUY",
             unit="signal",
         )
+
+    # ========================================================
+    # RESULT
+    # ========================================================
 
     qualified = not failed_checks
 
@@ -1517,6 +1536,31 @@ def reconcile_decision(
         Reconciled Action = f(deterministic decision, LLM review)
 
     The LLM review is copied into the result for auditability.
+
+    Governance model
+    ----------------
+    HOLD:
+        Always supported.
+
+    CASH:
+        Cannot receive transactional stock/ETF actions.
+
+    BUY MORE:
+        Evaluated exclusively by dedicated deterministic BUY MORE
+        governance.
+
+    BUY NEW:
+        May qualify through the immature-history exception; otherwise
+        must pass the general deterministic minimum gate.
+
+    REDUCE:
+        Must be an existing holding and pass the general deterministic
+        minimum gate. REDUCE does not require the stronger SELL evidence
+        threshold.
+
+    SELL:
+        Must be an existing holding, pass the general deterministic
+        minimum gate, and satisfy the SELL-specific evidence threshold.
     """
 
     if not isinstance(
@@ -1600,7 +1644,9 @@ def reconcile_decision(
     )
 
     governance_flags: list[str] = []
+
     reasons: list[str] = []
+
     failed_checks: list[dict[str, Any]] = []
 
     # --------------------------------------------------------
@@ -1623,6 +1669,7 @@ def reconcile_decision(
     # --------------------------------------------------------
 
     if not llm_review:
+
         governance_flags.append(
             "LLM REVIEW UNAVAILABLE"
         )
@@ -1633,6 +1680,7 @@ def reconcile_decision(
         )
 
     elif llm_review == "ACCEPT":
+
         governance_flags.append(
             "LLM ADVISORY ACCEPT"
         )
@@ -1643,6 +1691,7 @@ def reconcile_decision(
         )
 
     elif llm_review == "CHALLENGE":
+
         governance_flags.append(
             "LLM ADVISORY CHALLENGE"
         )
@@ -1654,6 +1703,7 @@ def reconcile_decision(
         )
 
     elif llm_review == "REJECT":
+
         governance_flags.append(
             "LLM ADVISORY REJECT"
         )
@@ -1665,6 +1715,7 @@ def reconcile_decision(
         )
 
     else:
+
         governance_flags.append(
             "LLM ADVISORY RESULT UNKNOWN"
         )
@@ -1676,11 +1727,13 @@ def reconcile_decision(
         )
 
     if llm_challenge:
+
         governance_flags.append(
             "LLM CHALLENGE ADVISORY ONLY"
         )
 
     if llm_confidence < MIN_LLM_CONFIDENCE:
+
         governance_flags.append(
             "LOW LLM CONFIDENCE ADVISORY ONLY"
         )
@@ -1688,13 +1741,14 @@ def reconcile_decision(
     # --------------------------------------------------------
     # HOLD
     #
-    # HOLD is deterministic and does not require LLM approval.
+    # HOLD is deterministic and requires no further governance.
     # --------------------------------------------------------
 
     if deterministic_action == "HOLD":
+
         reasons.append(
-            "The deterministic proposal is HOLD. No LLM approval "
-            "is required to retain the HOLD action."
+            "The deterministic proposal is HOLD. No additional "
+            "transaction governance is required."
         )
 
         return _build_result(
@@ -1721,18 +1775,18 @@ def reconcile_decision(
             ),
             governance_reason=(
                 "HOLD is the deterministic portfolio action and "
-                "requires no LLM approval."
+                "requires no transaction approval."
             ),
         )
 
     # --------------------------------------------------------
-    # Asset-specific defensive rule.
+    # CASH
     #
-    # Cash should not be given a transactional stock action by this
-    # reconciliation layer.
+    # Cash cannot receive stock/ETF transaction actions.
     # --------------------------------------------------------
 
     if asset_type == "CASH":
+
         governance_flags.append(
             "CASH ACTION NOT PERMITTED"
         )
@@ -1784,14 +1838,13 @@ def reconcile_decision(
     # --------------------------------------------------------
     # BUY MORE
     #
-    # Every check is deterministic.
+    # Dedicated deterministic governance.
     #
-    # NO LLM REVIEW CHECK.
-    # NO LLM CONFIDENCE CHECK.
-    # NO LLM CONTRADICTION CHECK.
+    # No LLM condition participates in approval.
     # --------------------------------------------------------
 
     if deterministic_action == "BUY MORE":
+
         (
             buy_more_qualified,
             buy_more_flags,
@@ -1815,14 +1868,14 @@ def reconcile_decision(
         )
 
         if buy_more_qualified:
+
             governance_flags.append(
                 "BUY MORE GOVERNANCE PASSED"
             )
 
             reasons.append(
-                "BUY MORE satisfies all deterministic existing-holding, "
-                "allocation, evidence, confidence, investment-score and "
-                "signal requirements."
+                "BUY MORE satisfies all dedicated deterministic "
+                "BUY MORE governance requirements."
             )
 
             return _build_result(
@@ -1849,7 +1902,8 @@ def reconcile_decision(
                 ),
                 governance_reason=(
                     "BUY MORE was automatically approved because all "
-                    "deterministic BUY MORE governance requirements passed."
+                    "dedicated deterministic BUY MORE governance "
+                    "requirements passed."
                 ),
             )
 
@@ -1858,8 +1912,8 @@ def reconcile_decision(
         )
 
         reasons.append(
-            "BUY MORE did not satisfy the complete deterministic "
-            "governance requirements."
+            "BUY MORE did not satisfy the complete dedicated "
+            "deterministic governance requirements."
         )
 
         return _build_result(
@@ -1886,304 +1940,30 @@ def reconcile_decision(
             ),
             governance_reason=(
                 "BUY MORE was not automatically approved because "
-                "one or more deterministic BUY MORE governance "
-                "requirements failed."
+                "one or more dedicated deterministic BUY MORE "
+                "governance requirements failed."
             ),
         )
 
     # --------------------------------------------------------
-    # BUY NEW immature-history exception.
+    # REDUCE
     #
-    # This is entirely deterministic.
-    # --------------------------------------------------------
-
-    buy_new_immature_history_override = (
-        buy_new_is_strong_enough_to_survive_immature_history(
-            decision=decision,
-            review=review,
-        )
-    )
-
-    if (
-        deterministic_action == "BUY NEW"
-        and
-        buy_new_immature_history_override
-    ):
-        governance_flags.append(
-            "BUY NEW WITH IMMATURE HISTORICAL EVIDENCE"
-        )
-
-        reasons.append(
-            "BUY NEW qualifies for the deterministic immature-history "
-            "exception because the current investment case is strong "
-            "enough despite immature historical evidence."
-        )
-
-        return _build_result(
-            status="SUPPORTED WITH IMMATURE EVIDENCE",
-            reconciled_action="BUY NEW",
-            deterministic_action=deterministic_action,
-            proposed_action=proposed_action,
-            llm_review=llm_review,
-            llm_confidence=llm_confidence,
-            llm_reason=llm_reason,
-            llm_challenge=llm_challenge,
-            evidence_score=evidence_score,
-            evidence_strength=evidence_strength,
-            deterministic_confidence=deterministic_confidence,
-            decision_support=decision_support,
-            existing_holding=existing_holding,
-            asset_type=asset_type,
-            governance_flags=governance_flags,
-            reasons=reasons,
-            automatic_approval=True,
-            failed_checks=[],
-            governance_reason_code=(
-                "BUY_NEW_IMMATURE_HISTORY"
-            ),
-            governance_reason=(
-                "BUY NEW approved under the deterministic immature-history "
-                "exception. LLM review is advisory only."
-            ),
-        )
-
-    # --------------------------------------------------------
-    # General deterministic minimum gate.
+    # REDUCE is handled before the general action gates so that
+    # it has its own explicit governance path.
     #
-    # This is the normal gate for BUY NEW / REDUCE / SELL.
-    # --------------------------------------------------------
-
-    weak_deterministic = _deterministic_action_is_weak(
-        decision
-    )
-
-    if weak_deterministic:
-        governance_flags.append(
-            "WEAK DETERMINISTIC EVIDENCE"
-        )
-
-        reasons.append(
-            "Deterministic evidence is insufficient to support "
-            "automatic portfolio change."
-        )
-
-        if evidence_score < MIN_EVIDENCE_SCORE:
-            _record_failed_check(
-                failed_checks,
-                check_def="reconcile_decision",
-                check_code=(
-                    "WEAK_DETERMINISTIC_EVIDENCE"
-                ),
-                reason=(
-                    "Deterministic evidence is below the minimum "
-                    "evidence threshold."
-                ),
-                actual_value=evidence_score,
-                threshold_value=MIN_EVIDENCE_SCORE,
-                unit="score",
-            )
-
-        if (
-            deterministic_confidence
-            < MIN_DETERMINISTIC_CONFIDENCE
-        ):
-            _record_failed_check(
-                failed_checks,
-                check_def="reconcile_decision",
-                check_code=(
-                    "WEAK_DETERMINISTIC_CONFIDENCE"
-                ),
-                reason=(
-                    "Deterministic confidence is below the minimum "
-                    "confidence threshold."
-                ),
-                actual_value=deterministic_confidence,
-                threshold_value=MIN_DETERMINISTIC_CONFIDENCE,
-                unit="percent",
-            )
-
-        if decision_support == "NOT SUPPORTED":
-            _record_failed_check(
-                failed_checks,
-                check_def="reconcile_decision",
-                check_code=(
-                    "DETERMINISTIC_DECISION_NOT_SUPPORTED"
-                ),
-                reason=(
-                    "The deterministic decision support classification "
-                    "is NOT SUPPORTED."
-                ),
-                actual_value=decision_support,
-                threshold_value="SUPPORTED",
-                unit="decision support",
-            )
-
-        return _build_result(
-            status="REVIEW REQUIRED",
-            reconciled_action="HOLD",
-            deterministic_action=deterministic_action,
-            proposed_action=proposed_action,
-            llm_review=llm_review,
-            llm_confidence=llm_confidence,
-            llm_reason=llm_reason,
-            llm_challenge=llm_challenge,
-            evidence_score=evidence_score,
-            evidence_strength=evidence_strength,
-            deterministic_confidence=deterministic_confidence,
-            decision_support=decision_support,
-            existing_holding=existing_holding,
-            asset_type=asset_type,
-            governance_flags=governance_flags,
-            reasons=reasons,
-            automatic_approval=False,
-            failed_checks=failed_checks,
-            governance_reason_code=(
-                "DETERMINISTIC_MINIMUM_GATE_FAILED"
-            ),
-            governance_reason=(
-                "The deterministic proposal did not satisfy the "
-                "minimum evidence, confidence and decision-support "
-                "requirements."
-            ),
-        )
-
-    # --------------------------------------------------------
-    # Strong evidence gate for high-impact deterministic actions.
+    # REDUCE requires:
+    #   - Existing holding
+    #   - Minimum deterministic evidence
+    #   - Minimum deterministic confidence
+    #   - Supported decision
     #
-    # Again, this is entirely deterministic.
-    # --------------------------------------------------------
-
-    if (
-        _requires_strong_evidence(
-            deterministic_action
-        )
-        and
-        evidence_score < STRONG_EVIDENCE_SCORE
-    ):
-        governance_flags.append(
-            "STRONG EVIDENCE REQUIRED"
-        )
-
-        reasons.append(
-            f"{deterministic_action} requires deterministic evidence "
-            f"of at least {STRONG_EVIDENCE_SCORE:.2f}."
-        )
-
-        _record_failed_check(
-            failed_checks,
-            check_def="reconcile_decision",
-            check_code=(
-                "DETERMINISTIC_EVIDENCE_THRESHOLD"
-            ),
-            reason=(
-                "Strong deterministic evidence is required for this action."
-            ),
-            actual_value=evidence_score,
-            threshold_value=STRONG_EVIDENCE_SCORE,
-            unit="score",
-        )
-
-        return _build_result(
-            status="REVIEW REQUIRED",
-            reconciled_action="HOLD",
-            deterministic_action=deterministic_action,
-            proposed_action=proposed_action,
-            llm_review=llm_review,
-            llm_confidence=llm_confidence,
-            llm_reason=llm_reason,
-            llm_challenge=llm_challenge,
-            evidence_score=evidence_score,
-            evidence_strength=evidence_strength,
-            deterministic_confidence=deterministic_confidence,
-            decision_support=decision_support,
-            existing_holding=existing_holding,
-            asset_type=asset_type,
-            governance_flags=governance_flags,
-            reasons=reasons,
-            automatic_approval=False,
-            failed_checks=failed_checks,
-            governance_reason_code=(
-                "DETERMINISTIC_EVIDENCE_THRESHOLD"
-            ),
-            governance_reason=(
-                f"{deterministic_action} was not automatically approved "
-                f"because deterministic evidence of {evidence_score:.2f} "
-                f"is below the required strong-evidence threshold of "
-                f"{STRONG_EVIDENCE_SCORE:.2f}."
-            ),
-        )
-
-    # --------------------------------------------------------
-    # SELL requires the strongest deterministic evidence.
-    # --------------------------------------------------------
-
-    if (
-        deterministic_action == "SELL"
-        and
-        evidence_score < SELL_EVIDENCE_SCORE
-    ):
-        governance_flags.append(
-            "SELL EVIDENCE BELOW THRESHOLD"
-        )
-
-        reasons.append(
-            f"SELL requires deterministic evidence of at least "
-            f"{SELL_EVIDENCE_SCORE:.2f}."
-        )
-
-        _record_failed_check(
-            failed_checks,
-            check_def="reconcile_decision",
-            check_code=(
-                "SELL_EVIDENCE_BELOW_THRESHOLD"
-            ),
-            reason=(
-                "SELL requires stronger deterministic evidence."
-            ),
-            actual_value=evidence_score,
-            threshold_value=SELL_EVIDENCE_SCORE,
-            unit="score",
-        )
-
-        return _build_result(
-            status="REVIEW REQUIRED",
-            reconciled_action="HOLD",
-            deterministic_action=deterministic_action,
-            proposed_action=proposed_action,
-            llm_review=llm_review,
-            llm_confidence=llm_confidence,
-            llm_reason=llm_reason,
-            llm_challenge=llm_challenge,
-            evidence_score=evidence_score,
-            evidence_strength=evidence_strength,
-            deterministic_confidence=deterministic_confidence,
-            decision_support=decision_support,
-            existing_holding=existing_holding,
-            asset_type=asset_type,
-            governance_flags=governance_flags,
-            reasons=reasons,
-            automatic_approval=False,
-            failed_checks=failed_checks,
-            governance_reason_code=(
-                "SELL_EVIDENCE_THRESHOLD"
-            ),
-            governance_reason=(
-                "SELL was not approved because deterministic evidence "
-                "is below the required SELL threshold."
-            ),
-        )
-
-    # --------------------------------------------------------
-    # REDUCE.
-    #
-    # A REDUCE is allowed when the deterministic proposal itself
-    # is sufficiently governed.
-    #
-    # The LLM cannot veto it.
+    # REDUCE does NOT require SELL-level evidence.
     # --------------------------------------------------------
 
     if deterministic_action == "REDUCE":
+
         if not existing_holding:
+
             governance_flags.append(
                 "REDUCE REQUIRES EXISTING HOLDING"
             )
@@ -2234,17 +2014,132 @@ def reconcile_decision(
                 ),
             )
 
-        # ----------------------------------------------------
-        # Deterministic REDUCE governance has passed the general
-        # minimum and strong-evidence gates above.
-        # ----------------------------------------------------
+        if evidence_score < MIN_EVIDENCE_SCORE:
+
+            governance_flags.append(
+                "REDUCE EVIDENCE BELOW MINIMUM"
+            )
+
+            reasons.append(
+                f"REDUCE evidence of {evidence_score:.2f} is below "
+                f"the minimum threshold of "
+                f"{MIN_EVIDENCE_SCORE:.2f}."
+            )
+
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "REDUCE_EVIDENCE_BELOW_MINIMUM"
+                ),
+                reason=(
+                    "REDUCE deterministic evidence is below the "
+                    "minimum required threshold."
+                ),
+                actual_value=evidence_score,
+                threshold_value=MIN_EVIDENCE_SCORE,
+                unit="score",
+            )
+
+        if (
+            deterministic_confidence
+            < MIN_DETERMINISTIC_CONFIDENCE
+        ):
+
+            governance_flags.append(
+                "REDUCE CONFIDENCE BELOW MINIMUM"
+            )
+
+            reasons.append(
+                f"REDUCE deterministic confidence of "
+                f"{deterministic_confidence:.2f} is below the "
+                f"minimum threshold of "
+                f"{MIN_DETERMINISTIC_CONFIDENCE:.2f}."
+            )
+
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "REDUCE_CONFIDENCE_BELOW_MINIMUM"
+                ),
+                reason=(
+                    "REDUCE deterministic confidence is below the "
+                    "minimum required threshold."
+                ),
+                actual_value=deterministic_confidence,
+                threshold_value=MIN_DETERMINISTIC_CONFIDENCE,
+                unit="percent",
+            )
+
+        if decision_support != "SUPPORTED":
+
+            governance_flags.append(
+                "REDUCE DECISION NOT SUPPORTED"
+            )
+
+            reasons.append(
+                "REDUCE requires deterministic decision support "
+                "to be SUPPORTED."
+            )
+
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "REDUCE_DECISION_NOT_SUPPORTED"
+                ),
+                reason=(
+                    "REDUCE requires deterministic decision support "
+                    "to be SUPPORTED."
+                ),
+                actual_value=decision_support,
+                threshold_value="SUPPORTED",
+                unit="decision support",
+            )
+
+        if failed_checks:
+
+            governance_flags.append(
+                "REDUCE GOVERNANCE REQUIREMENTS NOT MET"
+            )
+
+            return _build_result(
+                status="REVIEW REQUIRED",
+                reconciled_action="HOLD",
+                deterministic_action=deterministic_action,
+                proposed_action=proposed_action,
+                llm_review=llm_review,
+                llm_confidence=llm_confidence,
+                llm_reason=llm_reason,
+                llm_challenge=llm_challenge,
+                evidence_score=evidence_score,
+                evidence_strength=evidence_strength,
+                deterministic_confidence=deterministic_confidence,
+                decision_support=decision_support,
+                existing_holding=existing_holding,
+                asset_type=asset_type,
+                governance_flags=governance_flags,
+                reasons=reasons,
+                automatic_approval=False,
+                failed_checks=failed_checks,
+                governance_reason_code=(
+                    "REDUCE_DETERMINISTIC_GOVERNANCE_FAILED"
+                ),
+                governance_reason=(
+                    "REDUCE was not automatically approved because "
+                    "one or more deterministic REDUCE governance "
+                    "requirements failed."
+                ),
+            )
 
         governance_flags.append(
             "REDUCE DETERMINISTIC GOVERNANCE PASSED"
         )
 
         reasons.append(
-            "REDUCE satisfies the deterministic governance requirements."
+            "REDUCE satisfies the deterministic governance "
+            "requirements."
         )
 
         return _build_result(
@@ -2271,29 +2166,30 @@ def reconcile_decision(
             ),
             governance_reason=(
                 "REDUCE was approved by deterministic governance. "
-                "Any LLM challenge or rejection is advisory only."
+                "The LLM review is advisory only."
             ),
         )
 
-
     # --------------------------------------------------------
-    # SELL.
+    # SELL
     #
-    # SELL is equivalent to REDUCE 100%.
+    # SELL is the highest-impact reduction action.
     #
-    # All SELL governance is deterministic. The LLM cannot
-    # veto or downgrade a fully governed SELL.
-    #
-    # The general minimum gate, strong-evidence gate and
-    # SELL-specific evidence gate above have already passed
-    # before execution reaches this block.
+    # Requires:
+    #   - Existing holding
+    #   - General deterministic minimum gate
+    #   - Strong evidence threshold
+    #   - SELL-specific evidence threshold
     # --------------------------------------------------------
 
     if deterministic_action == "SELL":
+
         if not existing_holding:
+
             governance_flags.append(
                 "SELL REQUIRES EXISTING HOLDING"
             )
+
             reasons.append(
                 "SELL requires an existing holding."
             )
@@ -2310,6 +2206,121 @@ def reconcile_decision(
                 actual_value=existing_holding,
                 threshold_value=True,
                 unit="boolean",
+            )
+
+        if evidence_score < MIN_EVIDENCE_SCORE:
+
+            governance_flags.append(
+                "SELL EVIDENCE BELOW MINIMUM"
+            )
+
+            reasons.append(
+                f"SELL evidence of {evidence_score:.2f} is below "
+                f"the minimum threshold of "
+                f"{MIN_EVIDENCE_SCORE:.2f}."
+            )
+
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "SELL_EVIDENCE_BELOW_MINIMUM"
+                ),
+                reason=(
+                    "SELL deterministic evidence is below the "
+                    "minimum required threshold."
+                ),
+                actual_value=evidence_score,
+                threshold_value=MIN_EVIDENCE_SCORE,
+                unit="score",
+            )
+
+        if (
+            deterministic_confidence
+            < MIN_DETERMINISTIC_CONFIDENCE
+        ):
+
+            governance_flags.append(
+                "SELL CONFIDENCE BELOW MINIMUM"
+            )
+
+            reasons.append(
+                f"SELL deterministic confidence of "
+                f"{deterministic_confidence:.2f} is below the "
+                f"minimum threshold of "
+                f"{MIN_DETERMINISTIC_CONFIDENCE:.2f}."
+            )
+
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "SELL_CONFIDENCE_BELOW_MINIMUM"
+                ),
+                reason=(
+                    "SELL deterministic confidence is below the "
+                    "minimum required threshold."
+                ),
+                actual_value=deterministic_confidence,
+                threshold_value=MIN_DETERMINISTIC_CONFIDENCE,
+                unit="percent",
+            )
+
+        if decision_support != "SUPPORTED":
+
+            governance_flags.append(
+                "SELL DECISION NOT SUPPORTED"
+            )
+
+            reasons.append(
+                "SELL requires deterministic decision support "
+                "to be SUPPORTED."
+            )
+
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "SELL_DECISION_NOT_SUPPORTED"
+                ),
+                reason=(
+                    "SELL requires deterministic decision support "
+                    "to be SUPPORTED."
+                ),
+                actual_value=decision_support,
+                threshold_value="SUPPORTED",
+                unit="decision support",
+            )
+
+        if evidence_score < SELL_EVIDENCE_SCORE:
+
+            governance_flags.append(
+                "SELL EVIDENCE BELOW THRESHOLD"
+            )
+
+            reasons.append(
+                f"SELL requires deterministic evidence of at least "
+                f"{SELL_EVIDENCE_SCORE:.2f}."
+            )
+
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "SELL_EVIDENCE_BELOW_THRESHOLD"
+                ),
+                reason=(
+                    "SELL requires stronger deterministic evidence."
+                ),
+                actual_value=evidence_score,
+                threshold_value=SELL_EVIDENCE_SCORE,
+                unit="score",
+            )
+
+        if failed_checks:
+
+            governance_flags.append(
+                "SELL GOVERNANCE REQUIREMENTS NOT MET"
             )
 
             return _build_result(
@@ -2332,20 +2343,14 @@ def reconcile_decision(
                 automatic_approval=False,
                 failed_checks=failed_checks,
                 governance_reason_code=(
-                    "SELL_REQUIRES_EXISTING_HOLDING"
+                    "SELL_DETERMINISTIC_GOVERNANCE_FAILED"
                 ),
                 governance_reason=(
-                    "SELL was not approved because the asset is "
-                    "not an existing holding."
+                    "SELL was not automatically approved because "
+                    "one or more deterministic SELL governance "
+                    "requirements failed."
                 ),
             )
-
-        # ----------------------------------------------------
-        # Deterministic SELL governance has passed all gates
-        # above, including the SELL-specific evidence threshold.
-        #
-        # SELL represents a 100% reduction of the holding.
-        # ----------------------------------------------------
 
         governance_flags.append(
             "SELL DETERMINISTIC GOVERNANCE PASSED"
@@ -2387,22 +2392,160 @@ def reconcile_decision(
         )
 
     # --------------------------------------------------------
-    # BUY NEW.
-    #
-    # General deterministic governance has passed.
+    # BUY NEW immature-history exception.
     # --------------------------------------------------------
 
+    buy_new_immature_history_override = (
+        buy_new_is_strong_enough_to_survive_immature_history(
+            decision=decision,
+            review=review,
+        )
+    )
 
+    if (
+        deterministic_action == "BUY NEW"
+        and
+        buy_new_immature_history_override
+    ):
+
+        governance_flags.append(
+            "BUY NEW WITH IMMATURE HISTORICAL EVIDENCE"
+        )
+
+        reasons.append(
+            "BUY NEW qualifies for the deterministic immature-history "
+            "exception because the current investment case is strong "
+            "enough despite immature historical evidence."
+        )
+
+        return _build_result(
+            status="SUPPORTED WITH IMMATURE EVIDENCE",
+            reconciled_action="BUY NEW",
+            deterministic_action=deterministic_action,
+            proposed_action=proposed_action,
+            llm_review=llm_review,
+            llm_confidence=llm_confidence,
+            llm_reason=llm_reason,
+            llm_challenge=llm_challenge,
+            evidence_score=evidence_score,
+            evidence_strength=evidence_strength,
+            deterministic_confidence=deterministic_confidence,
+            decision_support=decision_support,
+            existing_holding=existing_holding,
+            asset_type=asset_type,
+            governance_flags=governance_flags,
+            reasons=reasons,
+            automatic_approval=True,
+            failed_checks=[],
+            governance_reason_code=(
+                "BUY_NEW_IMMATURE_HISTORY"
+            ),
+            governance_reason=(
+                "BUY NEW approved under the deterministic immature-history "
+                "exception. LLM review is advisory only."
+            ),
+        )
+
+    # --------------------------------------------------------
+    # BUY NEW
+    #
+    # Normal BUY NEW governance requires the general deterministic
+    # minimum gate.
+    # --------------------------------------------------------
 
     if deterministic_action == "BUY NEW":
-        if existing_holding:
+
+        if evidence_score < BUY_NEW_MIN_EVIDENCE:
+
             governance_flags.append(
-                "BUY NEW WITH EXISTING HOLDING"
+                "BUY NEW EVIDENCE BELOW MINIMUM"
             )
 
             reasons.append(
-                "The deterministic action is BUY NEW even though "
-                "the asset is already marked as held."
+                f"BUY NEW evidence of {evidence_score:.2f} is below "
+                f"the minimum threshold of "
+                f"{BUY_NEW_MIN_EVIDENCE:.2f}."
+            )
+
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "BUY_NEW_EVIDENCE_BELOW_MINIMUM"
+                ),
+                reason=(
+                    "BUY NEW deterministic evidence is below the "
+                    "minimum required threshold."
+                ),
+                actual_value=evidence_score,
+                threshold_value=BUY_NEW_MIN_EVIDENCE,
+                unit="score",
+            )
+
+        if (
+            deterministic_confidence
+            < BUY_NEW_MIN_CONFIDENCE
+        ):
+
+            governance_flags.append(
+                "BUY NEW CONFIDENCE BELOW MINIMUM"
+            )
+
+            reasons.append(
+                f"BUY NEW deterministic confidence of "
+                f"{deterministic_confidence:.2f} is below the "
+                f"minimum threshold of "
+                f"{BUY_NEW_MIN_CONFIDENCE:.2f}."
+            )
+
+            _record_failed_check(
+                failed_checks,
+                check_def="reconcile_decision",
+                check_code=(
+                    "BUY_NEW_CONFIDENCE_BELOW_MINIMUM"
+                ),
+                reason=(
+                    "BUY NEW deterministic confidence is below the "
+                    "minimum required threshold."
+                ),
+                actual_value=deterministic_confidence,
+                threshold_value=BUY_NEW_MIN_CONFIDENCE,
+                unit="percent",
+            )
+      
+        if failed_checks:
+
+            governance_flags.append(
+                "BUY NEW GOVERNANCE REQUIREMENTS NOT MET"
+            )
+
+            return _build_result(
+                status="REVIEW REQUIRED",
+                reconciled_action="HOLD",
+                deterministic_action=deterministic_action,
+                proposed_action=proposed_action,
+                llm_review=llm_review,
+                llm_confidence=llm_confidence,
+                llm_reason=llm_reason,
+                llm_challenge=llm_challenge,
+                evidence_score=evidence_score,
+                evidence_strength=evidence_strength,
+                deterministic_confidence=deterministic_confidence,
+                decision_support=decision_support,
+                existing_holding=existing_holding,
+                asset_type=asset_type,
+                governance_flags=governance_flags,
+                reasons=reasons,
+                automatic_approval=False,
+                failed_checks=failed_checks,
+                governance_reason_code=(
+                    "BUY_NEW_DETERMINISTIC_GOVERNANCE_FAILED"
+                ),
+                governance_reason=(
+                    "BUY NEW was not automatically approved because "
+                    "one or more deterministic BUY NEW governance "
+                    "requirements failed."
+                ),
             )
 
         governance_flags.append(
@@ -2410,7 +2553,8 @@ def reconcile_decision(
         )
 
         reasons.append(
-            "BUY NEW satisfies the deterministic governance requirements."
+            "BUY NEW satisfies the deterministic governance "
+            "requirements."
         )
 
         return _build_result(
@@ -2495,7 +2639,6 @@ def reconcile_decision(
             "path was available."
         ),
     )
-
 
 # ============================================================
 # Public compatibility API

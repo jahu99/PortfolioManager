@@ -1734,7 +1734,7 @@ def generate_portfolio_reallocation(
         )
 
         position_capacity = get_position_capacity(
-            row,
+            current_value,
             portfolio_value
         )
 
@@ -2336,8 +2336,7 @@ def generate_portfolio_reallocation(
                     0
                 )
             )
-            for destination
-            in eligible_destinations
+            for destination in deployment_destinations
         )
 
         # ----------------------------------------------------
