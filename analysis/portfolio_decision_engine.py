@@ -204,7 +204,9 @@ def approve_buy(
     Determine whether a new STOCK position is sufficiently
     attractive to receive a BUY NEW action.
 
-    BUY logic is deliberately conservative.
+    Conviction is informational and is not used as an
+    independent governance veto because it is derived from
+    underlying deterministic investment evidence.
     """
 
     investment_score = safe_float(
@@ -219,21 +221,11 @@ def approve_buy(
         sector_allocation
     )
 
-    conviction = normalise_text(
-        conviction
-    )
-
     portfolio_risk = normalise_text(
         portfolio_risk
     )
 
     if investment_score < 75:
-        return False
-
-    if conviction not in (
-        "HIGH",
-        "VERY HIGH"
-    ):
         return False
 
     if allocation >= 10:
@@ -246,8 +238,6 @@ def approve_buy(
         return False
 
     return True
-
-
 # ============================================================
 # STOCK REDUCTION SEVERITY
 # ============================================================
@@ -1287,7 +1277,7 @@ def generate_portfolio_decisions(
                 action = "BUY NEW"
 
                 reason = (
-                    "Strong investment score, conviction "
+                    "Strong investment score "
                     "and portfolio fit"
                 )
 

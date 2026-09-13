@@ -217,6 +217,8 @@ def enrich_portfolio_holdings(
 
             "Technical Score",
 
+            "Momentum Score",
+
             "Quality Score",
 
             "Growth Score",
@@ -317,48 +319,97 @@ def enrich_portfolio_holdings(
         # DEFAULT VALUES
         # ====================================================
 
-        default_values = {
+        # ====================================================
+        # RECONCILE SCANNER COLUMNS
+        #
+        # When portfolio_summary already contains an analytical
+        # column, pandas places the scanner value in the
+        # corresponding "_Scanner" column during the merge.
+        #
+        # The scanner value should populate the canonical column
+        # when that canonical value is missing.
+        #
+        # Existing non-missing portfolio values remain authoritative.
+        # ====================================================
 
+        scanner_reconciliation_columns = [
+            "Signal",
+            "Technical Score",
+            "Quality Score",
+            "Growth Score",
+            "Investment Score",
+            "Confidence",
+            "Confidence Score",
+            "AI Decision",
+            "AI Conviction",
+            "AI Conviction Score",
+            "AI Action",
+            "AI Investment Thesis",
+            "AI Decision Thesis",
+            "Recommendation Reasons",
+            "Recommendation Risks",
+            "AI Summary",
+            "Price",
+            "RSI",
+            "Sector",
+            "Industry",
+            "Momentum Score",
+        ]
+
+        for column in scanner_reconciliation_columns:
+            scanner_column = f"{column}_Scanner"
+
+            if scanner_column not in portfolio_summary.columns:
+                continue
+
+            if column not in portfolio_summary.columns:
+                portfolio_summary[column] = (
+                    portfolio_summary[scanner_column]
+                )
+                continue
+
+            portfolio_summary[column] = (
+                portfolio_summary[column]
+                .where(
+                    ~portfolio_summary[column].apply(
+                        _is_missing_scalar
+                    ),
+                    portfolio_summary[scanner_column]
+                )
+            )
+
+        # ====================================================
+        # DEFAULT VALUES
+        # ====================================================
+
+        default_values = {
             "Signal":
                 "HOLD",
-
             "Technical Score":
                 0,
-
             "Quality Score":
                 0,
-
             "Growth Score":
                 0,
-
             "Investment Score":
                 0,
-
             "Confidence":
                 "LOW",
-
             "Confidence Score":
                 0,
-
             "AI Decision":
                 "NO REVIEW",
-
             "AI Conviction":
                 "LOW",
-
             "AI Conviction Score":
                 0,
-
             "AI Action":
                 "MONITOR",
-
             "Recommendation Reasons":
                 [],
-
             "Recommendation Risks":
                 []
         }
-
         # ====================================================
         # SAFELY FILL MISSING VALUES
         # ====================================================

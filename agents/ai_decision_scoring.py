@@ -1814,6 +1814,30 @@ def score_investment_quality(
     return 10.0
 
 
+def score_buy_new_investment_quality(
+    context,
+):
+    """
+    Use the learning-adjusted investment score as the
+    primary current-case evidence for BUY NEW.
+
+    The raw Investment Score is never modified.
+
+    The Learning Adjusted Score is derived from the existing
+    historical-learning mechanism and therefore allows
+    historical outcomes to validate or adjust the current
+    investment case without introducing a new hard-coded
+    scoring bucket.
+    """
+
+    return clamp(
+        get_learning_adjusted_score(
+            context
+        )
+    )
+
+
+
 def score_learning_evidence(
     context,
 ):
@@ -2125,7 +2149,7 @@ def score_score_bucket_evidence(
 
     if observations <= 0:
 
-        return 0.0
+        return 50.0
 
     if observations >= STRONG_RELIABILITY_OBSERVATIONS:
 
@@ -2355,7 +2379,7 @@ def score_learning_adjustment(
 # Decision-specific evidence
 # ============================================================
 
-def calculate_buy_evidence(
+def calculate_buy_more_evidence(
     context,
 ):
     """Calculate evidence supporting BUY NEW / BUY MORE."""
@@ -2407,7 +2431,7 @@ def calculate_hold_evidence(
 ):
     """Calculate evidence supporting HOLD."""
 
-    buy_evidence = calculate_buy_evidence(
+    buy_evidence = calculate_buy_new_evidence(
         context
     )
 
@@ -2529,6 +2553,58 @@ def calculate_sell_evidence(
         score
     )
 
+def calculate_buy_new_evidence(
+    context,
+):
+    """
+    Calculate evidence supporting BUY NEW.
+
+    BUY NEW uses the existing learning-adjusted investment
+    score as the primary evidence for the current investment
+    case. Historical learning therefore validates the current
+    signal rather than being added again as separate evidence
+    components.
+
+    Portfolio fit and risk fit remain explicit contextual
+    evidence.
+    """
+
+    investment_quality = score_buy_new_investment_quality(
+        context
+    )
+
+    portfolio_fit = score_portfolio_fit(
+        context
+    )
+
+    risk_fit = score_risk_fit(
+        context
+    )
+
+    # Start from the empirically derived investment case.
+    #
+    # Portfolio and risk remain contextual evidence, but
+    # their existing scores are only applied as bounded
+    # adjustments around their neutral baselines.
+    portfolio_adjustment = (
+        portfolio_fit - 70.0
+    )
+
+    risk_adjustment = (
+        risk_fit - 50.0
+    )
+
+    score = (
+        investment_quality
+        +
+        portfolio_adjustment
+        +
+        risk_adjustment
+    )
+
+    return clamp(
+        score
+    )
 
 # ============================================================
 # Overall evidence assessment
@@ -2543,15 +2619,18 @@ def calculate_evidence_score(
         context
     )
 
-    if action in {
-        "BUY NEW",
-        "BUY MORE",
-    }:
+    if action == "BUY NEW":
 
-        return calculate_buy_evidence(
+        return calculate_buy_new_evidence(
             context
         )
 
+    if action == "BUY MORE":
+
+        return calculate_buy_more_evidence(
+            context
+        )
+    
     if action == "REDUCE":
 
         return calculate_reduction_evidence(
@@ -2912,22 +2991,16 @@ def calculate_confidence(
         confidence -= 15.0
 
     # --------------------------------------------------------
-    # BUY safeguards.
+    # BUY learning treatment.
+    #
+    # Missing or immature historical learning is neutral.
+    #
+    # Historical learning may strengthen confidence when mature,
+    # but its absence must not penalise an otherwise strong
+    # investment opportunity.
     # --------------------------------------------------------
 
-    if action in {
-        "BUY NEW",
-        "BUY MORE",
-    }:
-
-        observations = get_preferred_learning_observations(
-            context
-        )
-
-        if observations <= 0:
-
-            confidence -= 10.0
-
+    
     # --------------------------------------------------------
     # BUY MORE concentration safeguard.
     # --------------------------------------------------------

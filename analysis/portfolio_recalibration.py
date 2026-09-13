@@ -1683,6 +1683,7 @@ def generate_portfolio_reallocation(
         if final_decision not in (
             "BUY",
             "BUY MORE",
+            "BUY NEW",
             "STRONG BUY",
             "ADD"
         ):

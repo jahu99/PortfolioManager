@@ -139,6 +139,18 @@ from analysis.portfolio_recalibration import (
     generate_portfolio_reallocation
 )
 
+from analysis.candidate_ranking_snapshot import (
+
+    save_candidate_ranking_snapshot,
+
+    save_buy_new_pipeline_snapshot,
+
+)
+
+from analysis.candidate_selection import (
+    select_buy_new_candidates,
+)
+
 
 def main():
 
@@ -687,6 +699,9 @@ def main():
                     "Technical Score":
                         technical_score,
 
+                    "Momentum Score":
+                        momentum_score,
+
                     "Quality Score":
                         quality_score,
 
@@ -1026,6 +1041,10 @@ def main():
         f"RESULTS AFTER SORT: {len(results)}"
     )
 
+   
+    
+
+
     # ---------------------------------
     # Save recommendation history
     # ---------------------------------
@@ -1077,6 +1096,7 @@ def main():
     portfolio_manager_review = None
     final_portfolio_decisions = None
     capital_allocation = None
+    market_intelligence = pd.DataFrame()
 
     try:
 
@@ -1091,6 +1111,28 @@ def main():
                 results
             )
         )
+
+        # ---------------------------------
+        # BUY NEW CANDIDATE SELECTION
+        #
+        # Investment opportunity ranking is
+        # performed before portfolio governance.
+        # ---------------------------------
+        
+        buy_new_candidates = (
+            select_buy_new_candidates(
+                pd.DataFrame(results)
+            )
+        )
+        
+        print(
+        
+            f"BUY NEW CANDIDATES: "
+        
+            f"{len(buy_new_candidates)}"
+        
+        )
+        
 
         portfolio_actions = (
             generate_portfolio_recommendations(
@@ -1143,10 +1185,33 @@ def main():
 
             test_context = None
 
+
+        # ---------------------------------
+        # Candidate Ranking Diagnostic
+        #
+        # Persist read-only snapshots of:
+        #
+        #     - live scan universe
+        #     - current portfolio
+        #
+        # Used by:
+        #
+        # tests/test_candidate_ranking.py
+        #
+        # ---------------------------------
+
+        save_candidate_ranking_snapshot(
+
+            results,
+
+            portfolio_summary,
+
+        )
+
         portfolio_decisions = (
             generate_portfolio_decisions(
                 portfolio_summary,
-                pd.DataFrame(results)
+                buy_new_candidates
             )
         )
 
@@ -1660,6 +1725,33 @@ def main():
 
     print(
         final_portfolio_decisions
+    )
+
+
+    # ---------------------------------
+
+    # BUY NEW PRODUCTION PIPELINE
+
+    # SNAPSHOT
+
+    #
+
+    # Persist the actual production outputs
+
+    # so the diagnostic can trace BUY NEW
+
+    # candidates through the complete
+
+    # production decision chain.
+
+    # ---------------------------------
+
+    save_buy_new_pipeline_snapshot(
+
+        portfolio_decisions,
+
+        final_portfolio_decisions,
+
     )
 
 
