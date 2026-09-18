@@ -1185,12 +1185,12 @@ def _evaluate_buy_more_governance(
     downstream and must not determine whether BUY MORE qualifies.
 
     Required deterministic conditions:
-
         - Existing holding
         - Evidence >= BUY_MORE_MIN_EVIDENCE
         - Deterministic confidence >= BUY_MORE_MIN_CONFIDENCE
         - Investment score >= BUY_MORE_MIN_INVESTMENT_SCORE
         - BUY or STRONG BUY signal
+        - Entry Quality must not indicate HIGH TIMING RISK
 
     Returns
     -------
@@ -1219,12 +1219,50 @@ def _evaluate_buy_more_governance(
         decision
     )
 
+    entry_quality = str(
+        decision.get("Entry Quality", "")
+    ).strip().upper()
+
+   
+    # ========================================================
+    # ENTRY QUALITY
+    # ========================================================
+
+    if entry_quality in (
+        "EXTENDED",
+        "HIGHLY EXTENDED",
+    ):
+        flags.append(
+            "BUY MORE EXTENDED ENTRY"
+        )
+
+        reasons.append(
+            "BUY MORE blocked because Entry Quality "
+            "indicates the position is EXTENDED or "
+            "HIGHLY EXTENDED."
+        )
+
+        _record_failed_check(
+            failed_checks,
+            check_def="BUY_MORE_GOVERNANCE",
+            check_code=(
+                "BUY_MORE_ENTRY_QUALITY_BLOCKED"
+            ),
+            reason=(
+                "BUY MORE ENTRY QUALITY BLOCKED"
+            ),
+            actual_value=entry_quality,
+            threshold_value=(
+                "EXTENDED / HIGHLY EXTENDED"
+            ),
+            unit="entry_quality",
+        )
+
     # ========================================================
     # EXISTING HOLDING
     # ========================================================
 
     if not existing_holding:
-
         flags.append(
             "BUY MORE REQUIRES EXISTING HOLDING"
         )
@@ -1252,7 +1290,6 @@ def _evaluate_buy_more_governance(
     # ========================================================
 
     if evidence_score < BUY_MORE_MIN_EVIDENCE:
-
         flags.append(
             "BUY MORE EVIDENCE BELOW THRESHOLD"
         )
@@ -1285,7 +1322,6 @@ def _evaluate_buy_more_governance(
         deterministic_confidence
         < BUY_MORE_MIN_CONFIDENCE
     ):
-
         flags.append(
             "BUY MORE CONFIDENCE BELOW THRESHOLD"
         )
@@ -1316,7 +1352,6 @@ def _evaluate_buy_more_governance(
     # ========================================================
 
     if investment_score < BUY_MORE_MIN_INVESTMENT_SCORE:
-
         flags.append(
             "BUY MORE INVESTMENT SCORE BELOW THRESHOLD"
         )
@@ -1346,7 +1381,6 @@ def _evaluate_buy_more_governance(
     # ========================================================
 
     if signal not in BUY_MORE_SUPPORTING_SIGNALS:
-
         flags.append(
             "BUY MORE SIGNAL NOT SUPPORTIVE"
         )
@@ -1370,6 +1404,7 @@ def _evaluate_buy_more_governance(
             unit="signal",
         )
 
+   
     # ========================================================
     # RESULT
     # ========================================================
@@ -1382,7 +1417,6 @@ def _evaluate_buy_more_governance(
         reasons,
         failed_checks,
     )
-
 
 # ============================================================
 # Result construction

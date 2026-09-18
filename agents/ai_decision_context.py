@@ -2183,53 +2183,41 @@ def extract_intelligence(
 # ============================================================
 
 def get_recommendation_evidence_snapshot(
-    candidate: Any,
+    candidate: Any = None,
+    recommendation_id: Any = None,
 ) -> dict:
     """
-    Load the immutable evidence snapshot associated with a
-    recommendation when a recommendation ID is available.
+    Load the immutable recommendation evidence snapshot.
 
-    Backward compatibility
-    -----------------------
-    Older candidate records may not contain a recommendation ID
-    and older recommendations may not have an evidence snapshot.
-
-    In either case this function returns an empty dictionary and
-    the existing candidate fields remain authoritative.
-
-    This function performs no scoring or decision logic.
+    The explicit recommendation_id is authoritative when supplied.
+    Otherwise fall back to resolving the ID from the candidate for
+    backward compatibility.
     """
 
-    recommendation_id = get_value(
-        candidate,
-        "Recommendation ID",
-        "recommendation_id",
-        "RecommendationID",
-        "recommendationId",
-        "id",
-        default=None,
-    )
+    if recommendation_id is None and candidate is not None:
+        recommendation_id = get_value(
+            candidate,
+            "Recommendation ID",
+            "recommendation_id",
+            "RecommendationID",
+            "recommendationId",
+            "id",
+            default=None,
+        )
 
     if recommendation_id is None:
-
         return {}
 
     try:
-
         return get_recommendation_evidence(
-            int(
-                recommendation_id
-            )
+            int(recommendation_id)
         ) or {}
-
     except (
         TypeError,
         ValueError,
         Exception,
     ):
-
         return {}
-
 
 def merge_evidence_value(
     candidate: Any,
@@ -2554,6 +2542,17 @@ def build_candidate_context(
             "confidence_score",
             evidence_key="confidence_score",
             default=0,
+        )
+    )
+
+    entry_quality = clean_text(
+        merge_evidence_value(
+            candidate,
+            evidence_snapshot,
+            "Entry Quality",
+            "entry_quality",
+            evidence_key="entry_quality",
+            default="",
         )
     )
 
@@ -2976,6 +2975,9 @@ def build_candidate_context(
 
             "confidence_score":
                 confidence_score,
+
+            "entry_quality":
+                entry_quality,
 
             "current_price":
                 current_price,

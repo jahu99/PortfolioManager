@@ -125,6 +125,8 @@ def initialise_audit_database():
 
             ticker TEXT NOT NULL,
 
+            recommendation_id INTEGER,
+
             asset_type TEXT,
 
             original_action TEXT,
@@ -171,6 +173,28 @@ def initialise_audit_database():
         )
         """
     )
+
+    # -------------------------------------------------
+    # Backward-compatible audit_decisions migration
+    # -------------------------------------------------
+
+    cursor.execute(
+        "PRAGMA table_info(audit_decisions)"
+    )
+
+    audit_decision_columns = {
+        row[1]
+        for row in cursor.fetchall()
+    }
+
+    if "recommendation_id" not in audit_decision_columns:
+
+        cursor.execute(
+            """
+            ALTER TABLE audit_decisions
+            ADD COLUMN recommendation_id INTEGER
+            """
+        )
 
     # -------------------------------------------------
     # Audit reasons
@@ -659,6 +683,77 @@ def initialise_database():
     print(
         "Database initialised"
     )
+def backfill_entry_quality_evidence(
+    cursor,
+    recommendation_id,
+    stock,
+):
+    """
+    Backfill Entry Quality telemetry for an existing
+    recommendation_evidence snapshot when those fields
+    are missing.
+
+    Existing populated evidence is preserved.
+    """
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            entry_quality
+        FROM recommendation_evidence
+        WHERE recommendation_id = ?
+        """,
+        (
+            recommendation_id,
+        )
+    )
+
+    existing_evidence = cursor.fetchone()
+
+    if not existing_evidence:
+        return None
+
+    evidence_id, existing_entry_quality = existing_evidence
+
+    if (
+        existing_entry_quality is not None
+        and str(existing_entry_quality).strip() != ""
+    ):
+        return False
+
+    entry_quality = stock.get("Entry Quality")
+
+    if entry_quality in (None, ""):
+        return False
+
+    cursor.execute(
+        """
+        UPDATE recommendation_evidence
+        SET
+            entry_quality = ?,
+            entry_quality_mode = ?,
+            extension_sma50_pct = ?,
+            extension_sma200_pct = ?,
+            return_5d_pct = ?,
+            return_10d_pct = ?,
+            return_20d_pct = ?
+        WHERE id = ?
+        """,
+        (
+            entry_quality,
+            stock.get("Entry Quality Mode"),
+            stock.get("Extension SMA50 %"),
+            stock.get("Extension SMA200 %"),
+            stock.get("Return 5D %"),
+            stock.get("Return 10D %"),
+            stock.get("Return 20D %"),
+            evidence_id,
+        )
+    )
+
+    return True
+
 
 
 # =====================================================
@@ -789,29 +884,28 @@ def save_recommendations(
                     ]
                 )
 
+               
                 # ---------------------------------------------
-                # Check whether evidence snapshot already exists
+                # Existing evidence snapshot
                 # ---------------------------------------------
 
-                cursor.execute(
-                    """
-                    SELECT COUNT(*)
-
-                    FROM recommendation_evidence
-
-                    WHERE recommendation_id = ?
-                    """,
-                    (
-                        recommendation_id,
+                entry_quality_backfill = (
+                    backfill_entry_quality_evidence(
+                        cursor=cursor,
+                        recommendation_id=recommendation_id,
+                        stock=stock,
                     )
                 )
 
-                evidence_exists = (
-                    cursor.fetchone()[0] > 0
-                )
-
-                if evidence_exists:
+                if entry_quality_backfill is True:
+                    evidence_saved += 1
                     continue
+
+                if entry_quality_backfill is False:
+                    continue
+
+                # No evidence exists.
+                # Fall through to the full evidence INSERT below.
 
                 # ---------------------------------------------
                 # Backfill missing evidence snapshot

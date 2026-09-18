@@ -97,6 +97,7 @@ import pandas as pd
 
 from agents.ai_decision_context import (
     build_ai_decision_context,
+    get_recommendation_evidence_snapshot,
 )
 
 from agents.ai_decision_layer import (
@@ -920,6 +921,8 @@ def build_eligible_population(
         "growth_score",
         "Risk Score",
         "risk_score",
+        "Confidence Score",
+        "confidence_score",
         "Signal",
         "signal",
         "Momentum Signal",
@@ -1190,6 +1193,19 @@ def build_eligible_population(
                     decision_score
                 )
 
+            # Explicitly preserve Confidence Score.
+            decision_confidence = decision_row.get(
+                "Confidence Score"
+            )
+            if is_missing(decision_confidence):
+                decision_confidence = decision_row.get(
+                    "confidence_score"
+                )
+            if not is_missing(decision_confidence):
+                base["Confidence Score"] = (
+                    decision_confidence
+                )
+
             decision_signal = decision_row.get(
                 "Signal"
             )
@@ -1281,6 +1297,7 @@ def build_eligible_population(
 def build_chain_candidate(
     base_row: dict,
     portfolio_summary: Any,
+    evidence_snapshot: dict | None = None,
 ) -> dict:
     """
     Build the candidate passed into ai_decision_context.py.
@@ -1562,6 +1579,24 @@ def build_chain_candidate(
             "investment_score":
                 investment_score,
 
+            "entry_quality":
+                upper_text(
+                    first_value(
+                        row_value(
+                            evidence_snapshot or {},
+                            "Entry Quality",
+                            "entry_quality",
+                            default=None,
+                        ),
+                        row_value(
+                            base_row,
+                            "Entry Quality",
+                            "entry_quality",
+                            default="",
+                        ),
+                        "",
+                    )
+                ),
             "etf_score":
                 etf_score,
 
@@ -1853,13 +1888,6 @@ def run_governed_chain(
 
     recommendation_id = get_latest_recommendation_id(
         ticker=ticker,
-        recommendation_date=base_row.get(
-            "Date",
-            base_row.get(
-                "date",
-                None,
-            ),
-        ),
     )
 
     # ============================================================
@@ -1884,8 +1912,13 @@ def run_governed_chain(
     candidate_input = build_chain_candidate(
         base_row=base_row,
         portfolio_summary=portfolio_summary,
+        evidence_snapshot=get_recommendation_evidence_snapshot(
+            candidate=base_row,
+            recommendation_id=recommendation_id,
+        ),
     )
-
+    
+   
     # ============================================================
     # HISTORICAL RECOMMENDATION INTELLIGENCE
     #
@@ -2079,6 +2112,14 @@ def run_governed_chain(
                     "investment_score"
                 ],
 
+            "Entry Quality":
+                candidate_input[
+                    "analysis"
+                ].get(
+                    "entry_quality",
+                    "",
+                ),
+
             "ETF Score":
                 candidate_input[
                     "analysis"
@@ -2184,6 +2225,10 @@ def run_governed_chain(
         "rules_based_decision"
     ]
 
+    candidate[
+        "recommendation_id"
+    ] = recommendation_id
+
     # ============================================================
     # MARKET & EVENT INTELLIGENCE
     #
@@ -2252,10 +2297,38 @@ def run_governed_chain(
         if investment_score is not None:
             deterministic["Investment Score"] = investment_score
 
+
+    # ============================================================
+    # PRESERVE ENTRY QUALITY FOR RECONCILIATION
+    #
+    # Entry Quality is persisted in the immutable
+    # recommendation_evidence snapshot and is already present
+    # in candidate["analysis"].
+    #
+    # The reconciler receives the deterministic decision object,
+    # so explicitly carry the persisted Entry Quality into that
+    # object at the reconciliation boundary.
+    # ============================================================
+
+    if isinstance(
+        candidate.get("analysis"),
+        dict,
+    ):
+        entry_quality = candidate["analysis"].get(
+            "entry_quality",
+            "",
+        )
+
+        if entry_quality:
+            deterministic["Entry Quality"] = entry_quality
+
+
     reconciliation = reconcile_ai_decision(
         decision=deterministic,
         review=review,
     )
+
+    # ============================================================
 
     print(
         f"RECONCILIATION DETAIL: {ticker} | "
@@ -2745,6 +2818,13 @@ def build_final_result(
         base_row,
     )
 
+    recommendation_id = first_value(
+        candidate.get("Recommendation ID"),
+        candidate.get("recommendation_id"),
+        base_row.get("Recommendation ID"),
+        base_row.get("recommendation_id"),
+    )
+
     if not isinstance(candidate, dict):
         candidate = base_row
 
@@ -2804,9 +2884,9 @@ def build_final_result(
 
         investment_score = safe_float(
             first_value(
-                base_row.get("Investment Score"),
                 analysis.get("investment_score"),
                 deterministic.get("Investment Score"),
+                base_row.get("Investment Score"),
                 0,
             )
         )
@@ -2877,6 +2957,29 @@ def build_final_result(
         reconciliation
     )
 
+    governance_failed_checks = first_value(
+        reconciliation.get(
+            "Governance Failed Checks"
+        ),
+        reconciliation.get(
+            "Failed Checks"
+        ),
+        default=[],
+    )
+
+    if not isinstance(
+        governance_failed_checks,
+        list,
+    ):
+        governance_failed_checks = []
+
+    first_failed_check = {}
+
+    for failed_check in governance_failed_checks:
+        if isinstance(failed_check, dict):
+            first_failed_check = failed_check
+            break
+
     # ========================================================
     # GOVERNANCE FAILURE TRANSPARENCY
     #
@@ -2912,6 +3015,9 @@ def build_final_result(
             reconciliation.get(
                 "Failed Governance Requirement"
             ),
+            first_failed_check.get(
+                "check_code"
+            ),
             default="",
         )
     )
@@ -2932,6 +3038,9 @@ def build_final_result(
         reconciliation.get(
             "Governance Failure Threshold"
         ),
+         first_failed_check.get(
+            "threshold_value"
+        ),
         default=None,
     )
 
@@ -2950,6 +3059,9 @@ def build_final_result(
         ),
         reconciliation.get(
             "Governance Failure Actual"
+        ),
+        first_failed_check.get(
+            "actual_value"
         ),
         default=None,
     )
@@ -3004,6 +3116,9 @@ def build_final_result(
             ),
             reconciliation.get(
                 "Governance Failure Reason"
+            ),
+             first_failed_check.get(
+                "reason"
             ),
             default="",
         )
@@ -3869,6 +3984,14 @@ def build_final_result(
     result.update({
 
         # ----------------------------------------------------
+        # Recommendation lineage
+        # ----------------------------------------------------
+
+        "Recommendation ID":
+            recommendation_id,
+
+
+        # ----------------------------------------------------
         # Core identity
         # ----------------------------------------------------
 
@@ -4085,6 +4208,17 @@ def build_final_result(
             ),
 
         # ----------------------------------------------------
+        # Market Intelligence snapshot
+        # ----------------------------------------------------
+
+        "market_intelligence":
+            candidate.get(
+                "market_intelligence",
+                {},
+            ),
+
+
+        # ----------------------------------------------------
         # Final result
         # ----------------------------------------------------
 
@@ -4226,15 +4360,6 @@ def calculate_final_portfolio_decision(
     ):
         analysis = {}
 
-    deterministic = (
-        decision
-        if isinstance(
-            decision,
-            dict,
-        )
-        else {}
-    )
-
     # ========================================================
     # PRESERVE THE ORIGINAL PROPOSED ACTION
     #
@@ -4245,18 +4370,27 @@ def calculate_final_portfolio_decision(
     # ========================================================
 
     proposed_action = upper_text(
+
         first_value(
+
             candidate.get("Proposed Action"),
+
             candidate.get("Final Action"),
+
             candidate.get("Capital Allocation Action"),
+
             candidate.get("Action"),
+
             decision.get("Proposed Action"),
+
             decision.get("Action"),
-            deterministic.get("Proposed Action"),
-            deterministic.get("Action"),
+
             default="HOLD",
+
         ),
+
         "HOLD",
+
     )
 
     # ========================================================
@@ -4280,6 +4414,21 @@ def calculate_final_portfolio_decision(
                         "",
                     ),
                 ),
+            ),
+        "Recommendation ID":
+
+            candidate.get(
+
+                "recommendation_id",
+
+                candidate.get(
+
+                    "Recommendation ID",
+
+                    None,
+
+                ),
+
             ),
 
         "Asset Type":

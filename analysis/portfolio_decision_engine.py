@@ -1343,6 +1343,16 @@ def generate_portfolio_decisions(
                 "AI Conviction":
                     conviction,
 
+                "Confidence Score":
+                    safe_float(
+                        get_value(
+                            row,
+                            "Confidence Score",
+                            "confidence_score",
+                            default=None
+                        )
+                    ),
+
                 "Allocation %":
                     allocation,
 

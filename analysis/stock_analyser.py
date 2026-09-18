@@ -15,6 +15,8 @@ from analysis.ai_decision_engine import generate_ai_decision
 
 from analysis.score_calibration import get_calibrated_weights
 
+from analysis.entry_quality import assess_entry_quality
+
 
 
 def analyse_stock(ticker):
@@ -47,7 +49,6 @@ def analyse_stock(ticker):
             ticker
         )
 
-
         if df is None or df.empty:
 
             print(
@@ -56,17 +57,15 @@ def analyse_stock(ticker):
 
             return None
 
-
-
         df = add_indicators(
             df
         )
 
-
+        entry_quality = assess_entry_quality(
+            df
+        )
 
         latest = df.iloc[-1]
-
-
 
         # ---------------------------------
         # Technical score
@@ -76,31 +75,25 @@ def analyse_stock(ticker):
             df
         )
 
-
         technical_score = score_result.get(
             "Technical Score",
             0
         )
-
 
         technical_reasons = score_result.get(
             "Technical Reasons",
             []
         )
 
-
         technical_risks = score_result.get(
             "Technical Risks",
             []
         )
 
-
-
         trend_score = score_result.get(
             "Trend Score",
             0
         )
-
 
         momentum_score = score_result.get(
             "Momentum Score",
@@ -393,7 +386,6 @@ def analyse_stock(ticker):
                 ),
 
 
-
             "Price":
                 round(
                     float(
@@ -429,6 +421,42 @@ def analyse_stock(ticker):
                     2
                 ),
 
+            "Extension SMA50 %":
+                entry_quality.get(
+                    "Extension SMA50 %",
+                ),
+
+            "Extension SMA200 %":
+                entry_quality.get(
+                    "Extension SMA200 %",
+                ),
+
+            "Return 5D %":
+                entry_quality.get(
+                    "Return 5D %",
+                ),
+
+            "Return 10D %":
+                entry_quality.get(
+                    "Return 10D %",
+                ),
+
+            "Return 20D %":
+                entry_quality.get(
+                    "Return 20D %",
+                ),
+
+            "Entry Quality":
+                entry_quality.get(
+                    "Entry Quality",
+                    "UNKNOWN",
+                ),
+
+            "Entry Quality Mode":
+                entry_quality.get(
+                    "Entry Quality Mode",
+                    "SHADOW",
+                ),
 
             "3M Return %":
                 round(

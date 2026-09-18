@@ -43,6 +43,7 @@ Design principles
 from __future__ import annotations
 
 import os
+import json 
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -1141,7 +1142,51 @@ def _collect_audit_reasons(
                 severity="MATERIAL",
             )
 
+    # --------------------------------------------------------
+    # Persist Market Intelligence snapshot.
+    #
+    # Market Intelligence is decision-time context. Store the
+    # exact snapshot supplied to the final decision layer so
+    # historical decision performance can later be evaluated
+    # against what external intelligence said at that time.
+    #
+    # This uses the existing audit_reasons table and does not
+    # change the audit database schema or decision logic.
+    # --------------------------------------------------------
+
+    market_intelligence = first_value(
+        final_result.get("market_intelligence"),
+        final_result.get("Market Intelligence"),
+        default=None,
+    )
+
+    if isinstance(market_intelligence, dict) and market_intelligence:
+        try:
+            market_intelligence_json = json.dumps(
+                market_intelligence,
+                default=str,
+                sort_keys=True,
+            )
+        except (TypeError, ValueError):
+            market_intelligence_json = ""
+
+        if market_intelligence_json:
+            add_reason_once(
+                reason_code="MARKET_INTELLIGENCE_SNAPSHOT",
+                reason_category="MARKET_INTELLIGENCE",
+                reason_description=(
+                    "Market Intelligence snapshot captured at "
+                    "decision time"
+                ),
+                actual_value=market_intelligence_json,
+                threshold_value=None,
+                unit="json",
+                source_layer="market_intelligence",
+                severity="INFO",
+            )
+
     return reasons
+
 
 
 
@@ -1204,6 +1249,18 @@ def record_decision_audit(
             base_row.get("Ticker"),
         ),
         "UNKNOWN",
+    )
+
+    recommendation_id = first_value(
+
+        final_result.get("Recommendation ID"),
+
+        final_result.get("recommendation_id"),
+
+        base_row.get("Recommendation ID"),
+
+        base_row.get("recommendation_id"),
+
     )
 
     asset_type = safe_text(
@@ -1359,6 +1416,7 @@ def record_decision_audit(
             audit_run_id,
             ticker,
             asset_type,
+            recommendation_id,
             original_action,
             proposed_action,
             reconciled_action,
@@ -1381,13 +1439,14 @@ def record_decision_audit(
         VALUES
         (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         """,
         (
             audit_run_id,
             ticker,
             asset_type,
+            recommendation_id,
             original_action,
             proposed_action,
             reconciled_action,

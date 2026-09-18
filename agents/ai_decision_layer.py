@@ -1334,6 +1334,19 @@ def _normalise_candidate(
         "Growth Score":
             growth_score,
 
+        "Entry Quality":
+            normalise_text(
+                analysis.get(
+                    "entry_quality",
+                    get_value(
+                        candidate,
+                        "Entry Quality",
+                        "entry_quality",
+                        default="",
+                    ),
+                )
+            ),
+
         "Confidence":
             rules_confidence,
 
