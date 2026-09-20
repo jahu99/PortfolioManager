@@ -64,6 +64,21 @@ import pandas as pd
 
 DEFAULT_TOP_CANDIDATES = 10
 
+# ============================================================
+# BUY NEW H1 CONTINUATION FILTER
+# ============================================================
+
+# Validated separately using walk-forward OOS testing.
+#
+# H1 is deliberately NOT part of Investment Score.
+# It is a BUY NEW decision-layer feature used to prioritise
+# otherwise eligible candidates.
+#
+# These values must be the frozen thresholds selected by the
+# final BUY NEW H1 validation.
+H1_RSI_THRESHOLD = 55.0
+H1_RETURN_3M_MAX = 25.0
+
 
 # ============================================================
 # HELPERS
@@ -420,8 +435,49 @@ def rank_investment_candidates(df):
 
     candidates = df.copy()
 
+    # --------------------------------------------------------
+    # H1 BUY NEW TIE-BREAKER
+    #
+    # H1 is deliberately NOT part of Investment Score.
+    #
+    # Investment Score remains the primary ranking factor.
+    # H1 is used only to break ties between candidates with
+    # the same Investment Score.
+    #
+    # H1:
+    #   RSI >= 55
+    #   Return 3M <= 25%
+    #
+    # This was selected as the current human-reviewed
+    # calibration from the read-only historical/OOS tests.
+    #
+    # H1 must not:
+    #   - override Investment Score
+    #   - act as a hard eligibility gate
+    #   - override HOLD/governance decisions
+    # --------------------------------------------------------
+
+    if (
+        "RSI" in candidates.columns
+        and "Return_3m" in candidates.columns
+    ):
+        candidates["H1"] = (
+            pd.to_numeric(
+                candidates["RSI"],
+                errors="coerce",
+            ).ge(55.0)
+            &
+            pd.to_numeric(
+                candidates["Return_3m"],
+                errors="coerce",
+            ).le(25.0)
+        )
+    else:
+        candidates["H1"] = False
+
     ranking_columns = [
         "Investment Score",
+        "H1",
         "Technical Score",
         "Quality Score",
         "Growth Score",
@@ -431,9 +487,11 @@ def rank_investment_candidates(df):
     available_columns = []
 
     for column in ranking_columns:
+        if column == "H1":
+            available_columns.append(column)
+            continue
 
         if column in candidates.columns:
-
             candidates[column] = pd.to_numeric(
                 candidates[column],
                 errors="coerce",
@@ -446,9 +504,15 @@ def rank_investment_candidates(df):
 
     candidates = candidates.sort_values(
         by=available_columns,
-        ascending=[False] * len(available_columns),
+        ascending=[
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ][:len(available_columns)],
     ).copy()
-
     # --------------------------------------------------------
     # INVESTMENT SCORE TIER
     #
@@ -587,132 +651,185 @@ def classify_entry_quality(candidate):
 
     return "UNKNOWN"
 
+# ============================================================
+# BUY NEW H1 CONTINUATION ASSESSMENT
+# ============================================================
 
-# ============================================================
-# CANDIDATE REVIEW
-# ============================================================
+def classify_buy_new_h1(candidate):
+    """
+    Classify short-term continuation quality for an otherwise
+    BUY NEW-eligible candidate.
+
+    H1 is deliberately separate from Investment Score and
+    Entry Quality.
+
+    H1 asks:
+
+        "Does this candidate have the short-term momentum
+         characteristics associated with stronger subsequent
+         BUY NEW performance?"
+
+    It does NOT determine whether the underlying investment
+    is attractive and does NOT override governance.
+
+    Returns
+    -------
+    str
+        "H1 STRONG"
+        "H1 NEUTRAL"
+        "H1 DATA INSUFFICIENT"
+    """
+
+    if candidate is None:
+        return "H1 DATA INSUFFICIENT"
+
+    rsi = pd.to_numeric(
+        candidate.get("RSI"),
+        errors="coerce",
+    )
+
+    return_3m = pd.to_numeric(
+        candidate.get(
+            "Return_3m",
+            candidate.get("Return 3M"),
+        ),
+        errors="coerce",
+    )
+
+    # --------------------------------------------------------
+    # Missing evidence
+    # --------------------------------------------------------
+
+    if pd.isna(rsi) or pd.isna(return_3m):
+        return "H1 DATA INSUFFICIENT"
+
+    # --------------------------------------------------------
+    # Validated H1 continuation profile
+    # --------------------------------------------------------
+
+    if (
+        rsi >= H1_RSI_THRESHOLD
+        and return_3m <= H1_RETURN_3M_MAX
+    ):
+        return "H1 STRONG"
+
+    return "H1 NEUTRAL"
+
+
 
 # ============================================================
 # CANDIDATE REVIEW
 # ============================================================
 
 def build_candidate_review(
-
     selected_candidates,
-
 ):
-
     """
+    Add entry timing, BUY NEW eligibility and H1 continuation
+    assessment to selected investment candidates.
 
-    Add entry timing information and BUY NEW eligibility
-    to selected investment candidates.
-
-    This function deliberately keeps two concepts separate:
+    Concepts deliberately remain separate:
 
         Investment Rank
             Which opportunities are the strongest investments?
 
-        BUY NEW Priority Rank
-            Which strong investments are suitable to buy now?
-
-    Entry timing does NOT change Investment Rank.
-
-    Output fields:
-
         Entry Timing Status
+            Is the current entry technically suitable?
 
-        Candidate Status
-
-        BUY NEW Eligible
+        H1 Continuation
+            Does the candidate have the validated short-term
+            momentum characteristics associated with stronger
+            subsequent BUY NEW performance?
 
         BUY NEW Priority Rank
+            Which eligible candidates should receive priority?
 
+    H1 does NOT:
+
+        - change Investment Score
+        - change Investment Rank
+        - change Technical Score
+        - change Entry Quality
+        - make an otherwise ineligible candidate eligible
+        - override governance
+        - override HOLD protection
     """
 
-    if selected_candidates is None or selected_candidates.empty:
-
+    if (
+        selected_candidates is None
+        or selected_candidates.empty
+    ):
         return pd.DataFrame()
 
     candidates = selected_candidates.copy()
 
     timing_statuses = []
-
     candidate_statuses = []
-
     buy_new_eligible = []
+    h1_statuses = []
 
     for _, row in candidates.iterrows():
 
         timing_status = classify_entry_quality(
-
             row
+        )
 
+        h1_status = classify_buy_new_h1(
+            row
         )
 
         timing_statuses.append(
-
             timing_status
+        )
 
+        h1_statuses.append(
+            h1_status
         )
 
         # ----------------------------------------------------
-        # Entry classification
+        # Existing entry classification
+        #
+        # H1 does NOT alter this gate.
         # ----------------------------------------------------
 
         if timing_status == "FAVOURABLE ENTRY":
 
             candidate_statuses.append(
-
                 "STRONG CANDIDATE"
-
             )
 
             buy_new_eligible.append(
-
                 True
-
             )
 
         elif timing_status == "TIMING CAUTION":
 
             candidate_statuses.append(
-
                 "STRONG INVESTMENT - TIMING CAUTION"
-
             )
 
             buy_new_eligible.append(
-
                 False
-
             )
 
         elif timing_status == "HIGH TIMING RISK":
 
             candidate_statuses.append(
-
                 "STRONG INVESTMENT - WAIT FOR ENTRY"
-
             )
 
             buy_new_eligible.append(
-
                 False
-
             )
 
         else:
 
             candidate_statuses.append(
-
                 "CANDIDATE - ENTRY QUALITY UNKNOWN"
-
             )
 
             buy_new_eligible.append(
-
                 False
-
             )
 
     # --------------------------------------------------------
@@ -720,172 +837,159 @@ def build_candidate_review(
     # --------------------------------------------------------
 
     candidates["Entry Timing Status"] = (
-
         timing_statuses
-
     )
 
     candidates["Candidate Status"] = (
-
         candidate_statuses
-
     )
 
     candidates["BUY NEW Eligible"] = (
-
         buy_new_eligible
+    )
 
+    # --------------------------------------------------------
+    # Persist H1 assessment
+    # --------------------------------------------------------
+
+    candidates["BUY NEW H1 Status"] = (
+        h1_statuses
     )
 
     # --------------------------------------------------------
     # BUY NEW PRIORITY RANK
     #
-    # IMPORTANT:
+    # Existing Investment Rank remains authoritative for
+    # investment attractiveness.
     #
-    # Investment Rank remains unchanged.
+    # H1 is used only to prioritise candidates that have
+    # already passed the BUY NEW eligibility gate.
     #
-    # Only candidates suitable for entry NOW receive
-    # a BUY NEW Priority Rank.
+    # Priority:
     #
-    # Their priority follows the existing Investment Rank.
+    #   1. H1 STRONG
+    #   2. H1 NEUTRAL
+    #   3. H1 DATA INSUFFICIENT
+    #
+    # Within each H1 group:
+    #
+    #   Investment Rank
+    #
+    # Therefore H1 cannot rescue a weak investment candidate;
+    # it only differentiates otherwise eligible candidates.
     # --------------------------------------------------------
 
     candidates["BUY NEW Priority Rank"] = pd.NA
 
     eligible_mask = (
-
         candidates["BUY NEW Eligible"]
-
         .fillna(False)
-
         .astype(bool)
-
     )
 
     eligible_candidates = (
-
-        candidates.loc[eligible_mask]
-
+        candidates.loc[
+            eligible_mask
+        ]
         .copy()
-
     )
 
     if not eligible_candidates.empty:
 
+        h1_priority = {
+            "H1 STRONG": 0,
+            "H1 NEUTRAL": 1,
+            "H1 DATA INSUFFICIENT": 2,
+        }
+
+        eligible_candidates["_H1 Priority"] = (
+            eligible_candidates[
+                "BUY NEW H1 Status"
+            ]
+            .map(
+                h1_priority
+            )
+            .fillna(2)
+        )
+
         # ----------------------------------------------------
-        # Preserve Investment Rank ordering where available.
+        # Investment Rank remains the tie-breaker.
         # ----------------------------------------------------
 
         if "Investment Rank" in eligible_candidates.columns:
 
             eligible_candidates = (
-
                 eligible_candidates
-
                 .sort_values(
-
-                    by="Investment Rank",
-
-                    ascending=True,
-
+                    by=[
+                        "_H1 Priority",
+                        "Investment Rank",
+                    ],
+                    ascending=[
+                        True,
+                        True,
+                    ],
                     na_position="last",
-
                 )
-
                 .copy()
-
             )
 
         else:
 
             # Fallback ordering if Investment Rank is absent.
-            #
-            # This should normally not be used because
-            # select_buy_new_candidates() creates Investment Rank
-            # before calling build_candidate_review().
+            sort_columns = [
+                "_H1 Priority",
+            ]
 
-            sort_columns = []
-
-            ascending = []
+            ascending = [
+                True,
+            ]
 
             for column in (
-
                 "Investment Score",
-
                 "Technical Score",
-
                 "Quality Score",
-
                 "Growth Score",
-
                 "Confidence Score",
-
             ):
 
                 if column in eligible_candidates.columns:
 
                     sort_columns.append(
-
                         column
-
                     )
 
                     ascending.append(
-
                         False
-
                     )
 
-            if sort_columns:
-
-                eligible_candidates = (
-
-                    eligible_candidates
-
-                    .sort_values(
-
-                        by=sort_columns,
-
-                        ascending=ascending,
-
-                        na_position="last",
-
-                    )
-
-                    .copy()
-
+            eligible_candidates = (
+                eligible_candidates
+                .sort_values(
+                    by=sort_columns,
+                    ascending=ascending,
+                    na_position="last",
                 )
-
-        eligible_candidates["BUY NEW Priority Rank"] = (
-
-            range(
-
-                1,
-
-                len(eligible_candidates) + 1,
-
+                .copy()
             )
 
+        eligible_candidates[
+            "BUY NEW Priority Rank"
+        ] = range(
+            1,
+            len(eligible_candidates) + 1,
         )
 
         candidates.loc[
-
             eligible_candidates.index,
-
-            "BUY NEW Priority Rank"
-
+            "BUY NEW Priority Rank",
         ] = (
-
             eligible_candidates[
-
                 "BUY NEW Priority Rank"
-
             ]
-
         )
 
     return candidates
-
 # ============================================================
 # COMPLETE CANDIDATE PIPELINE
 # ============================================================

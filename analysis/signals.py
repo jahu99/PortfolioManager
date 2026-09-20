@@ -44,6 +44,12 @@ HOLD remains the preferred default where there is insufficient
 evidence for a stronger action.
 """
 
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+STRONG_BUY_MIN_TECHNICAL_SCORE = 85.0
+
 
 def generate_signal(
     investment_score,
@@ -89,7 +95,7 @@ def generate_signal(
 
     if (
         investment_score >= 80
-        and technical_score >= 75
+        and technical_score >= STRONG_BUY_MIN_TECHNICAL_SCORE
         and quality_score >= 60
         and price > sma200
         and 40 <= rsi <= 75
