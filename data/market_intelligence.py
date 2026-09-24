@@ -607,19 +607,41 @@ def _extract_news(
 
 
     if company_name:
-
         company_identifier = (
             str(company_name)
             .strip()
             .lower()
         )
 
-        if company_identifier:
+        # Remove common corporate suffixes so that
+        # "NVIDIA Corporation" matches "Nvidia" in
+        # a news headline.
+        corporate_suffixes = [
+            " corporation",
+            " corp.",
+            " corp",
+            " incorporated",
+            " inc.",
+            " inc",
+            " limited",
+            " ltd.",
+            " ltd",
+            " plc",
+        ]
 
+        for suffix in corporate_suffixes:
+            if company_identifier.endswith(suffix):
+                company_identifier = (
+                    company_identifier[
+                        :-len(suffix)
+                    ].strip()
+                )
+                break
+
+        if company_identifier:
             company_identifiers.append(
                 company_identifier
             )
-
 
     for item in news[:limit]:
 

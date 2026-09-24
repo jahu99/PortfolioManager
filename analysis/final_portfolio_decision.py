@@ -1137,7 +1137,14 @@ def build_eligible_population(
         population[ticker] = base
 
     # ============================================================
-    # 2. NON-OWNED BUY NEW OPPORTUNITIES ONLY
+    # 2. NON-OWNED BUY NEW OPPORTUNITIES
+    #
+    # Capital Allocation is authoritative for the BUY NEW
+    # candidate population.
+    #
+    # Portfolio Decisions may enrich the candidate with analytical
+    # decision-layer information, but must not determine whether
+    # the candidate enters the final-decision population.
     # ============================================================
 
     for ticker, allocation_row in capital_lookup.items():
@@ -1148,6 +1155,10 @@ def build_eligible_population(
         if ticker == "CASH":
             continue
 
+        # --------------------------------------------------------
+        # BUY NEW eligibility comes from Capital Allocation.
+        # --------------------------------------------------------
+
         action = get_capital_action(
             allocation_row
         )
@@ -1155,80 +1166,112 @@ def build_eligible_population(
         if action != "BUY NEW":
             continue
 
-        base = dict(allocation_row)
+        entry_quality = upper_text(
+            row_value(
+                allocation_row,
+                "Entry Quality",
+                default=""
+            )
+        )
+
+        valuation = upper_text(
+            row_value(
+                allocation_row,
+                "Valuation",
+                default="UNKNOWN"
+            ),
+            "UNKNOWN",
+        )
+
+        if entry_quality not in (
+            "REASONABLE",
+            "MODERATELY EXTENDED",
+        ):
+            continue
+
+        if valuation == "OVERVALUED":
+            continue
 
         # --------------------------------------------------------
-        # Preserve analytical decision data if available.
+        # Start with the analytical decision-layer record when
+        # available.
+        #
+        # Capital Allocation remains the source of eligibility.
         # --------------------------------------------------------
 
-        decision_row = decision_lookup.get(ticker)
+        decision_row = decision_lookup.get(
+            ticker
+        )
 
         if decision_row:
+            base = dict(
+                decision_row
+            )
 
+            # Capital Allocation can enrich the record.
             overlay_non_missing(
                 base,
-                decision_row,
+                allocation_row,
             )
 
-            # Explicitly preserve Investment Score.
-            decision_score = decision_row.get(
+            # ----------------------------------------------------
+            # Preserve analytical decision-layer fields.
+            # ----------------------------------------------------
+
+            if (
                 "Investment Score"
-            )
+                in decision_row
+            ):
+                base[
+                    "Investment Score"
+                ] = decision_row[
+                    "Investment Score"
+                ]
 
-            if not has_real_score(decision_score):
-
-                decision_score = decision_row.get(
-                    "investment_score"
-                )
-
-            if not has_real_score(decision_score):
-
-                decision_score = decision_row.get(
-                    "Score"
-                )
-
-            if has_real_score(decision_score):
-
-                base["Investment Score"] = (
-                    decision_score
-                )
-
-            # Explicitly preserve Confidence Score.
-            decision_confidence = decision_row.get(
+            if (
                 "Confidence Score"
-            )
-            if is_missing(decision_confidence):
-                decision_confidence = decision_row.get(
-                    "confidence_score"
-                )
-            if not is_missing(decision_confidence):
-                base["Confidence Score"] = (
-                    decision_confidence
-                )
+                in decision_row
+            ):
+                base[
+                    "Confidence Score"
+                ] = decision_row[
+                    "Confidence Score"
+                ]
 
-            decision_signal = decision_row.get(
+            if (
                 "Signal"
+                in decision_row
+            ):
+                base[
+                    "Signal"
+                ] = decision_row[
+                    "Signal"
+                ]
+
+        else:
+            # Candidate may legitimately exist in Capital
+            # Allocation without a corresponding Portfolio
+            # Decisions row. It must still enter the final
+            # decision population.
+            base = dict(
+                allocation_row
             )
 
-            if is_missing(decision_signal):
+        # --------------------------------------------------------
+        # Explicit ownership state for a new position.
+        # --------------------------------------------------------
 
-                decision_signal = decision_row.get(
-                    "signal"
-                )
+        base[
+            "Existing Holding"
+        ] = False
 
-            if is_missing(decision_signal):
+        base[
+            "Owned"
+        ] = False
 
-                decision_signal = decision_row.get(
-                    "Momentum Signal"
-                )
-
-            if not is_missing(decision_signal):
-
-                base["Signal"] = decision_signal
-
-        base["Existing Holding"] = False
-        base["Owned"] = False
-        base["Quantity"] = 0.0
+        base[
+            "Quantity"
+        ] = 0.0
 
         population[ticker] = base
 
@@ -5368,6 +5411,15 @@ def generate_final_portfolio_decisions(
         # Allocation explicitly proposes BUY NEW.
         # ----------------------------------------------------
 
+        # Ownership is authoritative from the holdings-derived
+        # lookup built at the start of build_eligible_population().
+        #
+        # Do not re-evaluate ownership from the current decision
+        # or capital-allocation row.
+
+        # Determine ownership directly from the portfolio summary.
+        # A positive Quantity/Shares value is authoritative.
+
         owned = False
 
         summary = normalise_tickers(
@@ -5399,8 +5451,10 @@ def generate_final_portfolio_decisions(
                     matches.iloc[0].to_dict()
                 )
 
-                owned = is_owned(
-                    holding_record
+                owned = (
+                    get_quantity(
+                        holding_record
+                    ) > 0
                 )
 
         proposed_action = get_capital_action(

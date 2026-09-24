@@ -1206,6 +1206,22 @@ def generate_capital_allocation(
                         )
                     ).strip().upper(),
 
+                # ------------------------------------------------
+                # VALUATION — SHADOW
+                #
+                # Calculated upstream in main.py.
+                #
+                # This is telemetry only at this stage.
+                # It does NOT affect BUY NEW eligibility.
+                # ------------------------------------------------
+                "Valuation":
+                    str(
+                        row.get(
+                            "Valuation",
+                            "UNKNOWN"
+                        )
+                    ).strip().upper(),
+
                 "Extension SMA50 %":
                     safe_float(
                         row.get(
@@ -1314,14 +1330,40 @@ def generate_capital_allocation(
     # ========================================================
 
     buy_candidates = {
+
         ticker: candidate
+
         for ticker, candidate in buy_candidates.items()
+
         if (
+
             candidate["Action"] != "BUY NEW"
-            or candidate.get("Entry Quality", "").strip().upper() == "REASONABLE"
+
+            or (
+
+                candidate.get(
+                    "Entry Quality",
+                    ""
+                ).strip().upper() in (
+                    "REASONABLE",
+                    "MODERATELY EXTENDED",
+                )
+
+                and
+
+                candidate.get(
+                    "Valuation",
+                    "UNKNOWN"
+                ).strip().upper() != "OVERVALUED"
+
+            )
+
         )
+
     }
 
+
+    
     # ========================================================
     # RANK ALL BUY OPPORTUNITIES TOGETHER
     #
@@ -1890,6 +1932,8 @@ def generate_capital_allocation(
         "Reduction Rank",
         "Investment Rank",
         "Investment Score",
+        "Entry Quality",
+        "Valuation",
 
     ]
 

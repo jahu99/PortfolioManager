@@ -5588,7 +5588,7 @@ def create_report(
             "Earnings Status",
             "Next Earnings Date",
             "News Count",
-            "News Headlines",
+            "Recent News",
             "Collected At",
             "Source",
         ]

@@ -151,6 +151,13 @@ from analysis.candidate_selection import (
     select_buy_new_candidates,
 )
 
+from analysis.valuation import (
+    assess_valuation,
+    summarise_valuation,
+    valuation_diagnostics,
+    valuation_threshold_diagnostics,
+    valuation_evidence_diagnostics,
+)
 
 def main():
 
@@ -467,6 +474,10 @@ def main():
             fundamentals = get_fundamentals(
                 ticker
             )
+
+            valuation = assess_valuation(
+                fundamentals
+        )
 
             quality_score, quality_reasons = (
                 score_quality(
@@ -835,12 +846,55 @@ def main():
                             0
                         ),
 
+                    # Valuation — SHADOW
+
+                    "PE Ratio":
+                        valuation.get(
+                            "PE Ratio"
+                        ),
+
+                    "Forward PE":
+                        valuation.get(
+                            "Forward PE"
+                        ),
+
+                    "PEG Ratio":
+                        valuation.get(
+                            "PEG Ratio"
+                        ),
+
+                    "Price to Sales":
+                        valuation.get(
+                            "Price to Sales"
+                        ),
+
+                    "EV to EBITDA":
+                        valuation.get(
+                            "EV to EBITDA"
+                        ),
+
+                    "Free Cash Flow":
+                        valuation.get(
+                            "Free Cash Flow"
+                        ),
+
+                    "Valuation":
+                        valuation.get(
+                            "Valuation",
+                            "UNKNOWN"
+                        ),
+
+                    "Valuation Mode":
+                        valuation.get(
+                            "Valuation Mode",
+                            "SHADOW"
+                        ),
+
                     "Sector":
                         fundamentals.get(
                             "Sector",
                             "Unknown"
                         ),
-
                     "Industry":
                         fundamentals.get(
                             "Industry",
@@ -1024,12 +1078,84 @@ def main():
                 )
 
     # ---------------------------------
+    # Valuation Calibration — SHADOW
+    # ---------------------------------
+
+    valuation_summary = summarise_valuation(
+        results
+    )
+
+    print(
+        "\nVALUATION CALIBRATION — SHADOW"
+    )
+
+    print(
+        f"Total analysed: "
+        f"{valuation_summary['Total']}"
+    )
+
+    print(
+        f"UNDERVALUED: "
+        f"{valuation_summary['UNDERVALUED']}"
+    )
+
+    print(
+        f"WELL VALUED: "
+        f"{valuation_summary['WELL VALUED']}"
+    )
+
+    print(
+        f"OVERVALUED: "
+        f"{valuation_summary['OVERVALUED']}"
+    )
+
+    print(
+        f"UNKNOWN: "
+        f"{valuation_summary['UNKNOWN']}"
+    )
+
+    # ---------------------------------
+    # Valuation Classification Detail
+    # ---------------------------------
+
+    valuation_details = valuation_diagnostics(
+        results
+    )
+
+    threshold_counts = valuation_threshold_diagnostics(
+        results
+    )
+
+    print(
+        "\nVALUATION THRESHOLD DIAGNOSTICS — SHADOW"
+    )
+
+    for metric, count in threshold_counts.items():
+
+        print(
+            f"{metric}: {count}"
+        )
+
+    valuation_evidence = valuation_evidence_diagnostics(results)
+
+    print("\nVALUATION EVIDENCE DIAGNOSTICS — SHADOW")
+
+    for item in valuation_evidence:
+        print(
+            f"{item['Ticker']} | "
+            f"Earnings={item['Earnings Expensive']} | "
+            f"Growth={item['Growth Expensive']} | "
+            f"Enterprise/Revenue={item['Enterprise/Revenue Expensive']}"
+        )
+    # ---------------------------------
     # Rank stocks
     # ---------------------------------
 
     print(
         f"RESULTS BEFORE SORT: {len(results)}"
     )
+
+
 
     results = sorted(
         results,
@@ -1163,6 +1289,16 @@ def main():
             )
         )
 
+        print("\n========== SECTOR SUMMARY ==========")
+        print(sector_summary.to_string(index=False))
+
+        print("\n========== PORTFOLIO OPTIMISATION ==========")
+        print(portfolio_optimisation.to_string(index=False))
+
+        print("\n========== REBALANCE RECOMMENDATIONS ==========")
+        print(rebalance_recommendations.to_string(index=False))
+
+
         portfolio_health = (
             calculate_portfolio_health(
                 portfolio_summary,
@@ -1209,12 +1345,17 @@ def main():
         )
 
         portfolio_decisions = (
-            generate_portfolio_decisions(
-                portfolio_summary,
-                buy_new_candidates
-            )
-        )
 
+            generate_portfolio_decisions(
+
+                portfolio_summary,
+
+                pd.DataFrame(results)
+
+            )
+
+        )
+    
         print(
             "\nPORTFOLIO DECISIONS"
         )
@@ -1659,7 +1800,7 @@ def main():
         print(
             f"Recommendation Intelligence skipped: {e}"
         )
-
+    
     # ---------------------------------
     # Final Portfolio Decisions
     # ---------------------------------

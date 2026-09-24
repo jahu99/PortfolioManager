@@ -64,6 +64,8 @@ import pandas as pd
 
 DEFAULT_TOP_CANDIDATES = 10
 
+MAX_BUY_NEW_DECISIONS = 3
+
 # ============================================================
 # BUY NEW H1 CONTINUATION FILTER
 # ============================================================
@@ -1002,7 +1004,7 @@ def select_buy_new_candidates(
 
     df,
 
-    top_n=DEFAULT_TOP_CANDIDATES,
+    top_n=MAX_BUY_NEW_DECISIONS,
 
 ):
 

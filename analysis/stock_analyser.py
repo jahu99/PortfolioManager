@@ -17,6 +17,7 @@ from analysis.score_calibration import get_calibrated_weights
 
 from analysis.entry_quality import assess_entry_quality
 
+from analysis.valuation import assess_valuation
 
 
 def analyse_stock(ticker):
@@ -122,7 +123,9 @@ def analyse_stock(ticker):
             ticker
         )
 
-
+        valuation = assess_valuation(
+            fundamentals
+        )
 
         quality_score, quality_reasons = score_quality(
             fundamentals
@@ -495,6 +498,48 @@ def analyse_stock(ticker):
                 fundamentals.get(
                     "Debt to Equity",
                     0
+                ),
+
+            "PE Ratio":
+                fundamentals.get(
+                    "PE Ratio"
+                ),
+
+            "Forward PE":
+                fundamentals.get(
+                    "Forward PE"
+                ),
+
+            "PEG Ratio":
+                fundamentals.get(
+                    "PEG Ratio"
+                ),
+
+            "Price to Sales":
+                fundamentals.get(
+                    "Price to Sales"
+                ),
+
+            "EV to EBITDA":
+                fundamentals.get(
+                    "EV to EBITDA"
+                ),
+
+            "Free Cash Flow":
+                fundamentals.get(
+                    "Free Cash Flow"
+                ),
+
+            "Valuation":
+                valuation.get(
+                    "Valuation",
+                    "UNKNOWN"
+                ),
+
+            "Valuation Mode":
+                valuation.get(
+                    "Valuation Mode",
+                    "SHADOW"
                 ),
 
 

@@ -156,18 +156,20 @@ def score_quality(fundamentals):
     # -----------------------------
 
     free_cash_flow = fundamentals.get(
-        "Free Cash Flow",
-        0
-    )
+    "Free Cash Flow"
+)
+
+    if free_cash_flow is None:
+        free_cash_flow = 0
 
 
-    if free_cash_flow > 0:
+        if free_cash_flow > 0:
 
-        score += 5
+            score += 5
 
-        reasons.append(
-            "Positive free cash flow"
-        )
+            reasons.append(
+                "Positive free cash flow"
+            )
 
 
 
