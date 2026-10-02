@@ -64,9 +64,6 @@ from analysis.recommendation_intelligence import (
     generate_recommendation_intelligence
 )
 
-from analysis.factor_performance import (
-    calculate_factor_performance
-)
 
 from analysis.ai_recommendation import (
     generate_ai_recommendation
@@ -89,7 +86,6 @@ from analysis.portfolio_manager import (
     generate_portfolio_manager_review
 )
 
-from agents.orchestrator import run_ai_agents
 
 from analysis.portfolio_growth_engine import (
     generate_growth_plan
@@ -284,7 +280,6 @@ def main():
     horizon_performance = pd.DataFrame()
     score_performance = pd.DataFrame()
     signal_horizon_performance = pd.DataFrame()
-    score_horizon_performance = pd.DataFrame()
     score_bucket_performance = pd.DataFrame()
     component_score_performance = pd.DataFrame()
 
@@ -308,10 +303,6 @@ def main():
 
         signal_horizon_performance = (
             get_signal_horizon_performance()
-        )
-
-        score_horizon_performance = (
-            get_score_horizon_performance()
         )
 
         score_bucket_performance = (
@@ -437,11 +428,6 @@ def main():
 
             technical_reasons = score_result.get(
                 "Technical Reasons",
-                []
-            )
-
-            technical_risks = score_result.get(
-                "Technical Risks",
                 []
             )
 
@@ -1437,23 +1423,7 @@ def main():
             )
         )
 
-        try:
-
-            ai_reviews = run_ai_agents(
-                results,
-                portfolio_summary,
-                sector_summary,
-                portfolio_health
-            )
-
-        except Exception as e:
-
-            print(
-                f"AI agents skipped: {e}"
-            )
-
-            ai_reviews = []
-
+        
         decisions = generate_decisions(
             portfolio_summary,
             results,
@@ -1965,12 +1935,6 @@ def main():
         weight_learning[
             "Recommended Weights"
         ]
-    )
-
-    factor_performance = (
-        calculate_factor_performance(
-            recommendation_history
-        )
     )
 
     print(

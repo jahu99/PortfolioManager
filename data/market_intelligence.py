@@ -565,57 +565,33 @@ def _extract_earnings_date(calendar):
 # ============================================================
 
 def _extract_news(
-
     news,
-
     ticker=None,
-
     company_name=None,
-
     limit=5
-
 ):
-
     if not news:
-
         return []
-
 
     articles = []
 
-
-    # ====================================================
-    # BUILD COMPANY IDENTIFIERS
-    # ====================================================
-
     company_identifiers = []
 
-
     if ticker:
-
-        ticker_identifier = (
-            str(ticker)
-            .strip()
-            .lower()
-        )
+        ticker_identifier = str(
+            ticker
+        ).strip().lower()
 
         if ticker_identifier:
-
             company_identifiers.append(
                 ticker_identifier
             )
 
-
     if company_name:
-        company_identifier = (
-            str(company_name)
-            .strip()
-            .lower()
-        )
+        company_identifier = str(
+            company_name
+        ).strip().lower()
 
-        # Remove common corporate suffixes so that
-        # "NVIDIA Corporation" matches "Nvidia" in
-        # a news headline.
         corporate_suffixes = [
             " corporation",
             " corp.",
@@ -630,7 +606,9 @@ def _extract_news(
         ]
 
         for suffix in corporate_suffixes:
-            if company_identifier.endswith(suffix):
+            if company_identifier.endswith(
+                suffix
+            ):
                 company_identifier = (
                     company_identifier[
                         :-len(suffix)
@@ -643,326 +621,260 @@ def _extract_news(
                 company_identifier
             )
 
-    for item in news[:limit]:
+    # ========================================================
+    # PROCESS ALL RESULTS
+    #
+    # Search().news returns flat article dictionaries.
+    # Do not apply the limit before filtering/parsing.
+    # ========================================================
+
+    for item in news:
 
         try:
 
+            if not isinstance(
+                item,
+                dict
+            ):
+                continue
+
             # ====================================================
-            # NEW YAHOO FINANCE STRUCTURE
+            # SUPPORT CURRENT yf.Search().news STRUCTURE
             # ====================================================
 
-            content = item.get(
-
-                "content",
-
-                {}
-
-            ) or {}
-
-
-            title = content.get(
-
+            title = item.get(
                 "title"
-
             )
-
 
             description = (
-
-                content.get(
-
+                item.get(
                     "summary"
-
                 )
-
-                or
-
-                content.get(
-
+                or item.get(
                     "description"
-
                 )
-
             )
 
-
-            provider = content.get(
-
-                "provider",
-
-                {}
-
-            ) or {}
-
-
-            publisher = provider.get(
-
-                "displayName"
-
+            publisher = item.get(
+                "publisher"
             )
 
-
-            published_at = content.get(
-
+            published_at = item.get(
                 "pubDate"
-
             )
 
-
-            canonical_url = (
-
-                content.get(
-
-                    "canonicalUrl",
-
-                    {}
-
-                )
-
-                or
-
-                content.get(
-
-                    "clickThroughUrl",
-
-                    {}
-
-                )
-
-                or {}
-
+            link = item.get(
+                "link"
             )
-
-
-            link = canonical_url.get(
-
-                "url"
-
-            )
-
-
-            # ====================================================
-            # BACKWARDS COMPATIBILITY
-            # ====================================================
-
-            if not title:
-
-                title = item.get(
-
-                    "title"
-
-                )
-
-
-            if not description:
-
-                description = (
-
-                    item.get(
-
-                        "summary"
-
-                    )
-
-                    or
-
-                    item.get(
-
-                        "description"
-
-                    )
-
-                )
-
-
-            if not publisher:
-
-                publisher = item.get(
-
-                    "publisher"
-
-                )
-
 
             if not published_at:
-
                 publish_time = item.get(
-
                     "providerPublishTime"
-
                 )
-
 
                 if publish_time:
-
                     try:
-
                         published_at = (
-
                             datetime.fromtimestamp(
-
                                 publish_time,
-
                                 tz=timezone.utc
-
                             ).isoformat()
-
                         )
-
                     except Exception:
-
                         published_at = None
 
-
-            if not link:
-
-                link = item.get(
-
-                    "link"
-
-                )
-
-
             # ====================================================
-            # ONLY KEEP VALID ARTICLES
+            # SUPPORT LEGACY NESTED STRUCTURE
             # ====================================================
 
             if not title:
 
+                content = (
+                    item.get(
+                        "content",
+                        {}
+                    )
+                    or {}
+                )
+
+                title = content.get(
+                    "title"
+                )
+
+                description = (
+                    content.get(
+                        "summary"
+                    )
+                    or content.get(
+                        "description"
+                    )
+                    or description
+                )
+
+                provider = (
+                    content.get(
+                        "provider",
+                        {}
+                    )
+                    or {}
+                )
+
+                publisher = (
+                    provider.get(
+                        "displayName"
+                    )
+                    or publisher
+                )
+
+                published_at = (
+                    content.get(
+                        "pubDate"
+                    )
+                    or published_at
+                )
+
+                canonical_url = (
+                    content.get(
+                        "canonicalUrl",
+                        {}
+                    )
+                    or content.get(
+                        "clickThroughUrl",
+                        {}
+                    )
+                    or {}
+                )
+
+                link = (
+                    canonical_url.get(
+                        "url"
+                    )
+                    or link
+                )
+
+            if not title:
                 continue
 
-
             # ====================================================
-            # COMPANY RELEVANCE FILTER
+            # RELEVANCE
             #
-            # Only retain articles where the company name
-            # or ticker is explicitly mentioned in the title
-            # or description.
+            # yf.Search() is already ticker-scoped.
+            #
+            # If relatedTickers are supplied, use them.
+            # If Yahoo supplies an empty relatedTickers list,
+            # do not reject the article because of that.
             # ====================================================
 
-            searchable_text = " ".join(
-
-                [
-
-                    str(title or ""),
-
-                    str(description or ""),
-
-                ]
-
-            ).lower()
-
-
-            is_relevant = any(
-
-                identifier in searchable_text
-
-                for identifier in company_identifiers
-
-                if identifier
-
+            related_tickers = item.get(
+                "relatedTickers"
             )
 
+            if related_tickers:
 
-            if not is_relevant:
+                related_tickers = {
+                    str(
+                        value
+                    ).strip().lower()
+                    for value in related_tickers
+                }
 
-                continue
+                ticker_identifier = (
+                    str(
+                        ticker
+                    ).strip().lower()
+                    if ticker
+                    else None
+                )
 
+                if (
+                    ticker_identifier
+                    and ticker_identifier
+                    not in related_tickers
+                ):
+                    searchable_text = " ".join(
+                        [
+                            str(
+                                title
+                                or ""
+                            ),
+                            str(
+                                description
+                                or ""
+                            ),
+                        ]
+                    ).lower()
 
-            # ====================================================
-            # BUILD NORMALISED ARTICLE
-            # ====================================================
+                    is_relevant = any(
+                        identifier
+                        in searchable_text
+                        for identifier
+                        in company_identifiers
+                        if identifier
+                    )
+
+                    if not is_relevant:
+                        continue
 
             article = {
+                "Title": str(
+                    title
+                ),
 
-                "Title":
-
+                "Description": (
                     str(
-
-                        title
-
-                    ),
-
-
-                "Description":
-
-                    str(
-
                         description
-
                     )
-
                     if description
+                    else None
+                ),
 
-                    else None,
-
-
-                "Publisher":
-
+                "Publisher": (
                     str(
-
                         publisher
-
                     )
-
                     if publisher
+                    else None
+                ),
 
-                    else None,
-
-
-                "Published At":
-
+                "Published At": (
                     str(
-
                         published_at
-
                     )
-
                     if published_at
+                    else None
+                ),
 
-                    else None,
-
-
-                "Link":
-
+                "Link": (
                     str(
-
                         link
-
                     )
-
                     if link
-
-                    else None,
-
+                    else None
+                ),
             }
 
-
             articles.append(
-
                 article
-
             )
 
+            if len(
+                articles
+            ) >= limit:
+                break
 
         except Exception:
-
             continue
 
-
     return articles
+
 # ============================================================
 # MAIN COLLECTION FUNCTION
 # ============================================================
 
 def collect_market_intelligence(
-
     ticker,
-
     company_name=None,
-
     force_refresh=False
-
 ):
 
     """
@@ -979,7 +891,6 @@ def collect_market_intelligence(
         ticker
     ).upper().strip()
 
-
     # ========================================================
     # CACHE
     # ========================================================
@@ -992,18 +903,13 @@ def collect_market_intelligence(
             )
         )
 
-
         if cached is not None:
 
             return cached
 
-
     print(
-
         f"Collecting market intelligence: {ticker}"
-
     )
-
 
     # ========================================================
     # DEFAULT RESULT
@@ -1012,78 +918,52 @@ def collect_market_intelligence(
     intelligence = {
 
         "Ticker":
-
             ticker,
 
-
         "Collected At":
-
             datetime.now(
                 timezone.utc
             ).isoformat(),
 
-
         "Source":
-
             "Yahoo Finance",
 
-
         "Analyst Recommendation":
-
             "UNKNOWN",
-
 
         "Analyst Mean Score":
-
             None,
-
 
         "Analyst Target Mean":
-
             None,
-
 
         "Analyst Target High":
-
             None,
-
 
         "Analyst Target Low":
-
             None,
-
 
         "Current Price":
-
             None,
-
 
         "Analyst Target Upside %":
-
             None,
-
 
         "Next Earnings Date":
-
             None,
 
-
         "Earnings Status":
-
             "UNKNOWN",
 
-
         "News Count":
-
             0,
 
-
-        "Recent News":
-
+        "News Headlines":
             [],
 
+        "Recent News":
+            [],
     }
-
 
     # ========================================================
     # YAHOO FINANCE
@@ -1095,24 +975,18 @@ def collect_market_intelligence(
             ticker
         )
 
-
     except Exception as exc:
 
         print(
-
             f"Unable to initialise Yahoo Finance "
             f"for {ticker}: {exc}"
-
         )
-
 
         intelligence[
             "Source"
         ] = "UNAVAILABLE"
 
-
         return intelligence
-
 
     # ========================================================
     # ANALYST + PRICE TARGET INTELLIGENCE
@@ -1122,299 +996,39 @@ def collect_market_intelligence(
 
         info = stock.info or {}
 
-
-        # ----------------------------------------------------
-        # PRIMARY ANALYST RECOMMENDATION
-        # ----------------------------------------------------
-
         recommendation = info.get(
             "recommendationKey"
         )
 
-
-        normalised_recommendation = (
-            _normalise_recommendation(
-                recommendation
-            )
+        intelligence[
+            "Analyst Recommendation"
+        ] = _normalise_recommendation(
+            recommendation
         )
-
 
         mean_score = info.get(
             "recommendationMean"
         )
 
-
         if mean_score is not None:
 
-            try:
-
-                mean_score = float(
-                    mean_score
-                )
-
-            except (
-                TypeError,
-                ValueError
-            ):
-
-                mean_score = None
-
-
-        # ----------------------------------------------------
-        # FALLBACK ANALYST DATA
-        #
-        # Yahoo can return:
-        #
-        # recommendationKey = "none"
-        # recommendationMean = None
-        #
-        # while still providing valid analyst consensus data
-        # through stock.recommendations.
-        # ----------------------------------------------------
-
-        if (
-
-            normalised_recommendation == "UNKNOWN"
-
-            or
-
-            mean_score is None
-
-        ):
-
-            try:
-
-                recommendations = (
-                    stock.recommendations
-                )
-
-
-                if (
-
-                    recommendations is not None
-
-                    and
-
-                    not recommendations.empty
-
-                ):
-
-                    # Latest Yahoo consensus period.
-
-                    latest = (
-                        recommendations.iloc[0]
-                    )
-
-
-                    strong_buy = float(
-
-                        latest.get(
-                            "strongBuy",
-                            0
-                        ) or 0
-
-                    )
-
-
-                    buy = float(
-
-                        latest.get(
-                            "buy",
-                            0
-                        ) or 0
-
-                    )
-
-
-                    hold = float(
-
-                        latest.get(
-                            "hold",
-                            0
-                        ) or 0
-
-                    )
-
-
-                    sell = float(
-
-                        latest.get(
-                            "sell",
-                            0
-                        ) or 0
-
-                    )
-
-
-                    strong_sell = float(
-
-                        latest.get(
-                            "strongSell",
-                            0
-                        ) or 0
-
-                    )
-
-
-                    total = (
-
-                        strong_buy
-
-                        + buy
-
-                        + hold
-
-                        + sell
-
-                        + strong_sell
-
-                    )
-
-
-                    if total > 0:
-
-                        # Yahoo convention:
-                        #
-                        # 1 = Strong Buy
-                        # 2 = Buy
-                        # 3 = Hold
-                        # 4 = Sell
-                        # 5 = Strong Sell
-
-                        fallback_mean_score = (
-
-                            (
-
-                                strong_buy * 1
-
-                                + buy * 2
-
-                                + hold * 3
-
-                                + sell * 4
-
-                                + strong_sell * 5
-
-                            )
-
-                            /
-
-                            total
-
-                        )
-
-
-                        fallback_mean_score = round(
-
-                            fallback_mean_score,
-
-                            5
-
-                        )
-
-
-                        # Only use the fallback score when
-                        # Yahoo's direct score is unavailable.
-
-                        if mean_score is None:
-
-                            mean_score = (
-                                fallback_mean_score
-                            )
-
-
-                        # Only derive the recommendation when
-                        # Yahoo's direct recommendation is
-                        # unavailable.
-
-                        if (
-
-                            normalised_recommendation
-                            == "UNKNOWN"
-
-                        ):
-
-                            if fallback_mean_score <= 1.5:
-
-                                normalised_recommendation = (
-                                    "STRONG BUY"
-                                )
-
-
-                            elif fallback_mean_score <= 2.5:
-
-                                normalised_recommendation = (
-                                    "BUY"
-                                )
-
-
-                            elif fallback_mean_score <= 3.5:
-
-                                normalised_recommendation = (
-                                    "HOLD"
-                                )
-
-
-                            elif fallback_mean_score <= 4.5:
-
-                                normalised_recommendation = (
-                                    "SELL"
-                                )
-
-
-                            else:
-
-                                normalised_recommendation = (
-                                    "STRONG SELL"
-                                )
-
-
-            except Exception as exc:
-
-                print(
-
-                    f"Analyst recommendation fallback "
-                    f"unavailable for {ticker}: {exc}"
-
-                )
-
-
-        # ----------------------------------------------------
-        # STORE ANALYST RECOMMENDATION
-        # ----------------------------------------------------
-
-        intelligence[
-            "Analyst Recommendation"
-        ] = (
-            normalised_recommendation
-        )
-
-
-        intelligence[
-            "Analyst Mean Score"
-        ] = (
-            mean_score
-        )
-
-
-        # ----------------------------------------------------
-        # ANALYST PRICE TARGETS
-        # ----------------------------------------------------
+            intelligence[
+                "Analyst Mean Score"
+            ] = float(
+                mean_score
+            )
 
         target_mean = info.get(
             "targetMeanPrice"
         )
 
-
         target_high = info.get(
             "targetHighPrice"
         )
 
-
         target_low = info.get(
             "targetLowPrice"
         )
-
 
         if target_mean is not None:
 
@@ -1424,7 +1038,6 @@ def collect_market_intelligence(
                 target_mean
             )
 
-
         if target_high is not None:
 
             intelligence[
@@ -1432,7 +1045,6 @@ def collect_market_intelligence(
             ] = float(
                 target_high
             )
-
 
         if target_low is not None:
 
@@ -1442,25 +1054,15 @@ def collect_market_intelligence(
                 target_low
             )
 
-
-        # ----------------------------------------------------
-        # CURRENT PRICE
-        # ----------------------------------------------------
-
         current_price = (
-
             info.get(
                 "currentPrice"
             )
-
             or
-
             info.get(
                 "regularMarketPrice"
             )
-
         )
-
 
         if current_price is not None:
 
@@ -1470,69 +1072,42 @@ def collect_market_intelligence(
                 current_price
             )
 
-
-        # ----------------------------------------------------
-        # ANALYST TARGET UPSIDE / DOWNSIDE
-        # ----------------------------------------------------
-
         if (
-
             current_price is not None
-
-            and
-
-            target_mean is not None
-
+            and target_mean is not None
         ):
 
             current_price = float(
                 current_price
             )
 
-
             target_mean = float(
                 target_mean
             )
-
 
             if current_price > 0:
 
                 intelligence[
                     "Analyst Target Upside %"
                 ] = round(
-
                     (
-
                         (
-
                             target_mean
-
                             - current_price
-
                         )
-
                         /
-
                         current_price
-
                     )
-
                     * 100,
-
                     2
-
                 )
-
 
     except Exception as exc:
 
         print(
-
             f"Analyst intelligence unavailable "
             f"for {ticker}: {exc}"
-
         )
-
 
     # ========================================================
     # EARNINGS INTELLIGENCE
@@ -1542,13 +1117,11 @@ def collect_market_intelligence(
 
         calendar = stock.calendar
 
-
         earnings_date = (
             _extract_earnings_date(
                 calendar
             )
         )
-
 
         if earnings_date:
 
@@ -1556,40 +1129,26 @@ def collect_market_intelligence(
                 "Next Earnings Date"
             ] = earnings_date
 
-
             intelligence[
                 "Earnings Status"
             ] = "SCHEDULED"
 
-
         else:
-
-            # Yahoo responded successfully but did not provide
-            # a future earnings date.
 
             intelligence[
                 "Earnings Status"
-            ] = "NOT AVAILABLE"
-
+            ] = "UNKNOWN"
 
     except Exception as exc:
 
         print(
-
             f"Earnings intelligence unavailable "
             f"for {ticker}: {exc}"
-
         )
-
 
         intelligence[
             "Earnings Status"
-        ] = "UNAVAILABLE"
-
-
-    # ========================================================
-    # NEWS INTELLIGENCE
-    # ========================================================
+        ] = "UNKNOWN"
 
     # ========================================================
     # NEWS INTELLIGENCE
@@ -1597,47 +1156,43 @@ def collect_market_intelligence(
 
     try:
 
-        news = stock.get_news(
+        news = yf.Search(
+            ticker,
+            news_count=10
+        ).news or []
 
-            count=5,
-
-            tab="news"
-
-        ) or []
-
-
-        articles = _extract_news(
-
+        recent_news = _extract_news(
             news,
-
             ticker=ticker,
-
             company_name=company_name,
-
             limit=5
-
         )
 
+        intelligence[
+            "Recent News"
+        ] = recent_news
 
         intelligence[
             "News Count"
         ] = len(
-            articles
+            recent_news
         )
 
-
         intelligence[
-            "Recent News"
-        ] = articles
-
+            "News Headlines"
+        ] = [
+            article.get(
+                "Title",
+                ""
+            )
+            for article in recent_news
+        ]
 
     except Exception as exc:
 
         print(
-
             f"News intelligence unavailable "
             f"for {ticker}: {exc}"
-
         )
 
     # ========================================================
@@ -1645,12 +1200,8 @@ def collect_market_intelligence(
     # ========================================================
 
     _save_cached_intelligence(
-
         ticker,
-
         intelligence
-
     )
-
 
     return intelligence

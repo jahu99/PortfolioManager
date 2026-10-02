@@ -276,259 +276,177 @@ def determine_reduction_action(
     5. A bearish signal without sufficient underlying evidence does
        not automatically cause a large reduction.
     6. SELL is reserved for exceptionally strong deterioration.
+    7. A weak Quality score within the 70–74 Investment Score
+       boundary is sufficient evidence for a controlled 25%
+       reduction.
     """
 
-    investment_score = safe_float(
-        investment_score
-    )
+    investment_score = safe_float(investment_score)
+    quality_score = safe_float(quality_score)
+    growth_score = safe_float(growth_score)
+    signal = normalise_text(signal)
 
-    quality_score = safe_float(
-        quality_score
-    )
+    bearish_signal = signal in {"SELL", "STRONG SELL"}
+    strong_bearish_signal = signal == "STRONG SELL"
 
-    growth_score = safe_float(
-        growth_score
-    )
+    # ============================================================
+    # SELL
+    # ============================================================
 
-    signal = normalise_text(
-        signal
-    )
-
-    bearish_signal = signal in {
-        "SELL",
-        "STRONG SELL",
-    }
-
-    strong_bearish_signal = (
-        signal == "STRONG SELL"
-    )
-
-    # ========================================================
-    # SELL / 100% REDUCTION
-    #
-    # Reserved for exceptionally strong evidence.
-    #
-    # This requires either:
-    #
-    #   - extremely low Investment Score + STRONG SELL
-    #
-    # or:
-    #
-    #   - extremely weak Investment Score combined with
-    #     extremely weak Quality and Growth.
-    # ========================================================
-
-    if (
-        investment_score < 20
-        and
-        strong_bearish_signal
-    ):
-
+    if investment_score < 20 and strong_bearish_signal:
         return (
             SELL_ACTION,
-            "Extremely low investment score combined with a "
-            "STRONG SELL signal indicates that the position "
-            "should be exited completely"
+            "Exceptionally weak investment score with a strong bearish signal"
         )
 
     if (
         investment_score < 25
-        and
-        bearish_signal
-        and
-        quality_score < 30
-        and
-        growth_score < 30
+        and bearish_signal
+        and quality_score < 30
+        and growth_score < 30
     ):
-
         return (
             SELL_ACTION,
-            "Extremely weak investment score, quality and growth "
-            "combined with a bearish signal justify a complete exit"
+            "Very weak investment score with bearish signal and weak Quality and Growth"
         )
 
     if (
         investment_score < 20
-        and
-        quality_score < 25
-        and
-        growth_score < 25
+        and quality_score < 25
+        and growth_score < 25
     ):
-
         return (
             SELL_ACTION,
-            "Exceptionally weak investment, quality and growth "
-            "scores justify a complete exit"
+            "Exceptionally weak investment score with severely weak Quality and Growth"
         )
 
-    # ========================================================
+    # ============================================================
     # REDUCE 75%
-    #
-    # Severe deterioration.
-    # ========================================================
+    # ============================================================
 
-    if (
-        investment_score < 30
-        and
-        strong_bearish_signal
-    ):
-
+    if investment_score < 30 and strong_bearish_signal:
         return (
             REDUCE_75_ACTION,
-            "Very low investment score combined with a STRONG "
-            "SELL signal indicates severe deterioration"
+            "Very weak investment score with a strong bearish signal"
         )
 
     if (
         investment_score < 30
-        and
-        bearish_signal
-        and
-        (
-            quality_score < 40
-            or
-            growth_score < 35
-        )
+        and bearish_signal
+        and (quality_score < 40 or growth_score < 35)
     ):
-
         return (
             REDUCE_75_ACTION,
-            "Very low investment score, bearish signal and "
-            "material weakness in quality or growth indicate "
-            "severe deterioration"
+            "Very weak investment score with bearish signal and weak fundamentals"
         )
 
     if (
         investment_score < 30
-        and
-        quality_score < 30
-        and
-        growth_score < 30
+        and quality_score < 30
+        and growth_score < 30
     ):
-
         return (
             REDUCE_75_ACTION,
-            "Very low investment score combined with extremely "
-            "weak quality and growth indicates severe deterioration"
+            "Very weak investment score with severely weak Quality and Growth"
         )
 
-    # ========================================================
+    # ============================================================
     # REDUCE 50%
-    #
-    # Clear deterioration.
-    # ========================================================
+    # ============================================================
 
     if (
         investment_score < 45
-        and
-        bearish_signal
-        and
-        quality_score < 50
-        and
-        growth_score < 40
+        and bearish_signal
+        and quality_score < 50
+        and growth_score < 40
     ):
-
         return (
             REDUCE_50_ACTION,
-            "Low investment score combined with weak quality, "
-            "weak growth and a bearish signal indicates clear "
-            "deterioration"
+            "Weak investment score with bearish signal and weak Quality and Growth"
         )
 
-    if (
-        investment_score < 40
-        and
-        bearish_signal
-    ):
-
+    if investment_score < 40 and bearish_signal:
         return (
             REDUCE_50_ACTION,
-            "Low investment score combined with a bearish signal "
-            "indicates clear deterioration"
+            "Very weak investment score with a bearish signal"
         )
 
     if (
         investment_score < 35
-        and
-        (
-            quality_score < 40
-            or
-            growth_score < 35
-        )
-        and
-        bearish_signal
+        and (quality_score < 40 or growth_score < 35)
+        and bearish_signal
     ):
-
         return (
             REDUCE_50_ACTION,
-            "Low investment score, weak fundamentals and a bearish "
-            "signal justify a substantial reduction"
+            "Very weak investment score with bearish signal and weak fundamentals"
         )
 
-    # ========================================================
+    # ============================================================
     # REDUCE 25%
-    #
-    # Mild but credible deterioration.
-    #
-    # This is deliberately the lowest reduction severity.
-    # ========================================================
+    # ============================================================
 
-    if (
-        investment_score < 45
-        and
-        bearish_signal
-    ):
-
+    if investment_score < 45 and bearish_signal:
         return (
             REDUCE_25_ACTION,
-            "Investment score has weakened and the bearish signal "
-            "provides sufficient evidence for a modest reduction"
+            "Weak investment score with a bearish signal"
         )
 
     if (
         investment_score < 40
-        and
-        (
-            quality_score < 50
-            or
-            growth_score < 45
-        )
+        and (quality_score < 50 or growth_score < 45)
     ):
-
         return (
             REDUCE_25_ACTION,
-            "Low investment score combined with weakening "
-            "fundamentals supports a modest reduction"
+            "Weak investment score with weak Quality or Growth"
         )
 
-    # ========================================================
-    # HOLD
+    # ============================================================
+    # QUALITY SAFEGUARD
+    # ============================================================
     #
-    # Insufficient evidence for a reduction.
-    # ========================================================
+    # Evidence from A6:
+    #
+    # Investment Score 70–74 + Quality 25–49
+    # produced 5 matured historical cases:
+    #   Average 5D return: -2.352%
+    #   Median 5D return:  -2.520%
+    #   Positive 5D:        0%
+    #   Negative 5D:      100%
+    #
+    # This safeguard is deliberately narrow. It does not alter
+    # the Investment Score, BUY threshold, Growth score or
+    # Technical score.
+    #
+
+    if (
+        70 <= investment_score < 75
+        and 25 <= quality_score < 50
+    ):
+        return (
+            REDUCE_25_ACTION,
+            "Investment score is at the 70–74 boundary with weak Quality score"
+        )
+
+    # ============================================================
+    # HOLD
+    # ============================================================
 
     if investment_score >= 70:
-
         return (
             HOLD_ACTION,
-            "Investment score remains sufficiently strong to "
-            "retain the existing position"
+            "Investment score remains sufficiently strong to retain the existing position"
         )
 
     if investment_score >= 45:
-
         return (
             HOLD_ACTION,
-            "Investment score is below the buy threshold but "
-            "there is insufficient evidence to reduce the position"
+            "Investment score is below the buy threshold but there is insufficient evidence to reduce the position"
         )
 
     return (
         HOLD_ACTION,
-        "Investment score is weak but the available evidence "
-        "is insufficient to justify a portfolio reduction"
+        "Investment score is weak but the available evidence is insufficient to justify a portfolio reduction"
     )
-
 
 # ============================================================
 # STOCK EXISTING HOLDING

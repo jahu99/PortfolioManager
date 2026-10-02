@@ -5,7 +5,7 @@ import yfinance as yf
 
 CACHE_DIR = "data/cache/fundamentals"
 
-FUNDAMENTALS_CACHE_VERSION = 2
+FUNDAMENTALS_CACHE_VERSION = 3
 
 
 def get_fundamentals(ticker):
@@ -80,28 +80,23 @@ def get_fundamentals(ticker):
 
         "Revenue Growth":
             info.get(
-                "revenueGrowth",
-                0
+                "revenueGrowth"
             ),
 
         "Profit Margin":
             info.get(
-                "profitMargins",
-                0
+                "profitMargins"
             ),
 
         "Return on Equity":
             info.get(
-                "returnOnEquity",
-                0
+                "returnOnEquity"
             ),
 
         "Debt to Equity":
             info.get(
-                "debtToEquity",
-                0
+                "debtToEquity"
             ),
-
         "Sector":
             info.get(
                 "sector",

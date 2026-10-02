@@ -1,181 +1,188 @@
 def score_quality(fundamentals):
 
-    score = 0
+    """
+    Score business quality independently of growth.
+
+    Quality measures:
+        - Profit Margin       35%
+        - Return on Equity    30%
+        - Debt / Equity       20%
+        - Free Cash Flow      15%
+
+    Missing metrics are excluded and the remaining weights
+    are renormalised.
+
+    Revenue Growth and Earnings Growth deliberately do not
+    belong in Quality. They are scored by score_growth().
+    """
+
+    scores = {}
     reasons = []
 
-
-    # -----------------------------
-    # Revenue Growth (25)
-    # -----------------------------
-
-    revenue_growth = fundamentals.get(
-        "Revenue Growth",
-        0
-    )
-
-
-    if revenue_growth > 0.50:
-        score += 25
-        reasons.append(
-            "Exceptional revenue growth"
-        )
-
-    elif revenue_growth > 0.20:
-        score += 20
-        reasons.append(
-            "Strong revenue growth"
-        )
-
-    elif revenue_growth > 0.05:
-        score += 10
-        reasons.append(
-            "Positive revenue growth"
-        )
-
-
-
-    # -----------------------------
-    # Earnings Growth (20)
-    # -----------------------------
-
-    earnings_growth = fundamentals.get(
-        "Earnings Growth",
-        0
-    )
-
-
-    if earnings_growth > 0.30:
-        score += 20
-        reasons.append(
-            "Exceptional earnings growth"
-        )
-
-    elif earnings_growth > 0.10:
-        score += 15
-        reasons.append(
-            "Strong earnings growth"
-        )
-
-    elif earnings_growth > 0:
-        score += 8
-        reasons.append(
-            "Positive earnings growth"
-        )
-
-
-
-    # -----------------------------
-    # Profit Margin (20)
-    # -----------------------------
+    # =========================================================
+    # PROFIT MARGIN — 35%
+    # =========================================================
 
     margin = fundamentals.get(
-        "Profit Margin",
-        0
+        "Profit Margin"
     )
 
+    if margin is not None:
 
-    if margin > 0.40:
-        score += 20
-        reasons.append(
-            "Exceptional margins"
-        )
+        if margin > 0.40:
 
-    elif margin > 0.20:
-        score += 15
-        reasons.append(
-            "High profit margin"
-        )
+            scores["margin"] = 100
 
-    elif margin > 0.10:
-        score += 8
-        reasons.append(
-            "Healthy profit margin"
-        )
+            reasons.append(
+                "Exceptional profit margin"
+            )
 
+        elif margin > 0.20:
 
+            scores["margin"] = 75
 
-    # -----------------------------
-    # Return on Equity (20)
-    # -----------------------------
+            reasons.append(
+                "High profit margin"
+            )
+
+        elif margin > 0.10:
+
+            scores["margin"] = 40
+
+            reasons.append(
+                "Healthy profit margin"
+            )
+
+        elif margin > 0:
+
+            scores["margin"] = 20
+
+        else:
+
+            scores["margin"] = 0
+
+    # =========================================================
+    # RETURN ON EQUITY — 30%
+    # =========================================================
 
     roe = fundamentals.get(
-        "Return on Equity",
-        0
+        "Return on Equity"
     )
 
+    if roe is not None:
 
-    if roe > 1:
-        score += 20
-        reasons.append(
-            "Exceptional ROE"
-        )
+        if roe > 1:
 
-    elif roe > 0.30:
-        score += 18
-        reasons.append(
-            "Excellent ROE"
-        )
+            scores["roe"] = 100
 
-    elif roe > 0.15:
-        score += 12
-        reasons.append(
-            "Strong ROE"
-        )
+            reasons.append(
+                "Exceptional ROE"
+            )
 
-    elif roe > 0:
-        score += 5
+        elif roe > 0.30:
 
+            scores["roe"] = 90
 
+            reasons.append(
+                "Excellent ROE"
+            )
 
-    # -----------------------------
-    # Debt (10)
-    # -----------------------------
+        elif roe > 0.15:
+
+            scores["roe"] = 60
+
+            reasons.append(
+                "Strong ROE"
+            )
+
+        elif roe > 0:
+
+            scores["roe"] = 25
+
+        else:
+
+            scores["roe"] = 0
+
+    # =========================================================
+    # DEBT / EQUITY — 20%
+    # =========================================================
 
     debt = fundamentals.get(
-        "Debt to Equity",
-        999
+        "Debt to Equity"
     )
 
+    if debt is not None:
 
-    if debt < 50:
-        score += 10
-        reasons.append(
-            "Low debt"
-        )
+        if debt < 50:
 
-    elif debt < 150:
-        score += 5
-        reasons.append(
-            "Moderate debt"
-        )
+            scores["debt"] = 100
 
+            reasons.append(
+                "Low debt"
+            )
 
+        elif debt < 150:
 
-    # -----------------------------
-    # Free Cash Flow (5)
-    # -----------------------------
+            scores["debt"] = 50
+
+            reasons.append(
+                "Moderate debt"
+            )
+
+        else:
+
+            scores["debt"] = 0
+
+    # =========================================================
+    # FREE CASH FLOW — 15%
+    # =========================================================
 
     free_cash_flow = fundamentals.get(
-    "Free Cash Flow"
-)
+        "Free Cash Flow"
+    )
 
-    if free_cash_flow is None:
-        free_cash_flow = 0
-
+    if free_cash_flow is not None:
 
         if free_cash_flow > 0:
 
-            score += 5
+            scores["fcf"] = 100
 
             reasons.append(
                 "Positive free cash flow"
             )
 
+        else:
 
+            scores["fcf"] = 0
 
-    if score > 100:
-        score = 100
+    # =========================================================
+    # WEIGHTED SCORE
+    # =========================================================
 
+    weights = {
+        "margin": 35,
+        "roe": 30,
+        "debt": 20,
+        "fcf": 15,
+    }
 
+    available_weight = sum(
+        weights[name]
+        for name in scores
+    )
+
+    if available_weight == 0:
+
+        return 0, reasons
+
+    score = sum(
+        scores[name] * weights[name]
+        for name in scores
+    ) / available_weight
+
+    score = min(
+        score,
+        100
+    )
 
     return round(score), reasons

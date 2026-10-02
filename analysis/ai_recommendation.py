@@ -10,9 +10,9 @@ def generate_ai_recommendation(stock: Dict) -> Dict:
     confidence_score = stock.get("Confidence Score", 50)
 
     rsi = stock.get("RSI", 50)
-    revenue_growth = stock.get("Revenue Growth", 0)
-    roe = stock.get("Return on Equity", 0)
-    debt = stock.get("Debt to Equity", 0)
+    revenue_growth = stock.get("Revenue Growth")
+    roe = stock.get("Return on Equity")
+    debt = stock.get("Debt to Equity")
 
     sector = stock.get("Sector", "Unknown")
 
@@ -40,12 +40,12 @@ def generate_ai_recommendation(stock: Dict) -> Dict:
             "Growth profile supports future earnings expansion."
         )
 
-    if revenue_growth > 0.15:
+    if revenue_growth is not None and revenue_growth > 0.15:
         thesis.append(
             "Revenue growth remains strong."
         )
 
-    if roe > 0.20:
+    if roe is not None and roe > 0.20:
         thesis.append(
             "High return on equity demonstrates efficient capital allocation."
         )
@@ -63,7 +63,7 @@ def generate_ai_recommendation(stock: Dict) -> Dict:
     if growth_score >= 75:
         strengths.append("Excellent growth")
 
-    if debt < 0.50:
+    if debt is not None and debt < 0.50:
         strengths.append("Low financial leverage")
 
     if confidence_score >= 70:
@@ -82,10 +82,10 @@ def generate_ai_recommendation(stock: Dict) -> Dict:
     if quality_score < 40:
         risks.append("Business quality below average")
 
-    if debt > 1.5:
+    if debt is not None and debt > 1.5:
         risks.append("High leverage")
 
-    if revenue_growth < 0:
+    if revenue_growth is not None and revenue_growth < 0:
         risks.append("Declining revenue")
 
     if confidence_score < 55:

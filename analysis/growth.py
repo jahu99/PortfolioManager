@@ -1,130 +1,145 @@
 def score_growth(fundamentals):
 
-    score = 0
+    """
+    Score growth independently of business quality.
+
+    Growth measures:
+        - Revenue Growth
+        - Earnings Growth
+
+    Missing metrics are excluded and the remaining weights
+    are renormalised.
+
+    Profit Margin, ROE and Debt deliberately do not belong
+    in Growth. They are scored by score_quality().
+    """
+
+    scores = {}
     reasons = []
     risks = []
 
+    # =========================================================
+    # REVENUE GROWTH — 60%
+    # =========================================================
 
     revenue_growth = fundamentals.get(
-        "Revenue Growth",
-        0
+        "Revenue Growth"
     )
 
-    margin = fundamentals.get(
-        "Profit Margin",
-        0
+    if revenue_growth is not None:
+
+        if revenue_growth >= 0.20:
+
+            scores["revenue"] = 100
+
+            reasons.append(
+                "Exceptional revenue growth"
+            )
+
+        elif revenue_growth >= 0.15:
+
+            scores["revenue"] = 80
+
+            reasons.append(
+                "Strong revenue growth"
+            )
+
+        elif revenue_growth >= 0.05:
+
+            scores["revenue"] = 50
+
+            reasons.append(
+                "Positive revenue growth"
+            )
+
+        elif revenue_growth > 0:
+
+            scores["revenue"] = 20
+
+        else:
+
+            scores["revenue"] = 0
+
+            risks.append(
+                "Weak revenue growth"
+            )
+
+    # =========================================================
+    # EARNINGS GROWTH — 40%
+    # =========================================================
+
+    earnings_growth = fundamentals.get(
+        "Earnings Growth"
     )
 
-    roe = fundamentals.get(
-        "Return on Equity",
-        0
+    if earnings_growth is not None:
+
+        if earnings_growth >= 0.30:
+
+            scores["earnings"] = 100
+
+            reasons.append(
+                "Exceptional earnings growth"
+            )
+
+        elif earnings_growth >= 0.10:
+
+            scores["earnings"] = 75
+
+            reasons.append(
+                "Strong earnings growth"
+            )
+
+        elif earnings_growth > 0:
+
+            scores["earnings"] = 40
+
+            reasons.append(
+                "Positive earnings growth"
+            )
+
+        else:
+
+            scores["earnings"] = 0
+
+            risks.append(
+                "Weak earnings growth"
+            )
+
+    # =========================================================
+    # WEIGHTED SCORE
+    # =========================================================
+
+    weights = {
+        "revenue": 60,
+        "earnings": 40,
+    }
+
+    available_weight = sum(
+        weights[name]
+        for name in scores
     )
 
-    debt = fundamentals.get(
-        "Debt to Equity",
-        0
+    if available_weight == 0:
+
+        return {
+            "Growth Score": 0,
+            "Growth Reasons": reasons,
+            "Growth Risks": risks,
+        }
+
+    score = sum(
+        scores[name] * weights[name]
+        for name in scores
+    ) / available_weight
+
+    score = min(
+        score,
+        100
     )
-
-
-    # -------------------------
-    # Revenue growth
-    # -------------------------
-
-    if revenue_growth >= 0.15:
-
-        score += 40
-        reasons.append(
-            "Strong revenue growth"
-        )
-
-    elif revenue_growth >= 0.05:
-
-        score += 25
-        reasons.append(
-            "Positive revenue growth"
-        )
-
-    else:
-
-        risks.append(
-            "Weak revenue growth"
-        )
-
-
-    # -------------------------
-    # Profitability
-    # -------------------------
-
-    if margin >= 0.20:
-
-        score += 20
-        reasons.append(
-            "Strong profit margin"
-        )
-
-    elif margin >= 0.10:
-
-        score += 10
-
-    else:
-
-        risks.append(
-            "Weak profit margin"
-        )
-
-
-    # -------------------------
-    # Return on equity
-    # -------------------------
-
-    if roe >= 0.20:
-
-        score += 25
-        reasons.append(
-            "Strong return on equity"
-        )
-
-    elif roe >= 0.10:
-
-        score += 15
-
-
-    else:
-
-        risks.append(
-            "Weak return on equity"
-        )
-
-
-    # -------------------------
-    # Debt
-    # -------------------------
-
-    if debt <= 1:
-
-        score += 15
-
-    elif debt <= 2:
-
-        score += 5
-
-    else:
-
-        risks.append(
-            "High debt"
-        )
-
 
     return {
-
-        "Growth Score": min(
-            score,
-            100
-        ),
-
-        "Growth Reasons":
-            reasons,
-
-        "Growth Risks":
-            risks
+        "Growth Score": round(score),
+        "Growth Reasons": reasons,
+        "Growth Risks": risks,
     }
