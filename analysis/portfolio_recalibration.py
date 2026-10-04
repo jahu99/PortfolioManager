@@ -59,6 +59,11 @@ from config.investment_config import (
     MAX_POSITION_PERCENT
 )
 
+from analysis.structural_risk import (
+        assess_structural_risk,
+)
+
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -1697,6 +1702,16 @@ def generate_portfolio_reallocation(
             )
         )
 
+        risk_score = safe_float(
+            row.get(
+                "Risk Score",
+                row.get(
+                    "risk_score",
+                    0
+                )
+            )
+        )
+
         current_value = safe_float(
             row.get(
                 "Current Value",
@@ -1756,7 +1771,39 @@ def generate_portfolio_reallocation(
                 "Owned": owned,
                 "Final Decision": final_decision,
                 "Sector": sector,
-                "Asset Type": asset_type
+                "Asset Type": asset_type,
+
+                # ----------------------------------------------------
+                # Preserve factual security metadata for the
+                # deterministic structural-risk assessment.
+                # ----------------------------------------------------
+                "Structural Risk Metadata": {
+                    "Country": row.get(
+                        "Country",
+                        row.get(
+                            "country",
+                            ""
+                        )
+                    ),
+                    "Exchange": row.get(
+                        "Exchange",
+                        row.get(
+                            "exchange",
+                            ""
+                        )
+                    ),
+                    "Quote Type": row.get(
+                        "Quote Type",
+                        row.get(
+                            "quoteType",
+                            ""
+                        )
+                    ),
+                    "Name": row.get(
+                        "Name",
+                        ticker
+                    )
+                }
             }
         )
 
@@ -1781,6 +1828,10 @@ def generate_portfolio_reallocation(
             )
         )
     )
+
+    # ========================================================
+    # APPLY DESTINATION ALLOCATION WEIGHTS
+    # ========================================================
 
     # ========================================================
     # APPLY DESTINATION ALLOCATION WEIGHTS
@@ -1820,22 +1871,47 @@ def generate_portfolio_reallocation(
         decision_multiplier = 1.0
         sector_multiplier = 1.0
         position_multiplier = 1.0
+        risk_multiplier = 1.0
+
+        risk_score = safe_float(
+            destination.get(
+                "Risk Score",
+                0
+            )
+        )
+
+        if risk_score > 0:
+
+            if risk_score >= 10.0:
+                risk_multiplier = 1.0
+
+            else:
+                risk_multiplier = 0.70
+
+        structural_risk = assess_structural_risk(
+            destination.get(
+                "Structural Risk Metadata",
+                {}
+            )
+        )
+
+        structural_risk_multiplier = safe_float(
+            structural_risk.get(
+                "Structural Risk Multiplier",
+                1.0
+            )
+        )
+
+        if current_position_percent >= 10.0:
+            position_multiplier = 0.75
 
         # ----------------------------------------------------
-        # Sector concentration protection.
+        # Sector concentration is an allocation-capacity
+        # constraint, not a destination-ranking penalty.
         # ----------------------------------------------------
 
         if sector_exposure >= 40.0:
-
             sector_multiplier = 0.65
-
-        # ----------------------------------------------------
-        # Position concentration protection.
-        # ----------------------------------------------------
-
-        if current_position_percent >= 10.0:
-
-            position_multiplier = 0.75
 
         allocation_weight = (
             safe_float(
@@ -1845,8 +1921,30 @@ def generate_portfolio_reallocation(
                 )
             )
             * decision_multiplier
-            * sector_multiplier
             * position_multiplier
+            * risk_multiplier
+            * structural_risk_multiplier
+        )
+
+        # ----------------------------------------------------
+        # Calculate Allocation Capacity BEFORE eligibility.
+        #
+        # Position Capacity is the absolute position limit.
+        # Sector concentration can reduce how much of that
+        # capacity may be used in this reallocation cycle.
+        # ----------------------------------------------------
+
+        position_capacity = safe_float(
+            destination.get(
+                "Position Capacity",
+                0
+            )
+        )
+
+        allocation_capacity = round(
+            position_capacity
+            * sector_multiplier,
+            2
         )
 
         destination_copy = destination.copy()
@@ -1884,13 +1982,35 @@ def generate_portfolio_reallocation(
             "Position Multiplier"
         ] = position_multiplier
 
+        destination_copy[
+            "Allocation Capacity"
+        ] = allocation_capacity
+
+        destination_copy[
+            "Structural Risk"
+        ] = structural_risk.get(
+            "Structural Risk",
+            "LOW"
+        )
+
+        destination_copy[
+            "Structural Risk Multiplier"
+        ] = structural_risk_multiplier
+
+        destination_copy[
+            "Structural Risk Reason"
+        ] = structural_risk.get(
+            "Structural Risk Reason",
+            ""
+        )
+
+        # ----------------------------------------------------
+        # Only destinations with meaningful usable capacity
+        # enter the governed deployment population.
+        # ----------------------------------------------------
+
         if (
-            safe_float(
-                destination_copy.get(
-                    "Position Capacity",
-                    0
-                )
-            )
+            allocation_capacity
             >= min_reallocation_trade_value
         ):
 
@@ -2322,12 +2442,19 @@ def generate_portfolio_reallocation(
 
     remaining_capital = total_available_capital
 
+        
+    # ========================================================
+    # ALLOCATE CAPITAL ACROSS DESTINATIONS
+    #
+    # Allocation Weight determines ranking.
+    #
+    # Allocation Capacity determines how much capital can
+    # actually be deployed to each destination.
+    # ========================================================
+
     if (
-
         deployment_destinations
-
         and total_available_capital > 0
-
     ):
 
         total_weight = sum(
@@ -2344,10 +2471,11 @@ def generate_portfolio_reallocation(
         # FIRST PASS
         #
         # Allocate proportionally according to governed
-        # destination weights.
+        # destination weights, subject to Allocation Capacity.
         # ----------------------------------------------------
 
         for destination in deployment_destinations:
+
             ticker = clean_ticker(
                 destination.get(
                     "Ticker",
@@ -2356,7 +2484,6 @@ def generate_portfolio_reallocation(
             )
 
             if not ticker:
-
                 continue
 
             weight = safe_float(
@@ -2368,7 +2495,7 @@ def generate_portfolio_reallocation(
 
             capacity = safe_float(
                 destination.get(
-                    "Position Capacity",
+                    "Allocation Capacity",
                     0
                 )
             )
@@ -2404,7 +2531,14 @@ def generate_portfolio_reallocation(
                     allocation
                 )
 
-                remaining_capital -= allocation
+                remaining_capital = round(
+                    max(
+                        0.0,
+                        remaining_capital
+                        - allocation
+                    ),
+                    2
+                )
 
             else:
 
@@ -2422,7 +2556,7 @@ def generate_portfolio_reallocation(
         # SECOND PASS
         #
         # Redistribute capital left over because some
-        # destinations reached capacity.
+        # destinations reached Allocation Capacity.
         # ----------------------------------------------------
 
         while (
@@ -2443,7 +2577,7 @@ def generate_portfolio_reallocation(
 
                 capacity = safe_float(
                     destination.get(
-                        "Position Capacity",
+                        "Allocation Capacity",
                         0
                     )
                 )
@@ -2471,7 +2605,6 @@ def generate_portfolio_reallocation(
                     )
 
             if not destinations_with_capacity:
-
                 break
 
             remaining_weight = sum(
@@ -2486,7 +2619,6 @@ def generate_portfolio_reallocation(
             )
 
             if remaining_weight <= 0:
-
                 break
 
             capital_before_pass = remaining_capital
@@ -2497,7 +2629,6 @@ def generate_portfolio_reallocation(
                     remaining_capital
                     < min_reallocation_trade_value
                 ):
-
                     break
 
                 ticker = clean_ticker(
@@ -2516,7 +2647,7 @@ def generate_portfolio_reallocation(
 
                 capacity = safe_float(
                     destination.get(
-                        "Position Capacity",
+                        "Allocation Capacity",
                         0
                     )
                 )
@@ -2555,7 +2686,6 @@ def generate_portfolio_reallocation(
                     additional_allocation
                     < min_reallocation_trade_value
                 ):
-
                     continue
 
                 destination_allocations[ticker] = round(
@@ -2574,7 +2704,6 @@ def generate_portfolio_reallocation(
                 )
 
             if remaining_capital >= capital_before_pass:
-
                 break
 
     # ========================================================
@@ -2733,7 +2862,21 @@ def generate_portfolio_reallocation(
                     ""
                 ),
                 "Released Capital": allocation,
-                "Reallocated Capital": allocation
+                "Reallocated Capital": allocation,
+                "Structural Risk": destination.get(
+                    "Structural Risk",
+                    "LOW"
+                ),
+
+                "Structural Risk Multiplier": destination.get(
+                    "Structural Risk Multiplier",
+                    1.0
+                ),
+
+                "Structural Risk Reason": destination.get(
+                    "Structural Risk Reason",
+                    ""
+                ),
             }
         )
 
@@ -2899,6 +3042,29 @@ def generate_portfolio_reallocation(
                     ),
                     "Asset Type": destination.get(
                         "Asset Type",
+                        ""
+                    ),
+                    "Allocation Weight": round(
+                        safe_float(
+                            destination.get(
+                                "Allocation Weight",
+                                0
+                            )
+                        ),
+                        2
+                    ),
+                    "Structural Risk": destination.get(
+                        "Structural Risk",
+                        "LOW"
+                    ),
+                    "Structural Risk Multiplier": safe_float(
+                        destination.get(
+                            "Structural Risk Multiplier",
+                            1.0
+                        )
+                    ),
+                    "Structural Risk Reason": destination.get(
+                        "Structural Risk Reason",
                         ""
                     ),
                     "Released Capital": allocation,

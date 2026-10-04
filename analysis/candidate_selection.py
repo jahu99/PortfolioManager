@@ -14,11 +14,15 @@ Architecture
 
 Investment Universe
         ↓
-Investment Ranking
+Investment Score Eligibility
         ↓
-Candidate Selection
+BUY / STRONG BUY Filter
+        ↓
+Business Attractiveness Ranking
         ↓
 Entry Quality Assessment
+        ↓
+BUY NEW Priority Ranking
         ↓
 BUY NEW Governance
         ↓
@@ -29,10 +33,13 @@ Important Design Principles
 
 This module:
 
-    - DOES rank investment opportunities
-    - DOES identify the strongest candidates
-    - DOES preserve ties at the selection boundary
-    - DOES consider Entry Quality for candidate classification
+    - DOES identify the strongest new investment opportunities
+    - DOES use Investment Score as an eligibility gate
+    - DOES rank business attractiveness separately from entry timing
+    - DOES preserve Investment Rank for audit/reporting
+    - DOES consider Entry Quality for BUY NEW eligibility
+    - DOES consider Technical Score as a secondary entry/timing factor
+    - DOES use H1 as a secondary tie-breaker
     - DOES NOT modify Investment Score
     - DOES NOT modify technical scoring
     - DOES NOT modify quality scoring
@@ -40,6 +47,26 @@ This module:
     - DOES NOT perform capital allocation
     - DOES NOT override portfolio governance
     - DOES NOT make final BUY/SELL decisions
+
+Investment Score answers:
+
+    "Is this opportunity strong enough to enter the BUY NEW
+     candidate universe?"
+
+Business Score answers:
+
+    "Among eligible opportunities, how attractive is the
+     underlying business based on Growth and Quality?"
+
+Technical Score answers:
+
+    "Among comparable business opportunities, which currently
+     has stronger entry/market characteristics?"
+
+H1 answers:
+
+    "Among otherwise comparable candidates, which has the
+     stronger validated short-term continuation profile?"
 
 The Portfolio Decision Engine remains authoritative for final actions.
 
@@ -51,8 +78,9 @@ Governance answers:
 
     "Which of those opportunities are currently permitted to become BUY NEW?"
 
-This separation prevents governance rules from accidentally becoming
-the investment ranking engine.
+This separation prevents Investment Score, technical timing or H1
+from becoming the sole ranking mechanism for long-term BUY NEW
+opportunity selection.
 """
 
 import pandas as pd
@@ -65,6 +93,13 @@ import pandas as pd
 DEFAULT_TOP_CANDIDATES = 10
 
 MAX_BUY_NEW_DECISIONS = 3
+
+# Investment Score remains the existing production BUY threshold.
+#
+# This is an eligibility gate for BUY NEW candidate selection.
+# It does NOT change the underlying Investment Score calculation.
+MIN_BUY_NEW_INVESTMENT_SCORE = 75.0
+
 
 # ============================================================
 # BUY NEW H1 CONTINUATION FILTER
@@ -147,7 +182,6 @@ def get_new_stock_opportunities(
 ):
 
     """
-
     Return the investable universe of new STOCK opportunities.
 
     A new opportunity is defined authoritatively as a STOCK that
@@ -161,6 +195,11 @@ def get_new_stock_opportunities(
         - STOCK assets only, where Asset Type is available
 
         - Valid Investment Score required
+
+        - Investment Score >= production BUY threshold
+
+    Investment Score is used here as an eligibility gate rather
+    than as the final BUY NEW ranking mechanism.
 
     This function deliberately does NOT apply:
 
@@ -335,6 +374,33 @@ def get_new_stock_opportunities(
     ).copy()
 
     # --------------------------------------------------------
+    # BUY NEW INVESTMENT SCORE ELIGIBILITY
+    #
+    # The existing production BUY threshold of 75 is retained.
+    #
+    # This is an eligibility gate only.
+    #
+    # It deliberately does NOT determine the final BUY NEW
+    # priority order.
+    # --------------------------------------------------------
+
+    candidates = candidates[
+
+        candidates["Investment Score"]
+
+        .ge(
+
+            MIN_BUY_NEW_INVESTMENT_SCORE
+
+        )
+
+    ].copy()
+
+    if candidates.empty:
+
+        return pd.DataFrame()
+
+    # --------------------------------------------------------
     # ONE AUTHORITATIVE RECORD PER TICKER
     # --------------------------------------------------------
 
@@ -368,6 +434,7 @@ def get_new_stock_opportunities(
 
     return candidates
 
+
 # ============================================================
 # BUY SIGNAL UNIVERSE
 # ============================================================
@@ -390,14 +457,23 @@ def get_buy_candidates(df):
         return candidates
 
     candidates = candidates[
+
         candidates["Signal"]
+
         .apply(normalise_text)
+
         .isin(
+
             (
+
                 "BUY",
+
                 "STRONG BUY",
+
             )
+
         )
+
     ].copy()
 
     return candidates
@@ -409,27 +485,36 @@ def get_buy_candidates(df):
 
 def rank_investment_candidates(df):
     """
-    Rank candidates using the authoritative investment hierarchy.
+    Preserve the authoritative Investment Score ranking for
+    reporting and audit purposes while also calculating a
+    transparent Business Score.
 
-    Primary ranking:
+    Investment Rank remains based on:
 
         1. Investment Score
-        2. Technical Score
-        3. Quality Score
-        4. Growth Score
-        5. Confidence Score
+        2. H1
+        3. Technical Score
+        4. Quality Score
+        5. Growth Score
+        6. Confidence Score
 
-    This ranking intentionally does NOT use Entry Quality.
+    Important:
 
-    Entry Quality answers:
+    Investment Rank is NOT the final BUY NEW priority order.
 
-        "Is now a good time to enter?"
+    Business Score is calculated as:
 
-    Investment Ranking answers:
+        50% Growth Score
+        50% Quality Score
 
-        "How attractive is this investment opportunity?"
+    This does not modify either underlying score or the
+    Investment Score.
 
-    These are deliberately separate concepts.
+    The Business Score exists specifically so BUY NEW candidate
+    selection can distinguish underlying business attractiveness
+    from short-term entry/timing characteristics.
+
+    Entry Quality is deliberately not used here.
     """
 
     if df is None or df.empty:
@@ -442,79 +527,184 @@ def rank_investment_candidates(df):
     #
     # H1 is deliberately NOT part of Investment Score.
     #
-    # Investment Score remains the primary ranking factor.
+    # Investment Score remains the primary ranking factor for
+    # Investment Rank.
+    #
     # H1 is used only to break ties between candidates with
     # the same Investment Score.
-    #
-    # H1:
-    #   RSI >= 55
-    #   Return 3M <= 25%
-    #
-    # This was selected as the current human-reviewed
-    # calibration from the read-only historical/OOS tests.
-    #
-    # H1 must not:
-    #   - override Investment Score
-    #   - act as a hard eligibility gate
-    #   - override HOLD/governance decisions
     # --------------------------------------------------------
 
     if (
+
         "RSI" in candidates.columns
+
         and "Return_3m" in candidates.columns
+
     ):
+
         candidates["H1"] = (
+
             pd.to_numeric(
+
                 candidates["RSI"],
+
                 errors="coerce",
+
             ).ge(55.0)
+
             &
+
             pd.to_numeric(
+
                 candidates["Return_3m"],
+
                 errors="coerce",
+
             ).le(25.0)
+
         )
+
     else:
+
         candidates["H1"] = False
 
+    # --------------------------------------------------------
+    # NORMALISE INVESTMENT RANKING INPUTS
+    # --------------------------------------------------------
+
     ranking_columns = [
+
         "Investment Score",
+
         "H1",
+
         "Technical Score",
+
         "Quality Score",
+
         "Growth Score",
+
         "Confidence Score",
+
     ]
 
     available_columns = []
 
     for column in ranking_columns:
+
         if column == "H1":
+
             available_columns.append(column)
+
             continue
 
         if column in candidates.columns:
+
             candidates[column] = pd.to_numeric(
+
                 candidates[column],
+
                 errors="coerce",
+
             ).fillna(0)
 
             available_columns.append(column)
 
     if not available_columns:
+
         return pd.DataFrame()
 
+    # --------------------------------------------------------
+    # INVESTMENT RANK
+    #
+    # This remains the authoritative investment ranking and is
+    # retained for reporting/audit.
+    # --------------------------------------------------------
+
     candidates = candidates.sort_values(
+
         by=available_columns,
+
         ascending=[
+
             False,
+
             False,
+
             False,
+
             False,
+
             False,
+
             False,
+
         ][:len(available_columns)],
+
     ).copy()
+
+    # --------------------------------------------------------
+    # BUSINESS SCORE
+    #
+    # Business Score is deliberately separate from Investment
+    # Score.
+    #
+    # It represents the underlying business opportunity using
+    # Growth and Quality equally.
+    #
+    # This is the same transparent 50/50 Business Score used
+    # in the completed diagnostic analysis.
+    #
+    # It does NOT alter production Growth, Quality or Investment
+    # scores.
+    # --------------------------------------------------------
+
+    if "Growth Score" in candidates.columns:
+
+        growth_score = pd.to_numeric(
+
+            candidates["Growth Score"],
+
+            errors="coerce",
+
+        ).fillna(0.0)
+
+    else:
+
+        growth_score = pd.Series(
+
+            0.0,
+
+            index=candidates.index,
+
+        )
+
+    if "Quality Score" in candidates.columns:
+
+        quality_score = pd.to_numeric(
+
+            candidates["Quality Score"],
+
+            errors="coerce",
+
+        ).fillna(0.0)
+
+    else:
+
+        quality_score = pd.Series(
+
+            0.0,
+
+            index=candidates.index,
+
+        )
+
+    candidates["Business Score"] = (
+
+        growth_score + quality_score
+
+    ) / 2.0
+
     # --------------------------------------------------------
     # INVESTMENT SCORE TIER
     #
@@ -523,27 +713,41 @@ def rank_investment_candidates(df):
     # --------------------------------------------------------
 
     candidates["Investment Score Tier"] = (
+
         candidates["Investment Score"]
+
         .rank(
+
             method="dense",
+
             ascending=False,
+
         )
+
         .astype(int)
+
     )
 
     # --------------------------------------------------------
     # UNIQUE INVESTMENT RANK
     #
-    # Used only to preserve deterministic ordering.
+    # Used to preserve deterministic ordering and for audit/reporting.
     # --------------------------------------------------------
 
     candidates.insert(
+
         0,
+
         "Investment Rank",
+
         range(
+
             1,
+
             len(candidates) + 1,
+
         ),
+
     )
 
     return candidates
@@ -554,9 +758,13 @@ def rank_investment_candidates(df):
 # ============================================================
 
 def select_top_candidates(
+
     ranked_candidates,
+
     top_n=DEFAULT_TOP_CANDIDATES,
+
 ):
+
     """
     Select the strongest investment candidates.
 
@@ -574,27 +782,45 @@ def select_top_candidates(
 
     This prevents arbitrary exclusion of equivalent
     Investment Score candidates.
+
+    NOTE:
+
+    This function remains available for compatibility and
+    reporting purposes. The production BUY NEW pipeline now
+    evaluates the complete Investment Score >= 75 universe
+    before applying Business Score and entry-priority ranking.
     """
 
     if ranked_candidates is None or ranked_candidates.empty:
+
         return pd.DataFrame()
 
     candidates = ranked_candidates.copy()
 
     if "Investment Score" not in candidates.columns:
+
         return candidates.head(top_n).copy()
 
     if len(candidates) <= top_n:
+
         return candidates
 
     boundary_score = safe_float(
+
         candidates.iloc[top_n - 1]["Investment Score"]
+
     )
 
     selected = candidates[
+
         candidates["Investment Score"].apply(
-            lambda value: safe_float(value) >= boundary_score
+
+            lambda value:
+
+                safe_float(value) >= boundary_score
+
         )
+
     ].copy()
 
     return selected
@@ -605,6 +831,7 @@ def select_top_candidates(
 # ============================================================
 
 def classify_entry_quality(candidate):
+
     """
     Classify entry timing.
 
@@ -623,41 +850,64 @@ def classify_entry_quality(candidate):
     """
 
     entry_quality = normalise_text(
+
         candidate.get(
+
             "Entry Quality",
+
             "",
+
         )
+
     )
 
     if entry_quality in (
+
         "REASONABLE",
+
         "ATTRACTIVE",
+
         "FAVOURABLE",
+
         "GOOD",
+
     ):
+
         return "FAVOURABLE ENTRY"
 
     if entry_quality in (
+
         "HIGHLY EXTENDED",
+
         "EXTREME",
+
         "VERY EXTENDED",
+
     ):
+
         return "HIGH TIMING RISK"
 
     if entry_quality in (
+
         "MODERATELY EXTENDED",
+
         "EXTENDED",
+
         "CAUTION",
+
     ):
+
         return "TIMING CAUTION"
 
     return "UNKNOWN"
+
 
 # ============================================================
 # BUY NEW H1 CONTINUATION ASSESSMENT
 # ============================================================
 
 def classify_buy_new_h1(candidate):
+
     """
     Classify short-term continuation quality for an otherwise
     BUY NEW-eligible candidate.
@@ -677,25 +927,36 @@ def classify_buy_new_h1(candidate):
     Returns
     -------
     str
+
         "H1 STRONG"
         "H1 NEUTRAL"
         "H1 DATA INSUFFICIENT"
     """
 
     if candidate is None:
+
         return "H1 DATA INSUFFICIENT"
 
     rsi = pd.to_numeric(
+
         candidate.get("RSI"),
+
         errors="coerce",
+
     )
 
     return_3m = pd.to_numeric(
+
         candidate.get(
+
             "Return_3m",
+
             candidate.get("Return 3M"),
+
         ),
+
         errors="coerce",
+
     )
 
     # --------------------------------------------------------
@@ -703,6 +964,7 @@ def classify_buy_new_h1(candidate):
     # --------------------------------------------------------
 
     if pd.isna(rsi) or pd.isna(return_3m):
+
         return "H1 DATA INSUFFICIENT"
 
     # --------------------------------------------------------
@@ -710,13 +972,16 @@ def classify_buy_new_h1(candidate):
     # --------------------------------------------------------
 
     if (
+
         rsi >= H1_RSI_THRESHOLD
+
         and return_3m <= H1_RETURN_3M_MAX
+
     ):
+
         return "H1 STRONG"
 
     return "H1 NEUTRAL"
-
 
 
 # ============================================================
@@ -724,8 +989,11 @@ def classify_buy_new_h1(candidate):
 # ============================================================
 
 def build_candidate_review(
+
     selected_candidates,
+
 ):
+
     """
     Add entry timing, BUY NEW eligibility and H1 continuation
     assessment to selected investment candidates.
@@ -733,18 +1001,31 @@ def build_candidate_review(
     Concepts deliberately remain separate:
 
         Investment Rank
-            Which opportunities are the strongest investments?
+            The authoritative Investment Score ranking.
+
+        Business Score
+            Underlying Growth + Quality attractiveness.
 
         Entry Timing Status
             Is the current entry technically suitable?
 
+        Technical Score
+            Secondary ordering factor reflecting entry/market
+            characteristics.
+
         H1 Continuation
-            Does the candidate have the validated short-term
-            momentum characteristics associated with stronger
-            subsequent BUY NEW performance?
+            Validated short-term continuation profile.
 
         BUY NEW Priority Rank
-            Which eligible candidates should receive priority?
+            Final ordering of candidates eligible to compete
+            for the limited BUY NEW slots.
+
+    BUY NEW priority is:
+
+        1. Business Score
+        2. Technical Score
+        3. H1 Priority
+        4. Investment Rank
 
     H1 does NOT:
 
@@ -758,38 +1039,55 @@ def build_candidate_review(
     """
 
     if (
+
         selected_candidates is None
+
         or selected_candidates.empty
+
     ):
+
         return pd.DataFrame()
 
     candidates = selected_candidates.copy()
 
     timing_statuses = []
+
     candidate_statuses = []
+
     buy_new_eligible = []
+
     h1_statuses = []
 
     for _, row in candidates.iterrows():
 
         timing_status = classify_entry_quality(
+
             row
+
         )
 
         h1_status = classify_buy_new_h1(
+
             row
+
         )
 
         timing_statuses.append(
+
             timing_status
+
         )
 
         h1_statuses.append(
+
             h1_status
+
         )
 
         # ----------------------------------------------------
         # Existing entry classification
+        #
+        # Entry Quality remains the hard BUY NEW timing gate.
         #
         # H1 does NOT alter this gate.
         # ----------------------------------------------------
@@ -797,41 +1095,57 @@ def build_candidate_review(
         if timing_status == "FAVOURABLE ENTRY":
 
             candidate_statuses.append(
+
                 "STRONG CANDIDATE"
+
             )
 
             buy_new_eligible.append(
+
                 True
+
             )
 
         elif timing_status == "TIMING CAUTION":
 
             candidate_statuses.append(
+
                 "STRONG INVESTMENT - TIMING CAUTION"
+
             )
 
             buy_new_eligible.append(
+
                 False
+
             )
 
         elif timing_status == "HIGH TIMING RISK":
 
             candidate_statuses.append(
+
                 "STRONG INVESTMENT - WAIT FOR ENTRY"
+
             )
 
             buy_new_eligible.append(
+
                 False
+
             )
 
         else:
 
             candidate_statuses.append(
+
                 "CANDIDATE - ENTRY QUALITY UNKNOWN"
+
             )
 
             buy_new_eligible.append(
+
                 False
+
             )
 
     # --------------------------------------------------------
@@ -839,15 +1153,21 @@ def build_candidate_review(
     # --------------------------------------------------------
 
     candidates["Entry Timing Status"] = (
+
         timing_statuses
+
     )
 
     candidates["Candidate Status"] = (
+
         candidate_statuses
+
     )
 
     candidates["BUY NEW Eligible"] = (
+
         buy_new_eligible
+
     )
 
     # --------------------------------------------------------
@@ -855,143 +1175,274 @@ def build_candidate_review(
     # --------------------------------------------------------
 
     candidates["BUY NEW H1 Status"] = (
+
         h1_statuses
+
     )
+
+    # --------------------------------------------------------
+    # BUSINESS SCORE SAFETY
+    #
+    # Business Score should normally already exist because
+    # rank_investment_candidates() creates it.
+    #
+    # Retain a safe fallback so this function remains robust
+    # if called independently.
+    # --------------------------------------------------------
+
+    if "Business Score" not in candidates.columns:
+
+        if "Growth Score" in candidates.columns:
+
+            growth_score = pd.to_numeric(
+
+                candidates["Growth Score"],
+
+                errors="coerce",
+
+            ).fillna(0.0)
+
+        else:
+
+            growth_score = pd.Series(
+
+                0.0,
+
+                index=candidates.index,
+
+            )
+
+        if "Quality Score" in candidates.columns:
+
+            quality_score = pd.to_numeric(
+
+                candidates["Quality Score"],
+
+                errors="coerce",
+
+            ).fillna(0.0)
+
+        else:
+
+            quality_score = pd.Series(
+
+                0.0,
+
+                index=candidates.index,
+
+            )
+
+        candidates["Business Score"] = (
+
+            growth_score + quality_score
+
+        ) / 2.0
 
     # --------------------------------------------------------
     # BUY NEW PRIORITY RANK
     #
-    # Existing Investment Rank remains authoritative for
-    # investment attractiveness.
+    # Investment Rank remains available as the authoritative
+    # investment ranking.
     #
-    # H1 is used only to prioritise candidates that have
-    # already passed the BUY NEW eligibility gate.
+    # However, the completed diagnostic showed that using
+    # Investment Rank as the primary BUY NEW ordering caused
+    # selected BUY NEW candidates to underperform the broader
+    # eligible opportunity universe.
     #
-    # Priority:
+    # BUY NEW therefore separates:
     #
-    #   1. H1 STRONG
-    #   2. H1 NEUTRAL
-    #   3. H1 DATA INSUFFICIENT
+    #   Investment Score
+    #       Eligibility gate
     #
-    # Within each H1 group:
+    #   Business Score
+    #       Primary opportunity ranking
+    #
+    #   Technical Score
+    #       Secondary entry/timing ordering
+    #
+    #   H1
+    #       Secondary continuation tie-breaker
     #
     #   Investment Rank
+    #       Final deterministic tie-breaker
     #
-    # Therefore H1 cannot rescue a weak investment candidate;
-    # it only differentiates otherwise eligible candidates.
+    # This prevents short-term Technical/Investment Score
+    # strength from dominating the selection of underlying
+    # business opportunities.
     # --------------------------------------------------------
 
     candidates["BUY NEW Priority Rank"] = pd.NA
 
     eligible_mask = (
+
         candidates["BUY NEW Eligible"]
+
         .fillna(False)
+
         .astype(bool)
+
     )
 
     eligible_candidates = (
+
         candidates.loc[
+
             eligible_mask
+
         ]
+
         .copy()
+
     )
 
     if not eligible_candidates.empty:
 
         h1_priority = {
+
             "H1 STRONG": 0,
+
             "H1 NEUTRAL": 1,
+
             "H1 DATA INSUFFICIENT": 2,
+
         }
 
         eligible_candidates["_H1 Priority"] = (
+
             eligible_candidates[
+
                 "BUY NEW H1 Status"
+
             ]
+
             .map(
+
                 h1_priority
+
             )
+
             .fillna(2)
+
         )
 
         # ----------------------------------------------------
-        # Investment Rank remains the tie-breaker.
+        # Normalise priority columns.
         # ----------------------------------------------------
 
-        if "Investment Rank" in eligible_candidates.columns:
+        eligible_candidates["Business Score"] = pd.to_numeric(
 
-            eligible_candidates = (
-                eligible_candidates
-                .sort_values(
-                    by=[
-                        "_H1 Priority",
-                        "Investment Rank",
-                    ],
-                    ascending=[
-                        True,
-                        True,
-                    ],
-                    na_position="last",
-                )
-                .copy()
+            eligible_candidates["Business Score"],
+
+            errors="coerce",
+
+        ).fillna(0.0)
+
+        if "Technical Score" in eligible_candidates.columns:
+
+            eligible_candidates["Technical Score"] = pd.to_numeric(
+
+                eligible_candidates["Technical Score"],
+
+                errors="coerce",
+
             )
 
         else:
 
-            # Fallback ordering if Investment Rank is absent.
-            sort_columns = [
-                "_H1 Priority",
-            ]
+            eligible_candidates["Technical Score"] = 0.0
 
-            ascending = [
-                True,
-            ]
+        # ----------------------------------------------------
+        # FINAL BUY NEW PRIORITY ORDER
+        #
+        # 1. Business Score
+        # 2. Technical Score
+        # 3. H1 Priority
+        # 4. Investment Rank
+        # ----------------------------------------------------
 
-            for column in (
-                "Investment Score",
-                "Technical Score",
-                "Quality Score",
-                "Growth Score",
-                "Confidence Score",
-            ):
+        sort_columns = [
 
-                if column in eligible_candidates.columns:
+            "Business Score",
 
-                    sort_columns.append(
-                        column
-                    )
+            "Technical Score",
 
-                    ascending.append(
-                        False
-                    )
+            "_H1 Priority",
 
-            eligible_candidates = (
-                eligible_candidates
-                .sort_values(
-                    by=sort_columns,
-                    ascending=ascending,
-                    na_position="last",
-                )
-                .copy()
+        ]
+
+        ascending = [
+
+            False,
+
+            False,
+
+            True,
+
+        ]
+
+        if "Investment Rank" in eligible_candidates.columns:
+
+            sort_columns.append(
+
+                "Investment Rank"
+
             )
 
+            ascending.append(
+
+                True
+
+            )
+
+        eligible_candidates = (
+
+            eligible_candidates
+
+            .sort_values(
+
+                by=sort_columns,
+
+                ascending=ascending,
+
+                na_position="last",
+
+            )
+
+            .copy()
+
+        )
+
         eligible_candidates[
+
             "BUY NEW Priority Rank"
+
         ] = range(
+
             1,
+
             len(eligible_candidates) + 1,
+
         )
 
         candidates.loc[
+
             eligible_candidates.index,
+
             "BUY NEW Priority Rank",
+
         ] = (
+
             eligible_candidates[
+
                 "BUY NEW Priority Rank"
+
             ]
+
         )
 
     return candidates
+
+
 # ============================================================
 # COMPLETE CANDIDATE PIPELINE
 # ============================================================
@@ -1004,19 +1455,27 @@ def select_buy_new_candidates(
 
     df,
 
+    portfolio_summary=None,
+
     top_n=MAX_BUY_NEW_DECISIONS,
 
 ):
 
     """
-
     Execute the complete BUY NEW candidate selection pipeline.
 
     Pipeline
-
     --------
 
     New Stock Universe
+
+            ↓
+
+    Investment Score >= 75 Eligibility
+
+            ↓
+
+    Ownership Filter
 
             ↓
 
@@ -1025,6 +1484,10 @@ def select_buy_new_candidates(
             ↓
 
     Investment Ranking
+
+            ↓
+
+    Business Score Ranking
 
             ↓
 
@@ -1043,31 +1506,53 @@ def select_buy_new_candidates(
     Top BUY NEW Candidate Selection
 
     IMPORTANT
-
     ---------
 
     Investment Rank answers:
 
-        Which opportunities are the strongest investments?
+        Which opportunities have the strongest composite
+        Investment Scores?
+
+    Business Score answers:
+
+        Which eligible opportunities have the strongest
+        underlying Growth + Quality profile?
 
     BUY NEW Priority Rank answers:
 
-        Which strong investments are suitable to buy now?
+        Which eligible business opportunities should receive
+        priority for the limited BUY NEW slots?
 
-    Entry timing does NOT alter Investment Rank.
+    Entry timing remains a gate.
+
+    Technical Score is a secondary ordering factor.
+
+    H1 is a secondary continuation tie-breaker.
+
+    The Investment Score threshold remains 75.
+
+    Existing holdings are excluded from the BUY NEW candidate
+    pool and continue through the existing-holding decision
+    path as BUY MORE / HOLD / REDUCE / SELL.
 
     Returns
-
     -------
 
     pd.DataFrame
 
-        Prioritised BUY NEW candidate shortlist.
-
+        Prioritised BUY NEW candidate shortlist containing
+        genuinely unowned positions.
     """
 
     # --------------------------------------------------------
     # NEW OPPORTUNITY UNIVERSE
+    #
+    # get_new_stock_opportunities() already enforces:
+    #
+    #     Investment Score >= 75
+    #
+    # This is deliberately an eligibility gate rather than
+    # a top-N Investment Score selection.
     # --------------------------------------------------------
 
     new_opportunities = (
@@ -1087,6 +1572,80 @@ def select_buy_new_candidates(
         or new_opportunities.empty
 
     ):
+
+        return pd.DataFrame()
+
+    # --------------------------------------------------------
+    # OWNERSHIP FILTER
+    #
+    # BUY NEW candidates must be genuinely unowned positions.
+    #
+    # Existing holdings are handled by the existing-holding
+    # decision path as BUY MORE / HOLD / REDUCE / SELL.
+    #
+    # Ownership is taken from portfolio_summary, which is the
+    # authoritative current portfolio state.
+    # --------------------------------------------------------
+
+    if (
+
+        portfolio_summary is not None
+
+        and not portfolio_summary.empty
+
+        and "Ticker" in portfolio_summary.columns
+
+        and "Ticker" in new_opportunities.columns
+
+    ):
+
+        owned_tickers = set(
+
+            portfolio_summary[
+
+                "Ticker"
+
+            ]
+
+            .dropna()
+
+            .astype(str)
+
+            .str.strip()
+
+            .str.upper()
+
+        )
+
+        new_opportunities = (
+
+            new_opportunities[
+
+                ~new_opportunities[
+
+                    "Ticker"
+
+                ]
+
+                .astype(str)
+
+                .str.strip()
+
+                .str.upper()
+
+                .isin(
+
+                    owned_tickers
+
+                )
+
+            ]
+
+            .copy()
+
+        )
+
+    if new_opportunities.empty:
 
         return pd.DataFrame()
 
@@ -1117,7 +1676,9 @@ def select_buy_new_candidates(
     # --------------------------------------------------------
     # INVESTMENT RANKING
     #
-    # This is deliberately independent of entry timing.
+    # Investment Rank is retained for audit/reporting.
+    #
+    # Business Score is calculated here.
     # --------------------------------------------------------
 
     ranked_candidates = (
@@ -1143,9 +1704,13 @@ def select_buy_new_candidates(
     # --------------------------------------------------------
     # ENTRY QUALITY + BUY NEW ELIGIBILITY
     #
-    # Investment Rank is preserved.
+    # The complete eligible Investment Score >= 75 universe
+    # is reviewed here.
     #
-    # BUY NEW Priority Rank is calculated separately.
+    # We deliberately do NOT call select_top_candidates()
+    # before Entry Quality / Business ranking because that
+    # would reintroduce Investment Score as the primary
+    # BUY NEW selection mechanism.
     # --------------------------------------------------------
 
     reviewed_candidates = (
@@ -1205,6 +1770,9 @@ def select_buy_new_candidates(
 
     # --------------------------------------------------------
     # BUY NEW PRIORITY ORDER
+    #
+    # build_candidate_review() has already calculated the
+    # authoritative BUY NEW Priority Rank.
     # --------------------------------------------------------
 
     if (
@@ -1260,8 +1828,18 @@ def select_buy_new_candidates(
     #
     # This is the shortlist used downstream.
     #
-    # The top_n limit applies to the best candidates
-    # that are actually suitable for entry now.
+    # The top_n limit applies only after:
+    #
+    #     Investment Score eligibility
+    #     Ownership exclusion
+    #     BUY signal filtering
+    #     Entry Quality eligibility
+    #     Business Score ranking
+    #     Technical Score ordering
+    #     H1 ordering
+    #
+    # Up to three genuinely new BUY NEW candidates are
+    # selected by default.
     # --------------------------------------------------------
 
     if (
@@ -1293,8 +1871,11 @@ def select_buy_new_candidates(
 # ============================================================
 
 def build_candidate_lookup(
+
     candidates,
+
 ):
+
     """
     Build a ticker-keyed lookup for the selected candidate set.
 
@@ -1311,9 +1892,11 @@ def build_candidate_lookup(
     """
 
     if candidates is None or candidates.empty:
+
         return {}
 
     if "Ticker" not in candidates.columns:
+
         return {}
 
     lookup = {}
@@ -1321,13 +1904,19 @@ def build_candidate_lookup(
     for _, row in candidates.iterrows():
 
         ticker = normalise_text(
+
             row.get(
+
                 "Ticker",
+
                 "",
+
             )
+
         )
 
         if not ticker:
+
             continue
 
         lookup[ticker] = row.to_dict()

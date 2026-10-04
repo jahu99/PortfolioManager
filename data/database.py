@@ -674,6 +674,28 @@ def initialise_database():
             )
 
     # -------------------------------------------------
+    # Check recommendation evidence columns
+    # -------------------------------------------------
+
+    cursor.execute(
+        "PRAGMA table_info(recommendation_evidence)"
+    )
+
+    evidence_columns = {
+        row[1]
+        for row in cursor.fetchall()
+    }
+
+    if "entry_quality" not in evidence_columns:
+
+        cursor.execute(
+            """
+            ALTER TABLE recommendation_evidence
+            ADD COLUMN entry_quality TEXT
+            """
+        )
+
+    # -------------------------------------------------
     # Commit migrations
     # -------------------------------------------------
 
@@ -977,7 +999,7 @@ def save_recommendations(
 
                         ?, ?, ?, ?, ?,
 
-                        ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, 
 
                         ?, ?, ?, ?, ?,
 

@@ -963,6 +963,12 @@ def collect_market_intelligence(
 
         "Recent News":
             [],
+
+        "Country": None,
+
+        "Exchange": None,
+
+        "Quote Type": None,
     }
 
     # ========================================================
@@ -999,6 +1005,12 @@ def collect_market_intelligence(
         recommendation = info.get(
             "recommendationKey"
         )
+
+        intelligence["Country"] = info.get("country")
+
+        intelligence["Exchange"] = info.get("exchange")
+
+        intelligence["Quote Type"] = info.get("quoteType")
 
         intelligence[
             "Analyst Recommendation"

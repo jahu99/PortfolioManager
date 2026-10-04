@@ -5360,6 +5360,71 @@ def generate_final_portfolio_decisions(
             base_row
         )
 
+
+        # ----------------------------------------------------
+        # Propagate factual Market Intelligence security
+        # metadata into the final decision record.
+        #
+        # These fields are used downstream by portfolio
+        # reallocation for deterministic structural-risk
+        # assessment.
+        #
+        # Market Intelligence remains shadow-mode intelligence:
+        # these fields do not alter the AI decision chain,
+        # Investment Score, governance, reconciliation, or
+        # final action.
+        # ----------------------------------------------------
+
+        if (
+            isinstance(
+                market_intelligence,
+                pd.DataFrame,
+            )
+            and not market_intelligence.empty
+            and "Ticker" in market_intelligence.columns
+        ):
+
+            market_rows = market_intelligence[
+                market_intelligence[
+                    "Ticker"
+                ]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                ==
+                ticker.upper()
+            ]
+
+            if not market_rows.empty:
+
+                market_record = (
+                    market_rows.iloc[0].to_dict()
+                )
+
+                for field in (
+                    "Country",
+                    "Exchange",
+                    "Quote Type",
+                ):
+
+                    value = market_record.get(
+                        field
+                    )
+
+                    if (
+                        value is not None
+                        and not (
+                            isinstance(
+                                value,
+                                float,
+                            )
+                            and pd.isna(value)
+                        )
+                    ):
+
+                        base_row[field] = value
+
+        
         # ----------------------------------------------------
         # Attach portfolio risk explicitly.
         #

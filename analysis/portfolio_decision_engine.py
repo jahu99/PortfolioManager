@@ -491,7 +491,8 @@ def evaluate_existing_holding(
 
 def generate_portfolio_decisions(
     portfolio_summary,
-    opportunities=None
+    opportunities=None,
+    analysis_results=None
 ):
     """
     Generate portfolio-level decisions.
@@ -591,6 +592,70 @@ def generate_portfolio_decisions(
         )
 
     # ========================================================
+    # PRODUCTION ANALYSIS LOOKUP
+    #
+    # Full stock-analysis universe used for existing holdings.
+    # This is deliberately separate from `intelligence`, which
+    # contains BUY NEW opportunities only.
+    # ========================================================
+
+    analysis_lookup = {}
+
+    if analysis_results is not None:
+
+        analysis_data = pd.DataFrame(
+            analysis_results
+        )
+
+        if (
+            not analysis_data.empty
+            and
+            "Ticker" in analysis_data.columns
+        ):
+
+            analysis_data["Ticker"] = (
+                analysis_data["Ticker"]
+                .apply(clean_ticker)
+            )
+
+            analysis_data = analysis_data[
+                analysis_data["Ticker"] != ""
+            ]
+
+            if "Investment Score" in analysis_data.columns:
+
+                analysis_data["_Score"] = (
+                    pd.to_numeric(
+                        analysis_data[
+                            "Investment Score"
+                        ],
+                        errors="coerce"
+                    )
+                    .fillna(0)
+                )
+
+                analysis_data = (
+                    analysis_data
+                    .sort_values(
+                        "_Score",
+                        ascending=False
+                    )
+                    .drop_duplicates(
+                        subset=["Ticker"],
+                        keep="first"
+                    )
+                    .drop(
+                        columns=["_Score"]
+                    )
+                )
+
+            analysis_lookup = (
+                analysis_data
+                .set_index("Ticker")
+                .to_dict("index")
+            )
+
+    # ========================================================
     # EXISTING HOLDINGS
     # ========================================================
 
@@ -638,7 +703,7 @@ def generate_portfolio_decisions(
                 )
             )
 
-            stock_info = intelligence.get(
+            stock_info = analysis_lookup.get(
                 ticker,
                 {}
             )
@@ -1114,6 +1179,11 @@ def generate_portfolio_decisions(
             # NEW STOCK
             # =================================================
 
+            analysis_info = analysis_lookup.get(
+                ticker,
+                {}
+            )
+
             investment_score = safe_float(
                 get_value(
                     row,
@@ -1163,17 +1233,26 @@ def generate_portfolio_decisions(
             )
 
             sector = get_value(
-                row,
+                analysis_info,
                 "Sector",
-                default="Unknown"
+                default=get_value(
+                    row,
+                    "Sector",
+                    default="Unknown"
+                )
             )
 
             sector_allocation = safe_float(
                 get_value(
-                    row,
+                    analysis_info,
                     "Sector Allocation %",
                     "Sector Allocation",
-                    default=0
+                    default=get_value(
+                        row,
+                        "Sector Allocation %",
+                        "Sector Allocation",
+                        default=0
+                    )
                 )
             )
 
@@ -1223,10 +1302,15 @@ def generate_portfolio_decisions(
                     ticker,
                 "Name":
                     get_value(
-                        row,
+                        analysis_info,
                         "Name",
                         "name",
-                        default=""
+                        default=get_value(
+                            row,
+                            "Name",
+                            "name",
+                            default=""
+                        )
                     ),
                 "Action":
                     action,

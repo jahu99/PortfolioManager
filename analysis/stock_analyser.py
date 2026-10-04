@@ -310,6 +310,11 @@ def analyse_stock(ticker):
                         0
                     ),
 
+                "Earnings Growth":
+                    fundamentals.get(
+                        "Earnings Growth"
+                    ),
+
                 "Return on Equity":
                     fundamentals.get(
                         "Return on Equity",
@@ -479,6 +484,10 @@ def analyse_stock(ticker):
                     0
                 ),
 
+            "Earnings Growth":
+                fundamentals.get(
+                    "Earnings Growth"
+                ),
 
             "Profit Margin":
                 fundamentals.get(

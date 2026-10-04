@@ -887,6 +887,21 @@ def main():
                             "Unknown"
                         ),
 
+                    "Country":
+                        fundamentals.get(
+                            "Country"
+                        ),
+
+                    "Exchange":
+                        fundamentals.get(
+                            "Exchange"
+                        ),
+
+                    "Quote Type":
+                        fundamentals.get(
+                            "Quote Type"
+                        ),
+
                     # Recommendation Engine
                     "Recommendation Reasons":
                         recommendation[
@@ -1233,7 +1248,8 @@ def main():
         
         buy_new_candidates = (
             select_buy_new_candidates(
-                pd.DataFrame(results)
+                pd.DataFrame(results),
+                portfolio_summary=portfolio_summary,
             )
         )
         
@@ -1243,6 +1259,23 @@ def main():
         
             f"{len(buy_new_candidates)}"
         
+        )
+
+        print("\nSELECTED BUY NEW CANDIDATES")
+
+        print(
+            buy_new_candidates[
+                [
+                    "Ticker",
+                    "Investment Score",
+                    "Signal",
+                    "Entry Quality",
+                    "Quality Score",
+                    "Growth Score",
+                    "Technical Score",
+                    "AI Conviction",
+                ]
+            ].to_string(index=False)
         )
         
 
@@ -1331,17 +1364,13 @@ def main():
         )
 
         portfolio_decisions = (
-
             generate_portfolio_decisions(
-
                 portfolio_summary,
-
-                pd.DataFrame(results)
-
+                buy_new_candidates,
+                results
             )
-
         )
-    
+
         print(
             "\nPORTFOLIO DECISIONS"
         )
@@ -1396,18 +1425,9 @@ def main():
 
         # Convert stock results into dataframe for capital allocator
 
-        if isinstance(
-            results,
-            list
-        ):
-
-            opportunities_df = pd.DataFrame(
-                results
-            )
-
-        else:
-
-            opportunities_df = results
+        opportunities_df = pd.DataFrame(
+            results
+        )
 
         capital_allocation = (
             generate_capital_allocation(

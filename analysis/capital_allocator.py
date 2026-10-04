@@ -1130,6 +1130,44 @@ def generate_capital_allocation(
                 "Asset Type":
                     asset_type,
 
+                                "Name":
+                    row.get(
+                        "Name",
+                        ""
+                    ),
+
+                "Sector":
+                    row.get(
+                        "Sector",
+                        "Unknown"
+                    ),
+
+                "Country":
+                    row.get(
+                        "Country",
+                        ""
+                    ),
+
+                "Exchange":
+                    row.get(
+                        "Exchange",
+                        ""
+                    ),
+
+                "Quote Type":
+                    row.get(
+                        "Quote Type",
+                        ""
+                    ),
+
+                "Sector Allocation %":
+                    safe_float(
+                        row.get(
+                            "Sector Allocation %",
+                            0
+                        )
+                    ),
+
                 "Price":
                     price,
 
@@ -1918,6 +1956,12 @@ def generate_capital_allocation(
         "Action",
         "Existing Holding",
         "Asset Type",
+        "Name",
+        "Sector",
+        "Country",
+        "Exchange",
+        "Quote Type",
+        "Sector Allocation %",
         "Price",
         "Quantity",
         "Reduction %",
