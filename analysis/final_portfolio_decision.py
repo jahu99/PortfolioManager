@@ -1166,13 +1166,22 @@ def build_eligible_population(
         if action != "BUY NEW":
             continue
 
-        entry_quality = upper_text(
-            row_value(
-                allocation_row,
-                "Entry Quality",
-                default=""
-            )
-        )
+        # --------------------------------------------------------
+        # BUY NEW deployment eligibility
+        #
+        # Keep this logic aligned with Capital Allocation.
+        #
+        # Entry Quality is NOT a hard eligibility filter.
+        # It is retained as decision-layer / deployment context
+        # for future graduated allocation and entry calibration.
+        #
+        # Valuation remains the current hard deployment
+        # constraint:
+        #
+        #     OVERVALUED -> excluded
+        #
+        # This deliberately mirrors capital_allocator(4).py.
+        # --------------------------------------------------------
 
         valuation = upper_text(
             row_value(
@@ -1183,15 +1192,8 @@ def build_eligible_population(
             "UNKNOWN",
         )
 
-        if entry_quality not in (
-            "REASONABLE",
-            "MODERATELY EXTENDED",
-        ):
-            continue
-
         if valuation == "OVERVALUED":
             continue
-
         # --------------------------------------------------------
         # Start with the analytical decision-layer record when
         # available.
@@ -1960,8 +1962,8 @@ def run_governed_chain(
             recommendation_id=recommendation_id,
         ),
     )
-    
-   
+
+
     # ============================================================
     # HISTORICAL RECOMMENDATION INTELLIGENCE
     #
@@ -2313,14 +2315,14 @@ def run_governed_chain(
     # LLM REVIEW
     # ============================================================
 
-    
+
     review = review_ai_decision(
         portfolio=context,
         candidate=candidate,
         decision=deterministic,
     )
 
-  
+
     # ============================================================
     # RECONCILIATION
     # ============================================================
@@ -5265,7 +5267,7 @@ def generate_final_portfolio_decisions(
 
     ticker_horizon_lookup = {}
 
-    
+
 
     if (
         isinstance(
@@ -5424,7 +5426,7 @@ def generate_final_portfolio_decisions(
 
                         base_row[field] = value
 
-        
+
         # ----------------------------------------------------
         # Attach portfolio risk explicitly.
         #

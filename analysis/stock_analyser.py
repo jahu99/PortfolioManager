@@ -565,7 +565,20 @@ def analyse_stock(ticker):
                     "Unknown"
                 ),
 
+            "Country":
+                fundamentals.get(
+                    "Country"
+                ),
 
+            "Exchange":
+                fundamentals.get(
+                    "Exchange"
+                ),
+
+            "Quote Type":
+                fundamentals.get(
+                    "Quote Type"
+                ),
 
             "Recommendation Reasons":
                 recommendation.get(

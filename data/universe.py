@@ -75,13 +75,9 @@ def save_universe_cache(tickers):
 # -------------------------------------------------
 
 EXCLUDED_SUFFIXES = (
-    "W",      # Warrants
-    "WS",
-    "WT",
-    "U",      # Units
-    "R",      # Rights
-    "RT",
-    "P"       # Preferred shares
+    "WS",     # Warrants
+    "WT",     # Warrants
+    "RT"      # Rights
 )
 
 

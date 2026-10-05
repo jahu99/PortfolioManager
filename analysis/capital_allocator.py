@@ -603,6 +603,37 @@ def is_owned(
         ) > 0
     )
 
+def first_non_empty(
+    *values,
+    default=""
+):
+    """
+    Return the first value that is neither None nor NaN
+    nor an empty string.
+    """
+
+    for value in values:
+
+        if value is None:
+            continue
+
+        try:
+            if pd.isna(value):
+                continue
+        except Exception:
+            pass
+
+        if isinstance(value, str):
+
+            value = value.strip()
+
+            if not value:
+                continue
+
+        return value
+
+    return default
+
 
 # ============================================================
 # MAIN ALLOCATOR
@@ -611,7 +642,8 @@ def is_owned(
 def generate_capital_allocation(
     portfolio_summary,
     opportunities=None,
-    portfolio_decisions=None
+    portfolio_decisions=None,
+    metadata_source=None
 ):
     """
     Generate portfolio capital allocation.
@@ -683,6 +715,186 @@ def generate_capital_allocation(
     allocations = []
 
     # ========================================================
+    # SECURITY METADATA LOOKUP
+    #
+    # metadata_source is the full stock-analysis result set.
+    # It is used ONLY for factual security metadata.
+    #
+    # opportunities remains the approved BUY NEW / BUY MORE
+    # population and must not be broadened for metadata purposes.
+    # ========================================================
+
+    security_metadata = {}
+
+    metadata_sources = []
+
+    if isinstance(
+        metadata_source,
+        pd.DataFrame
+    ):
+        metadata_sources.append(
+            metadata_source
+        )
+
+    if isinstance(
+        opportunities,
+        pd.DataFrame
+    ):
+        metadata_sources.append(
+            opportunities
+        )
+
+    for metadata_df in metadata_sources:
+
+        for metadata_row in metadata_df.to_dict(
+            "records"
+        ):
+
+            metadata_ticker = clean_ticker(
+                metadata_row.get(
+                    "Ticker",
+                    ""
+                )
+            )
+
+            if not metadata_ticker:
+                continue
+
+            existing_metadata = security_metadata.get(
+                metadata_ticker,
+                {}
+            )
+
+            security_metadata[
+                metadata_ticker
+            ] = {
+                "Name":
+                    first_non_empty(
+                        existing_metadata.get("Name"),
+                        metadata_row.get("Name"),
+                    ),
+
+                "Sector":
+                    first_non_empty(
+                        existing_metadata.get("Sector"),
+                        metadata_row.get("Sector"),
+                    ),
+
+                "Country":
+                    first_non_empty(
+                        existing_metadata.get("Country"),
+                        metadata_row.get("Country"),
+                    ),
+
+                "Exchange":
+                    first_non_empty(
+                        existing_metadata.get("Exchange"),
+                        metadata_row.get("Exchange"),
+                    ),
+
+                "Quote Type":
+                    first_non_empty(
+                        existing_metadata.get("Quote Type"),
+                        metadata_row.get("Quote Type"),
+                    ),
+
+                "Sector Allocation %":
+                    first_non_empty(
+                        existing_metadata.get(
+                            "Sector Allocation %"
+                        ),
+                        metadata_row.get(
+                            "Sector Allocation %"
+                        ),
+                        default=0,
+                    ),
+            }
+    # ========================================================
+    # PORTFOLIO METADATA LOOKUP
+    #
+    # Existing HOLD / REDUCE / SELL decisions do not
+    # necessarily carry full security metadata.
+    # Use portfolio_summary as the authoritative source
+    # for existing holdings.
+    # ========================================================
+
+    portfolio_metadata = {}
+
+    for portfolio_row in portfolio_summary.to_dict("records"):
+
+        portfolio_ticker = clean_ticker(
+            portfolio_row.get(
+                "Ticker",
+                ""
+            )
+        )
+
+        if portfolio_ticker:
+            portfolio_metadata[
+                portfolio_ticker
+            ] = portfolio_row
+
+    # ========================================================
+    # CURRENT PORTFOLIO SECTOR ALLOCATION
+    #
+    # Calculate each sector's share of the current invested
+    # portfolio using actual holdings and market values.
+    #
+    # CASH and unowned positions are excluded.
+    # BUY NEW / BUY MORE recommendations are excluded.
+    # ========================================================
+    total_invested_value = get_total_portfolio_value(
+        ownership
+    )
+
+    sector_values = {}
+
+    if total_invested_value > 0:
+        for ownership_ticker, holding in ownership.items():
+            if ownership_ticker == "CASH":
+                continue
+
+            if not holding.get("owned", False):
+                continue
+
+            market_value = safe_float(
+                holding.get("market_value", 0)
+            )
+
+            if market_value <= 0:
+                continue
+
+            metadata_row = security_metadata.get(
+                ownership_ticker,
+                {}
+            )
+
+            sector = first_non_empty(
+                metadata_row.get("Sector"),
+                portfolio_metadata.get(
+                    ownership_ticker,
+                    {}
+                ).get("Sector"),
+                default="Unknown",
+            )
+
+            sector_values[sector] = (
+                sector_values.get(sector, 0)
+                + market_value
+            )
+
+    sector_allocation = {}
+
+    if total_invested_value > 0:
+        sector_allocation = {
+            sector: round(
+                (value / total_invested_value) * 100,
+                2
+            )
+            for sector, value in sector_values.items()
+        }
+
+    # ========================================================
     # REDUCTIONS
     # ========================================================
 
@@ -700,6 +912,14 @@ def generate_capital_allocation(
             row.get(
                 "Ticker",
                 ""
+            )
+        )
+
+        metadata_row = security_metadata.get(
+            ticker,
+            portfolio_metadata.get(
+                ticker,
+                {}
             )
         )
 
@@ -882,6 +1102,47 @@ def generate_capital_allocation(
                         row
                     ),
 
+                "Name":
+                    first_non_empty(
+                        row.get("Name"),
+                        metadata_row.get("Name"),
+                    ),
+
+                "Sector":
+                    first_non_empty(
+                        row.get("Sector"),
+                        metadata_row.get("Sector"),
+                    ),
+
+                "Country":
+                    first_non_empty(
+                        row.get("Country"),
+                        metadata_row.get("Country"),
+                    ),
+
+                "Exchange":
+                    first_non_empty(
+                        row.get("Exchange"),
+                        metadata_row.get("Exchange"),
+                    ),
+
+                "Quote Type":
+                    first_non_empty(
+                        row.get("Quote Type"),
+                        metadata_row.get("Quote Type"),
+                    ),
+
+                "Sector Allocation %":
+                    safe_float(
+                        sector_allocation.get(
+                            first_non_empty(
+                                row.get("Sector"),
+                                metadata_row.get("Sector"),
+                                default="Unknown",
+                            ),
+                            0,
+                        )
+                    ),
                 "Price":
                     price,
 
@@ -1130,7 +1391,7 @@ def generate_capital_allocation(
                 "Asset Type":
                     asset_type,
 
-                                "Name":
+                "Name":
                     row.get(
                         "Name",
                         ""
@@ -1162,12 +1423,15 @@ def generate_capital_allocation(
 
                 "Sector Allocation %":
                     safe_float(
-                        row.get(
-                            "Sector Allocation %",
-                            0
+                        sector_allocation.get(
+                            first_non_empty(
+                                row.get("Sector"),
+                                metadata_row.get("Sector"),
+                                default="Unknown",
+                            ),
+                            0,
                         )
                     ),
-
                 "Price":
                     price,
 
@@ -1355,14 +1619,33 @@ def generate_capital_allocation(
     }
 
     # ========================================================
-    # BUY NEW ENTRY QUALITY FILTER
+    # BUY NEW VALUATION FILTER
     #
-    # BUY NEW candidates that are already extended are not
-    # eligible for selection.
+    # Entry Quality is deliberately NOT a hard eligibility
+    # filter at this stage.
     #
-    # UNDER_EXTENDED and GOOD remain eligible.
+    # Entry Quality is deployment/timing information and must
+    # reach the allocator so that we can later calibrate
+    # graduated allocation behaviour:
     #
-    # EXTENDED and SEVERELY_EXTENDED are excluded.
+    #     REASONABLE
+    #         -> normal allocation
+    #
+    #     MODERATELY EXTENDED
+    #         -> reduced / staged allocation
+    #
+    #     EXTENDED
+    #         -> small / staged allocation or wait
+    #
+    #     HIGHLY EXTENDED
+    #         -> wait / zero immediate allocation
+    #
+    # The allocation treatment for these states is NOT yet
+    # calibrated and therefore is not hard-coded here.
+    #
+    # Valuation remains a hard deployment constraint:
+    #
+    #     OVERVALUED -> excluded
     #
     # BUY MORE candidates are deliberately unaffected.
     # ========================================================
@@ -1377,31 +1660,20 @@ def generate_capital_allocation(
 
             candidate["Action"] != "BUY NEW"
 
-            or (
+            or
 
-                candidate.get(
-                    "Entry Quality",
-                    ""
-                ).strip().upper() in (
-                    "REASONABLE",
-                    "MODERATELY EXTENDED",
-                )
-
-                and
-
-                candidate.get(
-                    "Valuation",
-                    "UNKNOWN"
-                ).strip().upper() != "OVERVALUED"
-
-            )
+            candidate.get(
+                "Valuation",
+                "UNKNOWN"
+            ).strip().upper() != "OVERVALUED"
 
         )
 
     }
 
 
-    
+
+
     # ========================================================
     # RANK ALL BUY OPPORTUNITIES TOGETHER
     #
@@ -1769,6 +2041,14 @@ def generate_capital_allocation(
                 )
             )
 
+            metadata_row = security_metadata.get(
+                ticker,
+                portfolio_metadata.get(
+                    ticker,
+                    {}
+                )
+            )
+
             if not ticker:
                 continue
 
@@ -1858,6 +2138,57 @@ def generate_capital_allocation(
                     "Asset Type":
                         asset_type,
 
+                    "Name":
+                        first_non_empty(
+                            row.get("Name"),
+                            metadata_row.get("Name"),
+                        ),
+
+                    "Sector":
+                        first_non_empty(
+                            row.get("Sector"),
+                            metadata_row.get("Sector"),
+                        ),
+
+                    "Country":
+                        first_non_empty(
+                            row.get("Country"),
+                            metadata_row.get("Country"),
+                        ),
+
+                    "Exchange":
+                        first_non_empty(
+                            row.get("Exchange"),
+                            metadata_row.get("Exchange"),
+                        ),
+
+                    "Quote Type":
+                        first_non_empty(
+                            row.get("Quote Type"),
+                            metadata_row.get("Quote Type"),
+                        ),
+
+                   "Sector Allocation %":
+
+                        safe_float(
+
+                            sector_allocation.get(
+
+                                first_non_empty(
+
+                                    row.get("Sector"),
+
+                                    metadata_row.get("Sector"),
+
+                                    default="Unknown",
+
+                                ),
+
+                                0,
+
+                            )
+
+                        ),
                     "Price":
                         safe_float(
                             row.get(

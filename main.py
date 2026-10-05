@@ -353,9 +353,34 @@ def main():
         f"{len(tickers)} stocks"
     )
 
+    # ---------------------------------
+    # Technical eligibility gate
+    #
+    # Do not use Technical Score to
+    # determine the final 200 ranking.
+    #
+    # Technical Score is used only as
+    # an eligibility floor. Investment
+    # Score performs the final ranking.
+    # ---------------------------------
+
     candidates = run_market_scan(
         tickers,
-        limit=200
+        limit=len(tickers)
+    )
+
+    candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get(
+            "Technical Score",
+            0
+        ) >= 73
+    ]
+
+    print(
+        f"TECHNICAL ELIGIBILITY >= 73: "
+        f"{len(candidates)} candidates"
     )
 
     results = []
@@ -1030,6 +1055,38 @@ def main():
 
             traceback.print_exc()
 
+    #---------------------------------
+    # Investment Score candidate ranking
+    #
+    # Technical Score has already been
+    # applied only as an eligibility floor.
+    #
+    # Investment Score now determines
+    # which 200 opportunities proceed
+    # into portfolio processing.
+    # ---------------------------------
+
+    results = sorted(
+        results,
+        key=lambda x: x.get(
+            "Investment Score",
+            0
+        ),
+        reverse=True
+    )
+
+    print(
+        f"INVESTMENT RANKING POOL: "
+        f"{len(results)}"
+    )
+
+    results = results[:200]
+
+    print(
+        f"TOP 200 INVESTMENT CANDIDATES: "
+        f"{len(results)}"
+    )
+
     # ---------------------------------
     # Track already analysed stocks
     # ---------------------------------
@@ -1168,8 +1225,8 @@ def main():
         f"RESULTS AFTER SORT: {len(results)}"
     )
 
-   
-    
+
+
 
 
     # ---------------------------------
@@ -1245,20 +1302,20 @@ def main():
         # Investment opportunity ranking is
         # performed before portfolio governance.
         # ---------------------------------
-        
+
         buy_new_candidates = (
             select_buy_new_candidates(
                 pd.DataFrame(results),
                 portfolio_summary=portfolio_summary,
             )
         )
-        
+
         print(
-        
+
             f"BUY NEW CANDIDATES: "
-        
+
             f"{len(buy_new_candidates)}"
-        
+
         )
 
         print("\nSELECTED BUY NEW CANDIDATES")
@@ -1277,7 +1334,7 @@ def main():
                 ]
             ].to_string(index=False)
         )
-        
+
 
         portfolio_actions = (
             generate_portfolio_recommendations(
@@ -1430,20 +1487,38 @@ def main():
         )
 
         capital_allocation = (
+
             generate_capital_allocation(
+
                 portfolio_summary=(
+
                     portfolio_summary
+
                 ),
+
                 opportunities=(
+
                     opportunities_df
+
                 ),
+
                 portfolio_decisions=(
+
                     portfolio_decisions
+
+                ),
+
+                metadata_source=(
+
+                    market_intelligence
+
                 )
+
             )
+
         )
 
-        
+
         decisions = generate_decisions(
             portfolio_summary,
             results,
@@ -1790,7 +1865,7 @@ def main():
         print(
             f"Recommendation Intelligence skipped: {e}"
         )
-    
+
     # ---------------------------------
     # Final Portfolio Decisions
     # ---------------------------------

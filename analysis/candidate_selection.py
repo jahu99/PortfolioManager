@@ -1085,69 +1085,58 @@ def build_candidate_review(
         )
 
         # ----------------------------------------------------
-        # Existing entry classification
+        # ENTRY QUALITY IS NOT A HARD BUY NEW ELIGIBILITY GATE
         #
-        # Entry Quality remains the hard BUY NEW timing gate.
+        # Investment Score determines whether the opportunity
+        # is strong enough to enter the BUY NEW pipeline.
         #
-        # H1 does NOT alter this gate.
+        # Entry Quality describes deployment timing and is
+        # passed downstream to Capital Allocation.
+        #
+        # Therefore:
+        #
+        #   FAVOURABLE ENTRY
+        #       → normal deployment candidate
+        #
+        #   TIMING CAUTION
+        #       → strong investment, timing caution
+        #
+        #   HIGH TIMING RISK
+        #       → strong investment, wait / staged deployment
+        #
+        # The allocator will ultimately determine how much
+        # capital, if any, should be deployed.
         # ----------------------------------------------------
 
         if timing_status == "FAVOURABLE ENTRY":
 
             candidate_statuses.append(
-
                 "STRONG CANDIDATE"
-
-            )
-
-            buy_new_eligible.append(
-
-                True
-
             )
 
         elif timing_status == "TIMING CAUTION":
 
             candidate_statuses.append(
-
                 "STRONG INVESTMENT - TIMING CAUTION"
-
-            )
-
-            buy_new_eligible.append(
-
-                False
-
             )
 
         elif timing_status == "HIGH TIMING RISK":
 
             candidate_statuses.append(
-
-                "STRONG INVESTMENT - WAIT FOR ENTRY"
-
-            )
-
-            buy_new_eligible.append(
-
-                False
-
+                "STRONG INVESTMENT - WAIT / STAGED ENTRY"
             )
 
         else:
 
             candidate_statuses.append(
-
-                "CANDIDATE - ENTRY QUALITY UNKNOWN"
-
+                "STRONG INVESTMENT - ENTRY QUALITY UNKNOWN"
             )
 
-            buy_new_eligible.append(
-
-                False
-
-            )
-
+        # Entry Quality is now informational/deployment
+        # guidance rather than an upstream eligibility veto.
+        buy_new_eligible.append(
+            True
+        )
     # --------------------------------------------------------
     # Persist entry assessment
     # --------------------------------------------------------
@@ -1351,48 +1340,49 @@ def build_candidate_review(
 
             eligible_candidates["Technical Score"] = 0.0
 
-        # ----------------------------------------------------
         # FINAL BUY NEW PRIORITY ORDER
         #
-        # 1. Business Score
-        # 2. Technical Score
-        # 3. H1 Priority
-        # 4. Investment Rank
-        # ----------------------------------------------------
+        # Investment Score is the primary BUY NEW ranking
+        # because it is the authoritative production measure
+        # of investment attractiveness.
+        #
+        # Technical, Quality, Growth and Confidence are used
+        # only as deterministic tie-breakers.
+        #
+        # Entry Quality is considered separately from
+        # Investment Score and should influence deployment
+        # posture rather than determine investment attractiveness.
+        #
+        # Business Score remains available for reporting and
+        # diagnostic purposes but is NOT the primary BUY NEW
+        # ranking mechanism.
 
         sort_columns = [
-
-            "Business Score",
-
+            "Investment Score",
             "Technical Score",
-
+            "Quality Score",
+            "Growth Score",
+            "Confidence Score",
             "_H1 Priority",
-
         ]
 
         ascending = [
-
             False,
-
             False,
-
+            False,
+            False,
+            False,
             True,
-
         ]
 
         if "Investment Rank" in eligible_candidates.columns:
+            sort_columns.append("Investment Rank")
+            ascending.append(True)
 
-            sort_columns.append(
+        if "Ticker" in eligible_candidates.columns:
+            sort_columns.append("Ticker")
+            ascending.append(True)
 
-                "Investment Rank"
-
-            )
-
-            ascending.append(
-
-                True
-
-            )
 
         eligible_candidates = (
 

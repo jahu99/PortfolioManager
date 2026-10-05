@@ -595,6 +595,30 @@ def initialise_database():
             "TEXT",
 
         "entry_quality_mode":
+            "TEXT",
+
+        "pe_ratio":
+            "REAL",
+
+        "forward_pe":
+            "REAL",
+
+        "peg_ratio":
+            "REAL",
+
+        "price_to_sales":
+            "REAL",
+
+        "ev_to_ebitda":
+            "REAL",
+
+        "free_cash_flow":
+            "REAL",
+
+        "valuation":
+            "TEXT",
+
+        "valuation_mode":
             "TEXT"
 
     }
@@ -759,7 +783,15 @@ def backfill_entry_quality_evidence(
             extension_sma200_pct = ?,
             return_5d_pct = ?,
             return_10d_pct = ?,
-            return_20d_pct = ?
+            return_20d_pct = ?,
+            pe_ratio = ?,
+            forward_pe = ?,
+            peg_ratio = ?,
+            price_to_sales = ?,
+            ev_to_ebitda = ?,
+            free_cash_flow = ?,
+            valuation = ?,
+            valuation_mode = ?
         WHERE id = ?
         """,
         (
@@ -770,6 +802,14 @@ def backfill_entry_quality_evidence(
             stock.get("Return 5D %"),
             stock.get("Return 10D %"),
             stock.get("Return 20D %"),
+            stock.get("PE Ratio"),
+            stock.get("Forward PE"),
+            stock.get("PEG Ratio"),
+            stock.get("Price to Sales"),
+            stock.get("EV to EBITDA"),
+            stock.get("Free Cash Flow"),
+            stock.get("Valuation"),
+            stock.get("Valuation Mode"),
             evidence_id,
         )
     )
@@ -906,7 +946,7 @@ def save_recommendations(
                     ]
                 )
 
-               
+
                 # ---------------------------------------------
                 # Existing evidence snapshot
                 # ---------------------------------------------
@@ -963,6 +1003,15 @@ def save_recommendations(
                         entry_quality,
                         entry_quality_mode,
 
+                        pe_ratio,
+                        forward_pe,
+                        peg_ratio,
+                        price_to_sales,
+                        ev_to_ebitda,
+                        free_cash_flow,
+                        valuation,
+                        valuation_mode,
+
                         trend,
                         trend_score,
                         momentum_score,
@@ -999,7 +1048,9 @@ def save_recommendations(
 
                         ?, ?, ?, ?, ?,
 
-                        ?, ?, ?, ?, ?, ?, ?, 
+                        ?, ?, ?, ?, ?, ?, ?,
+
+                        ?, ?, ?, ?, ?, ?, ?, ?,
 
                         ?, ?, ?, ?, ?,
 
@@ -1103,6 +1154,38 @@ def save_recommendations(
 
                         stock.get(
                             "Entry Quality Mode"
+                        ),
+
+                        stock.get(
+                            "PE Ratio"
+                        ),
+
+                        stock.get(
+                            "Forward PE"
+                        ),
+
+                        stock.get(
+                            "PEG Ratio"
+                        ),
+
+                        stock.get(
+                            "Price to Sales"
+                        ),
+
+                        stock.get(
+                            "EV to EBITDA"
+                        ),
+
+                        stock.get(
+                            "Free Cash Flow"
+                        ),
+
+                        stock.get(
+                            "Valuation"
+                        ),
+
+                        stock.get(
+                            "Valuation Mode"
                         ),
 
                         stock.get(
@@ -1359,6 +1442,15 @@ def save_recommendations(
                     entry_quality,
                     entry_quality_mode,
 
+                    pe_ratio,
+                    forward_pe,
+                    peg_ratio,
+                    price_to_sales,
+                    ev_to_ebitda,
+                    free_cash_flow,
+                    valuation,
+                    valuation_mode,
+
                     trend,
                     trend_score,
                     momentum_score,
@@ -1396,6 +1488,8 @@ def save_recommendations(
                     ?, ?, ?, ?, ?,
 
                     ?, ?, ?, ?, ?, ?, ?,
+
+                    ?, ?, ?, ?, ?, ?, ?, ?,
 
                     ?, ?, ?, ?, ?,
 
@@ -1500,6 +1594,38 @@ def save_recommendations(
 
                     stock.get(
                         "Entry Quality Mode"
+                    ),
+
+                    stock.get(
+                        "PE Ratio"
+                    ),
+
+                    stock.get(
+                        "Forward PE"
+                    ),
+
+                    stock.get(
+                        "PEG Ratio"
+                    ),
+
+                    stock.get(
+                        "Price to Sales"
+                    ),
+
+                    stock.get(
+                        "EV to EBITDA"
+                    ),
+
+                    stock.get(
+                        "Free Cash Flow"
+                    ),
+
+                    stock.get(
+                        "Valuation"
+                    ),
+
+                    stock.get(
+                        "Valuation Mode"
                     ),
 
                     stock.get(
