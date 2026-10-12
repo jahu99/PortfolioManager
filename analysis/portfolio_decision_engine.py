@@ -1485,5 +1485,7 @@ def generate_portfolio_decisions(
             )
         )
 
-    return result
+    return result.to_dict(
+        "records"
+    )
 

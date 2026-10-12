@@ -63,6 +63,10 @@ from analysis.structural_risk import (
         assess_structural_risk,
 )
 
+from analysis.portfolio_reallocation_audit import (
+    build_reallocation_audit,
+)
+
 
 # ============================================================
 # CONFIGURATION
@@ -685,6 +689,7 @@ def select_deployment_destinations(
 
     destination_count = min(
         destination_count,
+        MAX_REALLOCATION_DESTINATIONS,
         len(ranked_destinations)
     )
 
@@ -692,10 +697,6 @@ def select_deployment_destinations(
         :destination_count
     ]
 
-
-# ============================================================
-# DESTINATION PRIORITY
-# ============================================================
 
 # ============================================================
 # DESTINATION PRIORITY
@@ -1600,6 +1601,15 @@ def generate_portfolio_reallocation(
                 ),
                 "Sector": sector,
                 "Asset Type": asset_type,
+                "Country": str(
+                    row.get(
+                        "Country",
+                        row.get(
+                            "country",
+                            ""
+                        )
+                    )
+                ).strip(),
                 "Final Decision": final_decision,
                 "Investment Score": score,
                 "Owned": True,
@@ -1653,6 +1663,54 @@ def generate_portfolio_reallocation(
             )
 
     # ========================================================
+    # CALCULATE COUNTRY EXPOSURE
+    #
+    # Diagnostic only at this stage.
+    # Do not use this as an additional allocation penalty yet.
+    # ========================================================
+
+    country_values = {}
+
+    for position in current_positions:
+
+        country = str(
+            position.get(
+                "Country",
+                ""
+            )
+        ).strip()
+
+        if not country:
+            continue
+
+        current_value = safe_float(
+            position.get(
+                "Current Value",
+                0
+            )
+        )
+
+        country_values[country] = (
+            country_values.get(
+                country,
+                0.0
+            )
+            + current_value
+        )
+
+    country_exposure_percent = {}
+
+    if portfolio_value > 0:
+
+        for country, value in country_values.items():
+
+            country_exposure_percent[country] = round(
+                value
+                / portfolio_value
+                * 100.0,
+                2
+            )
+    # ========================================================
     # BUILD DESTINATIONS
     # ========================================================
 
@@ -1701,6 +1759,11 @@ def generate_portfolio_reallocation(
                 0
             )
         )
+
+        if score < MIN_DESTINATION_SCORE:
+            continue
+
+
 
         risk_score = safe_float(
             row.get(
@@ -1763,6 +1826,7 @@ def generate_portfolio_reallocation(
                 ),
                 "Action": "ADD",
                 "Investment Score": score,
+                "Risk Score": risk_score,
                 "Destination Priority": (
                     destination_priority
                 ),
@@ -1772,6 +1836,15 @@ def generate_portfolio_reallocation(
                 "Final Decision": final_decision,
                 "Sector": sector,
                 "Asset Type": asset_type,
+                "Country": str(
+                    row.get(
+                        "Country",
+                        row.get(
+                            "country",
+                            ""
+                        )
+                    )
+                ).strip(),
 
                 # ----------------------------------------------------
                 # Preserve factual security metadata for the
@@ -1852,6 +1925,36 @@ def generate_portfolio_reallocation(
                 0
             )
         )
+
+        country = str(
+            destination.get(
+                "Country",
+                ""
+            )
+        ).strip()
+
+        country_exposure = safe_float(
+            country_exposure_percent.get(
+                country,
+                0
+            )
+        )
+
+        country_present = bool(
+            country
+            and country in country_exposure_percent
+        )
+
+        if not country:
+            portfolio_fit = "UNKNOWN"
+        elif not country_present:
+            portfolio_fit = "NEW COUNTRY"
+        elif country_exposure >= 50.0:
+            portfolio_fit = "HIGH COUNTRY CONCENTRATION"
+        elif country_exposure >= 30.0:
+            portfolio_fit = "MEANINGFUL COUNTRY CONCENTRATION"
+        else:
+            portfolio_fit = "DIVERSIFIED COUNTRY EXPOSURE"
 
         current_position_percent = 0.0
 
@@ -1962,6 +2065,21 @@ def generate_portfolio_reallocation(
             sector_exposure,
             2
         )
+
+        destination_copy[
+            "Country"
+        ] = country
+
+        destination_copy[
+            "Country Exposure %"
+        ] = round(
+            country_exposure,
+            2
+        )
+
+        destination_copy[
+            "Portfolio Fit"
+        ] = portfolio_fit
 
         destination_copy[
             "Current Position %"
@@ -2442,7 +2560,12 @@ def generate_portfolio_reallocation(
 
     remaining_capital = total_available_capital
 
-        
+    max_destination_allocation = round(
+        total_available_capital
+        * MAX_DESTINATION_SHARE_OF_REALLOCATION,
+        2
+    )
+
     # ========================================================
     # ALLOCATE CAPITAL ACROSS DESTINATIONS
     #
@@ -2514,7 +2637,8 @@ def generate_portfolio_reallocation(
 
             allocation = min(
                 proposed_allocation,
-                capacity
+                capacity,
+                max_destination_allocation
             )
 
             allocation = round(
@@ -2671,9 +2795,16 @@ def generate_portfolio_reallocation(
                     / remaining_weight
                 )
 
+                remaining_destination_cap = max(
+                    0.0,
+                    max_destination_allocation
+                    - already_allocated
+                )
+
                 additional_allocation = min(
                     proportional_share,
                     remaining_capacity,
+                    remaining_destination_cap,
                     remaining_capital
                 )
 
@@ -3198,11 +3329,26 @@ def generate_portfolio_reallocation(
         summary
     )
 
+    reallocation_audit = build_reallocation_audit(
+        destinations=destinations,
+        eligible_destinations=eligible_destinations,
+        deployment_destinations=deployment_destinations,
+        destination_allocations=destination_allocations,
+        funding_candidates=funding_candidates,
+        reallocation_df=reallocation_df,
+        summary=summary,
+        min_destination_score=MIN_DESTINATION_SCORE,
+        min_trade_value=min_reallocation_trade_value,
+        max_destination_share=MAX_DESTINATION_SHARE_OF_REALLOCATION,
+        max_destination_count=MAX_REALLOCATION_DESTINATIONS,
+    )
+
     # ========================================================
     # RETURN
     # ========================================================
 
     return {
         "reallocation": reallocation_df,
-        "summary": summary
+        "summary": summary,
+        "audit": reallocation_audit,
     }

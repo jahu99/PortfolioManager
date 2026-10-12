@@ -90,7 +90,7 @@ import pandas as pd
 # CONFIGURATION
 # ============================================================
 
-DEFAULT_TOP_CANDIDATES = 10
+DEFAULT_TOP_CANDIDATES = 15
 
 MAX_BUY_NEW_DECISIONS = 3
 
@@ -754,6 +754,87 @@ def rank_investment_candidates(df):
 
 
 # ============================================================
+# FINAL BUY NEW PRIORITY ORDER
+#
+# A6 CALIBRATION:
+#
+# Historical + forward validation supports an interaction
+# between Investment Score and Entry Quality.
+#
+# Investment Score remains the BUY NEW eligibility gate
+# at >= 75. It is NOT changed.
+#
+# Validated priority regimes:
+#
+#   1. 80-89.99 + MODERATELY EXTENDED
+#   2. 90+     + REASONABLE
+#   3. 80-89.99 + REASONABLE
+#   4. 75-89.99 + MODERATELY EXTENDED
+#   5. Remaining 90+
+#   6. Remaining 80-89.99
+#   7. Remaining >=75
+#
+# This changes BUY NEW prioritisation only.
+# ============================================================
+
+
+def buy_new_priority_regime(row):
+    """Return the BUY NEW priority regime for a candidate row."""
+
+    score = safe_float(
+        row["Investment Score"],
+        0.0,
+    )
+
+    eq = normalise_text(
+        row["Entry Quality"]
+    )
+
+    # 1. Validated strongest regime
+    if (
+        80.0 <= score < 90.0
+        and eq == "MODERATELY EXTENDED"
+    ):
+        return 0
+
+    # 2. Strong investment quality with reasonable entry
+    if (
+        score >= 90.0
+        and eq == "REASONABLE"
+    ):
+        return 1
+
+    # 3. 80-89.99 with reasonable entry
+    if (
+        80.0 <= score < 90.0
+        and eq == "REASONABLE"
+    ):
+        return 2
+
+    # 4. 75-89.99 with moderately extended entry
+    if (
+        75.0 <= score < 90.0
+        and eq == "MODERATELY EXTENDED"
+    ):
+        return 3
+
+    # 5. Remaining 90+
+    if score >= 90.0:
+        return 4
+
+    # 6. Remaining 80-89.99
+    if score >= 80.0:
+        return 5
+
+    # 7. Remaining eligible candidates >=75
+    if score >= MIN_BUY_NEW_INVESTMENT_SCORE:
+        return 6
+
+    # Defensive fallback
+    return 99
+
+
+# ============================================================
 # TOP CANDIDATE SELECTION
 # ============================================================
 
@@ -797,6 +878,7 @@ def select_top_candidates(
 
     candidates = ranked_candidates.copy()
 
+   
     if "Investment Score" not in candidates.columns:
 
         return candidates.head(top_n).copy()
@@ -1000,18 +1082,29 @@ def build_candidate_review(
 
     Concepts deliberately remain separate:
 
-        Investment Rank
-            The authoritative Investment Score ranking.
+        Investment Score
+            Primary measure of investment attractiveness and
+            authoritative BUY NEW eligibility threshold.
+
+        Investment Score Tier
+            Broad quality tier used for BUY NEW prioritisation:
+
+                90+       = Tier 1
+                80-89.99  = Tier 2
+                75-79.99  = Tier 3
 
         Business Score
             Underlying Growth + Quality attractiveness.
 
         Entry Timing Status
-            Is the current entry technically suitable?
+            Current entry suitability derived from Entry Quality.
+
+        Entry Quality
+            Secondary BUY NEW prioritisation signal within the
+            Investment Score tier.
 
         Technical Score
-            Secondary ordering factor reflecting entry/market
-            characteristics.
+            Secondary technical / market characteristic.
 
         H1 Continuation
             Validated short-term continuation profile.
@@ -1022,20 +1115,31 @@ def build_candidate_review(
 
     BUY NEW priority is:
 
-        1. Business Score
-        2. Technical Score
-        3. H1 Priority
-        4. Investment Rank
+        1. Investment Score Tier
+        2. Entry Quality
+        3. Investment Score
+        4. Technical Score
+        5. Quality Score
+        6. Growth Score
+        7. Confidence Score
+        8. H1 Priority
+        9. Investment Rank
+        10. Ticker
 
-    H1 does NOT:
+    Entry Quality does NOT:
 
         - change Investment Score
         - change Investment Rank
         - change Technical Score
-        - change Entry Quality
-        - make an otherwise ineligible candidate eligible
+        - change BUY NEW eligibility
+        - change the minimum Investment Score threshold
         - override governance
         - override HOLD protection
+        - create a new investment-quality measure
+
+    Entry Quality is used only as a bounded secondary
+    prioritisation signal among candidates that are already
+    eligible for BUY NEW.
     """
 
     if (
@@ -1096,16 +1200,16 @@ def build_candidate_review(
         # Therefore:
         #
         #   FAVOURABLE ENTRY
-        #       → normal deployment candidate
+        #       -> normal deployment candidate
         #
         #   TIMING CAUTION
-        #       → strong investment, timing caution
+        #       -> strong investment, timing caution
         #
         #   HIGH TIMING RISK
-        #       → strong investment, wait / staged deployment
+        #       -> strong investment, wait / staged deployment
         #
-        # The allocator will ultimately determine how much
-        # capital, if any, should be deployed.
+        # The allocator ultimately determines how much capital,
+        # if any, should be deployed.
         # ----------------------------------------------------
 
         if timing_status == "FAVOURABLE ENTRY":
@@ -1132,11 +1236,11 @@ def build_candidate_review(
                 "STRONG INVESTMENT - ENTRY QUALITY UNKNOWN"
             )
 
-        # Entry Quality is now informational/deployment
-        # guidance rather than an upstream eligibility veto.
+        # Entry Quality remains non-blocking for eligibility.
         buy_new_eligible.append(
             True
         )
+
     # --------------------------------------------------------
     # Persist entry assessment
     # --------------------------------------------------------
@@ -1230,34 +1334,37 @@ def build_candidate_review(
     # --------------------------------------------------------
     # BUY NEW PRIORITY RANK
     #
-    # Investment Rank remains available as the authoritative
-    # investment ranking.
+    # Investment Score remains the primary quality hierarchy.
     #
-    # However, the completed diagnostic showed that using
-    # Investment Rank as the primary BUY NEW ordering caused
-    # selected BUY NEW candidates to underperform the broader
-    # eligible opportunity universe.
+    # Rather than allowing small Investment Score differences
+    # to dominate Entry Quality, candidates are first grouped
+    # into broad Investment Score tiers:
     #
-    # BUY NEW therefore separates:
+    #     Tier 1: 90+
+    #     Tier 2: 80-89.99
+    #     Tier 3: 75-79.99
     #
-    #   Investment Score
-    #       Eligibility gate
+    # Within each Investment Score tier, Entry Quality is used
+    # as a secondary prioritisation signal.
     #
-    #   Business Score
-    #       Primary opportunity ranking
+    # Entry Quality ordering:
     #
-    #   Technical Score
-    #       Secondary entry/timing ordering
+    #     MODERATELY EXTENDED
+    #     REASONABLE
+    #     EXTENDED
+    #     HIGHLY EXTENDED
+    #     UNKNOWN / missing
     #
-    #   H1
-    #       Secondary continuation tie-breaker
+    # This is deliberately a ranking change only.
     #
-    #   Investment Rank
-    #       Final deterministic tie-breaker
+    # It does NOT:
     #
-    # This prevents short-term Technical/Investment Score
-    # strength from dominating the selection of underlying
-    # business opportunities.
+    #     - change BUY NEW eligibility
+    #     - change MIN_BUY_NEW_INVESTMENT_SCORE
+    #     - change Investment Score
+    #     - change Investment Rank
+    #     - change Capital Allocation
+    #     - change Portfolio Recalibration
     # --------------------------------------------------------
 
     candidates["BUY NEW Priority Rank"] = pd.NA
@@ -1285,6 +1392,10 @@ def build_candidate_review(
     )
 
     if not eligible_candidates.empty:
+
+        # ----------------------------------------------------
+        # H1 PRIORITY
+        # ----------------------------------------------------
 
         h1_priority = {
 
@@ -1315,12 +1426,12 @@ def build_candidate_review(
         )
 
         # ----------------------------------------------------
-        # Normalise priority columns.
+        # NORMALISE PRIORITY COLUMNS
         # ----------------------------------------------------
 
-        eligible_candidates["Business Score"] = pd.to_numeric(
+        eligible_candidates["Investment Score"] = pd.to_numeric(
 
-            eligible_candidates["Business Score"],
+            eligible_candidates["Investment Score"],
 
             errors="coerce",
 
@@ -1334,31 +1445,210 @@ def build_candidate_review(
 
                 errors="coerce",
 
-            )
+            ).fillna(0.0)
 
         else:
 
             eligible_candidates["Technical Score"] = 0.0
 
+        if "Quality Score" in eligible_candidates.columns:
+
+            eligible_candidates["Quality Score"] = pd.to_numeric(
+
+                eligible_candidates["Quality Score"],
+
+                errors="coerce",
+
+            ).fillna(0.0)
+
+        else:
+
+            eligible_candidates["Quality Score"] = 0.0
+
+        if "Growth Score" in eligible_candidates.columns:
+
+            eligible_candidates["Growth Score"] = pd.to_numeric(
+
+                eligible_candidates["Growth Score"],
+
+                errors="coerce",
+
+            ).fillna(0.0)
+
+        else:
+
+            eligible_candidates["Growth Score"] = 0.0
+
+        if "Confidence Score" in eligible_candidates.columns:
+
+            eligible_candidates["Confidence Score"] = pd.to_numeric(
+
+                eligible_candidates["Confidence Score"],
+
+                errors="coerce",
+
+            ).fillna(0.0)
+
+        else:
+
+            eligible_candidates["Confidence Score"] = 0.0
+
+        # ----------------------------------------------------
+        # INVESTMENT SCORE TIER
+        #
+        # Lower numeric value = higher-priority tier.
+        #
+        # Tier 1 = 90+
+        # Tier 2 = 80-89.99
+        # Tier 3 = 75-79.99
+        # ----------------------------------------------------
+
+        def investment_score_tier(value):
+
+            score = safe_float(
+
+                value,
+
+                0.0,
+
+            )
+
+            if score >= 90.0:
+
+                return 0
+
+            if score >= 80.0:
+
+                return 1
+
+            if score >= MIN_BUY_NEW_INVESTMENT_SCORE:
+
+                return 2
+
+            return 3
+
+        eligible_candidates["_Investment Score Tier"] = (
+
+            eligible_candidates["Investment Score"]
+
+            .apply(
+
+                investment_score_tier
+
+            )
+
+        )
+
+        # ----------------------------------------------------
+        # ENTRY QUALITY PRIORITY
+        #
+        # The empirical calibration supports Entry Quality as
+        # an independent secondary BUY NEW signal, but does not
+        # support treating it as a hard eligibility gate.
+        #
+        # The ordering is therefore deliberately bounded:
+        #
+        #     MODERATELY EXTENDED = 0
+        #     REASONABLE          = 1
+        #     EXTENDED            = 2
+        #     HIGHLY EXTENDED     = 3
+        #     UNKNOWN / missing   = 4
+        #
+        # This ranking is applied only AFTER Investment Score
+        # tier, so Entry Quality cannot cause a lower-quality
+        # Investment Score tier to outrank a higher tier.
+        # ----------------------------------------------------
+
+        entry_quality_priority = {
+
+            "MODERATELY EXTENDED": 0,
+
+            "REASONABLE": 1,
+
+            "EXTENDED": 2,
+
+            "HIGHLY EXTENDED": 3,
+
+        }
+
+
+        eligible_candidates["_Entry Quality Priority"] = (
+            eligible_candidates["Entry Quality"]
+            .apply(normalise_text)
+            .map(entry_quality_priority)
+            .fillna(4)
+        )
+
+        # ----------------------------------------------------
         # FINAL BUY NEW PRIORITY ORDER
         #
-        # Investment Score is the primary BUY NEW ranking
-        # because it is the authoritative production measure
-        # of investment attractiveness.
+        # 1. Investment Score Tier
+        # 2. Entry Quality
+        # 3. Investment Score
+        # 4. Technical Score
+        # 5. Quality Score
+        # 6. Growth Score
+        # 7. Confidence Score
+        # 8. H1 Priority
+        # 9. Investment Rank
+        # 10. Ticker
         #
-        # Technical, Quality, Growth and Confidence are used
-        # only as deterministic tie-breakers.
+        # The first two dimensions are the calibrated BUY NEW
+        # decision hierarchy.
         #
-        # Entry Quality is considered separately from
-        # Investment Score and should influence deployment
-        # posture rather than determine investment attractiveness.
+        # Investment Score itself remains authoritative because
+        # the tier is followed immediately by the actual score.
+        # ----------------------------------------------------
+
+                
+       
+        eligible_candidates["_BUY NEW Regime"] = (
+            eligible_candidates.apply(
+                buy_new_priority_regime,
+                axis=1,
+            )
+        )
+
+        # --------------------------------------------------------
+        # ENTRY QUALITY PRIORITY
+        # --------------------------------------------------------
+
+        entry_quality_priority = {
+            "MODERATELY EXTENDED": 0,
+            "REASONABLE": 1,
+            "EXTENDED": 2,
+            "HIGHLY EXTENDED": 3,
+            "UNKNOWN": 4,
+        }
+
+        eligible_candidates["_Entry Quality Priority"] = (
+            eligible_candidates["Entry Quality"]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .map(entry_quality_priority)
+            .fillna(4)
+        )
+
+        # --------------------------------------------------------
+        # FINAL BUY NEW PRIORITY ORDER
         #
-        # Business Score remains available for reporting and
-        # diagnostic purposes but is NOT the primary BUY NEW
-        # ranking mechanism.
+        # 1. Calibrated Investment Score × Entry Quality regime
+        # 2. Investment Score
+        # 3. Entry Quality
+        # 4. Technical Score
+        # 5. Quality Score
+        # 6. Growth Score
+        # 7. Confidence Score
+        # 8. H1 Priority
+        # 9. Investment Rank
+        # 10. Ticker
+        # --------------------------------------------------------
 
         sort_columns = [
+            "_BUY NEW Regime",
             "Investment Score",
+            "_Entry Quality Priority",
             "Technical Score",
             "Quality Score",
             "Growth Score",
@@ -1367,12 +1657,14 @@ def build_candidate_review(
         ]
 
         ascending = [
-            False,
-            False,
-            False,
-            False,
-            False,
-            True,
+            True,   # Calibrated BUY NEW regime
+            False,  # Investment Score
+            True,   # Entry Quality
+            False,  # Technical Score
+            False,  # Quality Score
+            False,  # Growth Score
+            False,  # Confidence Score
+            True,   # H1 Priority
         ]
 
         if "Investment Rank" in eligible_candidates.columns:
@@ -1383,35 +1675,21 @@ def build_candidate_review(
             sort_columns.append("Ticker")
             ascending.append(True)
 
-
         eligible_candidates = (
-
             eligible_candidates
-
             .sort_values(
-
                 by=sort_columns,
-
                 ascending=ascending,
-
                 na_position="last",
-
             )
-
             .copy()
-
         )
 
         eligible_candidates[
-
             "BUY NEW Priority Rank"
-
         ] = range(
-
             1,
-
             len(eligible_candidates) + 1,
-
         )
 
         candidates.loc[
@@ -1432,7 +1710,6 @@ def build_candidate_review(
 
     return candidates
 
-
 # ============================================================
 # COMPLETE CANDIDATE PIPELINE
 # ============================================================
@@ -1447,7 +1724,7 @@ def select_buy_new_candidates(
 
     portfolio_summary=None,
 
-    top_n=MAX_BUY_NEW_DECISIONS,
+    top_n=DEFAULT_TOP_CANDIDATES,
 
 ):
 

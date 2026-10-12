@@ -149,6 +149,8 @@ VALID_ASSET_TYPES = {
     "ETF",
 }
 
+MAX_FINAL_BUY_NEW_DECISIONS = 3
+
 
 # ============================================================
 # GENERIC HELPERS
@@ -631,6 +633,98 @@ def get_allocation_pct(
         )
     )
 
+def should_call_llm_review(
+    proposed_action: str,
+    final_decision: str,
+    existing_holding: bool,
+    decision_status: str,
+) -> bool:
+    """
+    Determine whether an LLM review is required for the governed decision.
+
+    The LLM is advisory only. This routine determines whether the
+    additional review adds governance value; it does not determine
+    the investment action.
+
+    Review required:
+        - BUY NEW
+        - REDUCE*
+        - SELL
+        - REVIEW
+        - existing holding: BUY MORE -> HOLD
+
+    Review not required:
+        - ordinary BUY MORE
+        - HOLD
+        - WATCH
+        - BUY NEW rejected because its BUY NEW slot was not selected
+    """
+
+    proposed_action = upper_text(
+        proposed_action,
+        "HOLD",
+    )
+
+    final_decision = upper_text(
+        final_decision,
+        "HOLD",
+    )
+
+    decision_status = upper_text(
+        decision_status,
+        "",
+    )
+
+    # --------------------------------------------------------
+    # Explicit exclusion:
+    # BUY NEW proposed, but final decision became HOLD because
+    # the candidate did not receive a BUY NEW slot.
+    # --------------------------------------------------------
+
+    if (
+        final_decision == "HOLD"
+        and
+        decision_status == "BUY NEW SLOT NOT SELECTED"
+    ):
+        return False
+
+    # --------------------------------------------------------
+    # Decisions requiring independent LLM review
+    # --------------------------------------------------------
+
+    if final_decision == "BUY NEW":
+        return True
+
+    if final_decision.startswith("REDUCE"):
+        return True
+
+    if final_decision in {
+        "SELL",
+        "REVIEW",
+    }:
+        return True
+
+    # --------------------------------------------------------
+    # Material change to an existing holding:
+    #
+    # BUY MORE was proposed, but deterministic governance
+    # changed the action to HOLD.
+    # --------------------------------------------------------
+
+    if (
+        existing_holding
+        and
+        proposed_action == "BUY MORE"
+        and
+        final_decision == "HOLD"
+    ):
+        return True
+
+    # --------------------------------------------------------
+    # No additional LLM review required.
+    # --------------------------------------------------------
+
+    return False
 
 # ============================================================
 # CAPITAL ALLOCATION HELPERS
@@ -748,14 +842,24 @@ def build_eligible_population(
     portfolio_summary: Any,
     portfolio_decisions: Any,
     capital_allocation: Any,
+    buy_new_candidates: Any = None,
 ) -> list[dict]:
     """
     Build the exact Final Portfolio Decisions population.
 
     Existing holdings are always eligible.
 
-    Non-owned securities are eligible only when Capital Allocation
-    proposes BUY NEW.
+    Existing holdings retain their existing BUY MORE / HOLD /
+    REDUCE / SELL decision context from portfolio_decisions and
+    capital_allocation.
+
+    Non-owned securities are eligible for BUY NEW from the
+    Candidate Selection shortlist.
+
+    Capital Allocation may enrich BUY NEW candidates and its
+    existing BUY NEW / BUY MORE logic remains intact elsewhere,
+    but Capital Allocation's final BUY NEW selection does not
+    determine the Final Portfolio Decision population.
 
     For existing holdings, analytical stock fields such as
     Investment Score and Signal are preserved from portfolio_decisions.
@@ -780,6 +884,10 @@ def build_eligible_population(
 
     capital = normalise_tickers(
         get_capital_allocation_dataframe(capital_allocation)
+    )
+
+    buy_new = normalise_tickers(
+        safe_dataframe(buy_new_candidates)
     )
 
     # ============================================================
@@ -807,6 +915,7 @@ def build_eligible_population(
     holdings = remove_cash(holdings)
     decisions = remove_cash(decisions)
     capital = remove_cash(capital)
+    buy_new = remove_cash(buy_new)
 
     # ============================================================
     # LOOKUPS
@@ -815,6 +924,7 @@ def build_eligible_population(
     holding_lookup: dict[str, dict] = {}
     decision_lookup: dict[str, dict] = {}
     capital_lookup: dict[str, dict] = {}
+    buy_new_lookup: dict[str, dict] = {}
 
     if not holdings.empty and "Ticker" in holdings.columns:
 
@@ -852,6 +962,18 @@ def build_eligible_population(
                 continue
 
             capital_lookup[ticker] = record
+
+    if not buy_new.empty and "Ticker" in buy_new.columns:
+
+        for _, row in buy_new.iterrows():
+
+            record = row.to_dict()
+            ticker = get_ticker(record)
+
+            if not ticker or ticker == "CASH":
+                continue
+
+            buy_new_lookup[ticker] = record
 
     # ============================================================
     # HELPERS
@@ -943,6 +1065,12 @@ def build_eligible_population(
 
     # ============================================================
     # 1. EXISTING HOLDINGS
+    #
+    # Existing holdings remain fully eligible.
+    #
+    # This preserves the existing BUY MORE / HOLD / REDUCE / SELL
+    # population and does NOT restrict existing holdings to the
+    # Candidate Selection shortlist.
     # ============================================================
 
     for ticker, holding in holding_lookup.items():
@@ -957,8 +1085,6 @@ def build_eligible_population(
 
         # --------------------------------------------------------
         # FIRST: preserve portfolio decision analytical data.
-        #
-        # This is deliberately applied BEFORE capital allocation.
         # --------------------------------------------------------
 
         if decision_row:
@@ -971,8 +1097,11 @@ def build_eligible_population(
         # --------------------------------------------------------
         # SECOND: overlay capital-allocation data.
         #
-        # But NEVER allow allocator placeholders to destroy
-        # analytical decision data.
+        # Existing BUY MORE / HOLD / REDUCE / SELL information
+        # remains available to the final decision layer.
+        #
+        # Analytical score placeholders must not destroy valid
+        # decision-layer values.
         # --------------------------------------------------------
 
         if allocation_row:
@@ -983,10 +1112,7 @@ def build_eligible_population(
                     continue
 
                 # ------------------------------------------------
-                # Stock analytical fields:
-                #
-                # A valid value already supplied by
-                # portfolio_decisions wins.
+                # Stock analytical fields
                 # ------------------------------------------------
 
                 if key in stock_score_fields:
@@ -1023,7 +1149,7 @@ def build_eligible_population(
                     continue
 
                 # ------------------------------------------------
-                # ETF analytical fields follow the same rule.
+                # ETF analytical fields
                 # ------------------------------------------------
 
                 if key in etf_score_fields:
@@ -1058,7 +1184,8 @@ def build_eligible_population(
                     continue
 
                 # ------------------------------------------------
-                # All other allocator fields are allowed to overlay.
+                # All other allocator fields retain existing
+                # behaviour.
                 # ------------------------------------------------
 
                 if key not in base or is_missing(base.get(key)):
@@ -1067,12 +1194,7 @@ def build_eligible_population(
                     base[key] = value
 
         # --------------------------------------------------------
-        # CRITICAL FINAL REPAIR FOR EXISTING STOCKS
-        #
-        # If portfolio_decisions contains a real Investment Score,
-        # restore it after ALL overlays.
-        #
-        # This specifically protects BUY MORE rows.
+        # FINAL REPAIR FOR EXISTING STOCKS
         # --------------------------------------------------------
 
         if decision_row:
@@ -1100,7 +1222,7 @@ def build_eligible_population(
                 )
 
             # ----------------------------------------------------
-            # Restore the stock Signal as well.
+            # Restore stock Signal.
             # ----------------------------------------------------
 
             decision_signal = decision_row.get(
@@ -1139,15 +1261,19 @@ def build_eligible_population(
     # ============================================================
     # 2. NON-OWNED BUY NEW OPPORTUNITIES
     #
-    # Capital Allocation is authoritative for the BUY NEW
-    # candidate population.
+    # Candidate Selection defines the BUY NEW population.
     #
-    # Portfolio Decisions may enrich the candidate with analytical
-    # decision-layer information, but must not determine whether
-    # the candidate enters the final-decision population.
+    # Final Portfolio Decision makes its own BUY NEW decision
+    # over this population.
+    #
+    # Capital Allocation does NOT determine whether a candidate
+    # enters this population.
+    #
+    # Capital Allocation can still enrich the candidate where it
+    # has evaluated the same security.
     # ============================================================
 
-    for ticker, allocation_row in capital_lookup.items():
+    for ticker, candidate_row in buy_new_lookup.items():
 
         if ticker in holding_lookup:
             continue
@@ -1156,49 +1282,13 @@ def build_eligible_population(
             continue
 
         # --------------------------------------------------------
-        # BUY NEW eligibility comes from Capital Allocation.
+        # Start with Candidate Selection.
         # --------------------------------------------------------
 
-        action = get_capital_action(
-            allocation_row
-        )
-
-        if action != "BUY NEW":
-            continue
+        base = dict(candidate_row)
 
         # --------------------------------------------------------
-        # BUY NEW deployment eligibility
-        #
-        # Keep this logic aligned with Capital Allocation.
-        #
-        # Entry Quality is NOT a hard eligibility filter.
-        # It is retained as decision-layer / deployment context
-        # for future graduated allocation and entry calibration.
-        #
-        # Valuation remains the current hard deployment
-        # constraint:
-        #
-        #     OVERVALUED -> excluded
-        #
-        # This deliberately mirrors capital_allocator(4).py.
-        # --------------------------------------------------------
-
-        valuation = upper_text(
-            row_value(
-                allocation_row,
-                "Valuation",
-                default="UNKNOWN"
-            ),
-            "UNKNOWN",
-        )
-
-        if valuation == "OVERVALUED":
-            continue
-        # --------------------------------------------------------
-        # Start with the analytical decision-layer record when
-        # available.
-        #
-        # Capital Allocation remains the source of eligibility.
+        # Portfolio Decisions can enrich the candidate.
         # --------------------------------------------------------
 
         decision_row = decision_lookup.get(
@@ -1206,74 +1296,85 @@ def build_eligible_population(
         )
 
         if decision_row:
-            base = dict(
-                decision_row
+
+            overlay_non_missing(
+                base,
+                decision_row,
             )
 
-            # Capital Allocation can enrich the record.
+        # --------------------------------------------------------
+        # Capital Allocation can enrich the candidate.
+        #
+        # It does NOT determine BUY NEW eligibility here.
+        # --------------------------------------------------------
+
+        allocation_row = capital_lookup.get(
+            ticker
+        )
+
+        if allocation_row:
+
             overlay_non_missing(
                 base,
                 allocation_row,
             )
 
-            # ----------------------------------------------------
-            # Preserve analytical decision-layer fields.
-            # ----------------------------------------------------
+        # --------------------------------------------------------
+        # BUY NEW deployment eligibility
+        #
+        # Existing production rule:
+        #
+        #     OVERVALUED -> excluded
+        #
+        # Entry Quality is NOT a hard eligibility filter.
+        # --------------------------------------------------------
 
-            if (
-                "Investment Score"
-                in decision_row
-            ):
-                base[
-                    "Investment Score"
-                ] = decision_row[
-                    "Investment Score"
-                ]
+        # --------------------------------------------------------
+        # BUY NEW deployment eligibility
+        #
+        # BUY NEW requires:
+        #     - Investment Score >= 75
+        #     - valid current price
+        #     - Valuation != OVERVALUED
+        #
+        # Entry Quality is NOT a hard eligibility filter.
+        # --------------------------------------------------------
 
-            if (
-                "Confidence Score"
-                in decision_row
-            ):
-                base[
-                    "Confidence Score"
-                ] = decision_row[
-                    "Confidence Score"
-                ]
+        investment_score = safe_float(
+            row_value(
+                base,
+                "Investment Score",
+                default=0.0,
+            ),
+            0.0,
+        )
 
-            if (
-                "Signal"
-                in decision_row
-            ):
-                base[
-                    "Signal"
-                ] = decision_row[
-                    "Signal"
-                ]
+        if investment_score < 75.0:
+            continue
 
-        else:
-            # Candidate may legitimately exist in Capital
-            # Allocation without a corresponding Portfolio
-            # Decisions row. It must still enter the final
-            # decision population.
-            base = dict(
-                allocation_row
-            )
+        valuation = upper_text(
+            row_value(
+                allocation_row,
+                "Valuation",
+                default=row_value(
+                    base,
+                    "Valuation",
+                    default="UNKNOWN",
+                ),
+            ),
+            "UNKNOWN",
+        )
+
+        if valuation == "OVERVALUED":
+            continue
 
         # --------------------------------------------------------
         # Explicit ownership state for a new position.
         # --------------------------------------------------------
 
-        base[
-            "Existing Holding"
-        ] = False
-
-        base[
-            "Owned"
-        ] = False
-
-        base[
-            "Quantity"
-        ] = 0.0
+        base["Existing Holding"] = False
+        base["Owned"] = False
+        base["Quantity"] = 0.0
 
         population[ticker] = base
 
@@ -1306,6 +1407,11 @@ def build_eligible_population(
     )
 
     print(
+        "BUY NEW CANDIDATE TICKERS:",
+        sorted(buy_new_lookup.keys()),
+    )
+
+    print(
         "ELIGIBLE POPULATION TICKERS:",
         sorted(population.keys()),
     )
@@ -1335,6 +1441,7 @@ def build_eligible_population(
     return list(
         population.values()
     )
+
 # ============================================================
 # CANDIDATE CONTEXT
 # ============================================================
@@ -1857,9 +1964,6 @@ def build_intelligence_record(
     }
 
 
-# ============================================================
-# AI DECISION CHAIN
-# ============================================================
 
 # ============================================================
 # AI DECISION CHAIN
@@ -1873,7 +1977,7 @@ def run_governed_chain(
     market_intelligence: Any = None,
 ) -> dict:
     """
-    Run the complete governed AI decision chain for one candidate.
+    Run the deterministic governed AI decision chain for one candidate.
 
     FD-02 — Final Portfolio Decision Governance
     --------------------------------------------
@@ -1887,12 +1991,12 @@ def run_governed_chain(
         Deterministic Decision Layer
                 ↓
         Decision Explanation
-                ↓
-        LLM Review
-                ↓
-        Reconciliation
-                ↓
-        Final Governed Decision
+
+    LLM Review and Reconciliation are deliberately performed
+    outside this function.
+
+    This allows portfolio-level BUY NEW slot selection to occur
+    before any advisory LLM review is requested.
 
     Asset-specific analysis:
 
@@ -1963,7 +2067,6 @@ def run_governed_chain(
         ),
     )
 
-
     # ============================================================
     # HISTORICAL RECOMMENDATION INTELLIGENCE
     #
@@ -1989,7 +2092,7 @@ def run_governed_chain(
     # ============================================================
     # MARKET & EVENT INTELLIGENCE
     #
-    # Shadow-mode contextual evidence for the LLM reviewer.
+    # Shadow-mode contextual evidence.
     #
     # This does NOT alter deterministic scoring, evidence scoring,
     # historical learning or the rules-based decision.
@@ -2003,7 +2106,10 @@ def run_governed_chain(
 
         try:
 
-            if hasattr(market_intelligence, "empty"):
+            if hasattr(
+                market_intelligence,
+                "empty",
+            ):
 
                 if not market_intelligence.empty:
 
@@ -2020,17 +2126,30 @@ def run_governed_chain(
                             matching.iloc[0].to_dict()
                         )
 
-            elif isinstance(market_intelligence, list):
+            elif isinstance(
+                market_intelligence,
+                list,
+            ):
 
                 for record in market_intelligence:
 
                     if (
-                        isinstance(record, dict)
-                        and str(record.get("Ticker", "")).upper()
+                        isinstance(
+                            record,
+                            dict,
+                        )
+                        and str(
+                            record.get(
+                                "Ticker",
+                                "",
+                            )
+                        ).upper()
                         == str(ticker).upper()
                     ):
 
-                        market_intelligence_record = record
+                        market_intelligence_record = (
+                            record
+                        )
 
                         break
 
@@ -2046,15 +2165,8 @@ def run_governed_chain(
     # ============================================================
     # CANDIDATE DECISION INPUT
     #
-    # IMPORTANT:
-    #
-    # ETF Score was previously missing from this boundary.
-    #
-    # That meant build_chain_candidate() could correctly calculate
-    # an ETF Score, but the score could be lost when constructing
-    # candidate_decisions for build_ai_decision_context().
-    #
-    # Explicitly pass both ETF Score and ETF Signal.
+    # Explicitly pass both ETF Score and ETF Signal so ETF
+    # analysis cannot be lost at the AI decision-context boundary.
     # ============================================================
 
     candidate_decisions = [
@@ -2144,10 +2256,6 @@ def run_governed_chain(
             # ETF:
             #   ETF Score
             #   ETF Signal
-            #
-            # ETF fields are explicitly passed so ETF analysis
-            # cannot be lost between the candidate builder and
-            # AI decision context.
             # ----------------------------------------------------
 
             "Investment Score":
@@ -2232,6 +2340,7 @@ def run_governed_chain(
     )
 
     if not candidates:
+
         raise ValueError(
             f"AI Decision Context produced no candidate for {ticker}"
         )
@@ -2277,7 +2386,8 @@ def run_governed_chain(
     # ============================================================
     # MARKET & EVENT INTELLIGENCE
     #
-    # Attach contextual intelligence for the LLM reviewer only.
+    # Attach contextual intelligence for downstream advisory
+    # review only.
     #
     # It must not overwrite deterministic analytical evidence.
     # ============================================================
@@ -2290,6 +2400,8 @@ def run_governed_chain(
     # AI DECISION LAYER
     #
     # This calls ai_decision_scoring.py internally.
+    #
+    # This is the authoritative deterministic decision stage.
     # ============================================================
 
     print(
@@ -2302,6 +2414,69 @@ def run_governed_chain(
     )
 
     # ============================================================
+    # PRESERVE AUTHORITATIVE INVESTMENT SCORE
+    #
+    # The AI decision layer may not return Investment Score at
+    # the top level, but it remains authoritative in
+    # candidate["analysis"].
+    # ============================================================
+
+    if (
+        candidate.get(
+            "asset_type"
+        ) != "ETF"
+        and isinstance(
+            candidate.get(
+                "analysis"
+            ),
+            dict,
+        )
+    ):
+
+        investment_score = candidate[
+            "analysis"
+        ].get(
+            "investment_score"
+        )
+
+        if investment_score is not None:
+
+            deterministic[
+                "Investment Score"
+            ] = investment_score
+
+    # ============================================================
+    # PRESERVE ENTRY QUALITY
+    #
+    # Entry Quality is persisted in the immutable
+    # recommendation_evidence snapshot and is already present
+    # in candidate["analysis"].
+    #
+    # Carry it into the deterministic decision object so it
+    # remains available to reconciliation and final reporting.
+    # ============================================================
+
+    if isinstance(
+        candidate.get(
+            "analysis"
+        ),
+        dict,
+    ):
+
+        entry_quality = candidate[
+            "analysis"
+        ].get(
+            "entry_quality",
+            "",
+        )
+
+        if entry_quality:
+
+            deterministic[
+                "Entry Quality"
+            ] = entry_quality
+
+    # ============================================================
     # DECISION EXPLANATION
     # ============================================================
 
@@ -2312,91 +2487,16 @@ def run_governed_chain(
     )
 
     # ============================================================
-    # LLM REVIEW
-    # ============================================================
-
-
-    review = review_ai_decision(
-        portfolio=context,
-        candidate=candidate,
-        decision=deterministic,
-    )
-
-
-    # ============================================================
-    # RECONCILIATION
-    # ============================================================
-
-    # Preserve the authoritative analytical Investment Score
-    # for reconciliation. The AI decision layer may not return it
-    # at the top level, but it is already present in candidate["analysis"].
-
-    if (
-        candidate.get("asset_type") != "ETF"
-        and isinstance(candidate.get("analysis"), dict)
-    ):
-        investment_score = candidate["analysis"].get(
-            "investment_score"
-        )
-
-        if investment_score is not None:
-            deterministic["Investment Score"] = investment_score
-
-
-    # ============================================================
-    # PRESERVE ENTRY QUALITY FOR RECONCILIATION
+    # RETURN DETERMINISTIC GOVERNED CHAIN
     #
-    # Entry Quality is persisted in the immutable
-    # recommendation_evidence snapshot and is already present
-    # in candidate["analysis"].
+    # LLM REVIEW and RECONCILIATION are deliberately NOT
+    # performed here.
     #
-    # The reconciler receives the deterministic decision object,
-    # so explicitly carry the persisted Entry Quality into that
-    # object at the reconciliation boundary.
-    # ============================================================
-
-    if isinstance(
-        candidate.get("analysis"),
-        dict,
-    ):
-        entry_quality = candidate["analysis"].get(
-            "entry_quality",
-            "",
-        )
-
-        if entry_quality:
-            deterministic["Entry Quality"] = entry_quality
-
-
-    reconciliation = reconcile_ai_decision(
-        decision=deterministic,
-        review=review,
-    )
-
-    # ============================================================
-
-    print(
-        f"RECONCILIATION DETAIL: {ticker} | "
-        f"Status={reconciliation.get('Reconciliation Status')} | "
-        f"Deterministic={reconciliation.get('Deterministic Action')} | "
-        f"Proposed={reconciliation.get('Proposed Action')} | "
-        f"Reconciled={reconciliation.get('Reconciled Action')} | "
-        f"Evidence={reconciliation.get('Evidence Score')} | "
-        f"Deterministic Confidence={reconciliation.get('Deterministic Confidence')} | "
-        f"LLM Review={reconciliation.get('LLM Review')} | "
-        f"LLM Confidence={reconciliation.get('LLM Confidence')} | "
-        f"Existing Holding={reconciliation.get('Existing Holding')} | "
-        f"Flags={reconciliation.get('Governance Flags')} | "
-        f"Reason Code={reconciliation.get('Governance Reason Code')} | "
-        f"Reasons={reconciliation.get('Governance Reasons')} | "
-        f"Reason={reconciliation.get('Governance Reason')}"
-    )
-
-    # ============================================================
-    # RETURN COMPLETE GOVERNED CHAIN
+    # They are performed by generate_final_portfolio_decisions()
+    # after portfolio-level BUY NEW slot selection.
     #
-    # Keep the individual stages intact so build_final_result()
-    # can consume the established result contract.
+    # This prevents non-selected BUY NEW candidates from being
+    # sent to Gemini.
     # ============================================================
 
     return {
@@ -2411,14 +2511,7 @@ def run_governed_chain(
 
         "explanation":
             explanation,
-
-        "review":
-            review,
-
-        "reconciliation":
-            reconciliation,
     }
-
 
 # ============================================================
 # FINAL RESULT MAPPING
@@ -5174,6 +5267,7 @@ def generate_final_portfolio_decisions(
     portfolio_manager_review,
     portfolio_health,
     capital_allocation,
+    buy_new_candidates=None,
     recommendation_intelligence=None,
     learning_ticker_horizon_performance=None,
     market_intelligence=None,
@@ -5188,10 +5282,14 @@ def generate_final_portfolio_decisions(
 
     Existing holdings come ONLY from portfolio_summary.
 
-    New candidates come ONLY from Capital Allocation and only when
-    Capital Allocation proposes BUY NEW.
+    BUY NEW candidates come ONLY from the Candidate Selection
+    shortlist supplied through buy_new_candidates.
 
     Every eligible row then executes the complete AI chain.
+
+    Final Portfolio Decision independently determines which
+    governed BUY NEW decisions occupy the maximum portfolio
+    BUY NEW slots.
 
     Learning
     --------
@@ -5204,16 +5302,20 @@ def generate_final_portfolio_decisions(
     -----
     A single audit_run is created for the complete production
     decision population. Each successfully processed decision is
-    recorded against that audit_run_id.
+    recorded against that audit_run_id after portfolio-level BUY NEW
+    slot selection has been applied.
 
     The audit layer is observational only and must never alter the
     decision produced by the governed AI chain.
     """
 
+    MAX_FINAL_BUY_NEW_DECISIONS = 3
+
     population = build_eligible_population(
         portfolio_summary=portfolio_summary,
         portfolio_decisions=portfolio_decisions,
         capital_allocation=capital_allocation,
+        buy_new_candidates=buy_new_candidates,
     )
 
     if not population:
@@ -5267,8 +5369,6 @@ def generate_final_portfolio_decisions(
 
     ticker_horizon_lookup = {}
 
-
-
     if (
         isinstance(
             learning_ticker_horizon_performance,
@@ -5318,6 +5418,7 @@ def generate_final_portfolio_decisions(
                 ticker,
                 {}
             )[horizon] = row.to_dict()
+
     # --------------------------------------------------------
     # Start ONE audit run for the complete production decision
     # population.
@@ -5335,6 +5436,16 @@ def generate_final_portfolio_decisions(
     )
 
     audit_conn = get_connection()
+
+    # --------------------------------------------------------
+    # Hold successful audit records until the portfolio-level
+    # BUY NEW slot selection has been applied.
+    #
+    # This preserves the existing audit mechanism while ensuring
+    # the audit records the actual final action.
+    # --------------------------------------------------------
+
+    audit_records = []
 
     # --------------------------------------------------------
     # Run the complete AI chain per candidate.
@@ -5361,7 +5472,6 @@ def generate_final_portfolio_decisions(
         base_row = dict(
             base_row
         )
-
 
         # ----------------------------------------------------
         # Propagate factual Market Intelligence security
@@ -5426,7 +5536,6 @@ def generate_final_portfolio_decisions(
 
                         base_row[field] = value
 
-
         # ----------------------------------------------------
         # Attach portfolio risk explicitly.
         #
@@ -5474,18 +5583,9 @@ def generate_final_portfolio_decisions(
         # Existing holdings are determined ONLY from
         # portfolio_summary.
         #
-        # Non-owned assets are eligible ONLY when Capital
-        # Allocation explicitly proposes BUY NEW.
+        # Non-owned assets have entered this function through
+        # the Candidate Selection shortlist.
         # ----------------------------------------------------
-
-        # Ownership is authoritative from the holdings-derived
-        # lookup built at the start of build_eligible_population().
-        #
-        # Do not re-evaluate ownership from the current decision
-        # or capital-allocation row.
-
-        # Determine ownership directly from the portfolio summary.
-        # A positive Quantity/Shares value is authoritative.
 
         owned = False
 
@@ -5528,19 +5628,6 @@ def generate_final_portfolio_decisions(
             base_row
         )
 
-        # Existing holding:
-        #     allowed regardless of proposal.
-        #
-        # Non-owned:
-        #     only BUY NEW is allowed.
-        if (
-            not owned
-            and
-            proposed_action != "BUY NEW"
-        ):
-
-            continue
-
         # ----------------------------------------------------
         # Run complete governed AI chain.
         # ----------------------------------------------------
@@ -5548,33 +5635,45 @@ def generate_final_portfolio_decisions(
         try:
 
             chain = run_governed_chain(
-
                 portfolio_summary=portfolio_summary,
-
                 base_row=base_row,
-
                 capital_allocation=capital_allocation,
-
-                recommendation_intelligence=(
-
-                    recommendation_intelligence
-
-                ),
-
+                recommendation_intelligence=recommendation_intelligence,
                 market_intelligence=market_intelligence,
-
             )
 
+            # --------------------------------------------------------
+            # PROVISIONAL RECONCILIATION
+            #
+            # The deterministic decision must still pass through the
+            # existing reconciliation layer so build_final_result()
+            # receives its normal result contract.
+            #
+            # No LLM is called here.
+            #
+            # This provisional result is used only to determine the
+            # portfolio-level BUY NEW slots.
+            # --------------------------------------------------------
+
+            provisional_reconciliation = reconcile_ai_decision(
+                decision=chain[
+                    "deterministic"
+                ],
+                review={},
+            )
+
+            chain[
+                "review"
+            ] = {}
+
+            chain[
+                "reconciliation"
+            ] = provisional_reconciliation
+
             result = build_final_result(
-
                 base_row=base_row,
-
                 chain=chain,
-
-                ticker_horizon_learning=(
-                    ticker_learning
-                ),
-
+                ticker_horizon_learning=ticker_learning,
             )
 
             # ------------------------------------------------
@@ -5591,35 +5690,33 @@ def generate_final_portfolio_decisions(
                 ] = portfolio_risk
 
             # ------------------------------------------------
-            # Record the exact governed decision chain.
+            # Preserve ownership explicitly for the
+            # portfolio-level BUY NEW selection below.
             #
-            # Audit capture is observational only.
-            # It does not modify result or influence the
-            # decision.
+            # Existing holding status remains authoritative
+            # from portfolio_summary.
             # ------------------------------------------------
 
-            try:
+            result[
+                "Existing Holding"
+            ] = owned
 
-                print(
-                    f"AUDIT CAPTURE: {ticker} | "
-                    f"Proposed={result.get('Proposed Action')} | "
-                    f"Final={result.get('Final Action')}"
-                )
+            # ------------------------------------------------
+            # Hold the exact governed decision chain for audit.
+            #
+            # The audit is written after the portfolio-level
+            # BUY NEW slot selection so that Final Action in the
+            # audit reflects the actual production decision.
+            # ------------------------------------------------
 
-                record_decision_audit(
-                    conn=audit_conn,
-                    audit_run_id=audit_run_id,
-                    base_row=base_row,
-                    chain=chain,
-                    final_result=result,
-                )
-
-            except Exception as audit_exc:
-
-                print(
-                    f"WARNING: Audit capture failed for "
-                    f"{ticker}: {audit_exc}"
-                )
+            audit_records.append(
+                {
+                    "ticker": ticker,
+                    "base_row": base_row,
+                    "chain": chain,
+                    "result": result,
+                }
+            )
 
         except Exception as exc:
 
@@ -5638,6 +5735,10 @@ def generate_final_portfolio_decisions(
             result[
                 "Ticker"
             ] = ticker
+
+            result[
+                "Existing Holding"
+            ] = owned
 
             result[
                 "Portfolio Risk"
@@ -5783,6 +5884,465 @@ def generate_final_portfolio_decisions(
         results.append(
             result
         )
+
+    # --------------------------------------------------------
+    # Portfolio-level BUY NEW slot selection.
+    #
+    # All candidates have now completed the deterministic
+    # governed decision chain.
+    #
+    # LLM review is deliberately deferred until after
+    # portfolio-level BUY NEW slot selection.
+    #
+    # Only non-owned rows whose governed Final Action is BUY NEW
+    # participate in this selection.
+    #
+    # Existing holdings and their BUY MORE / HOLD / REDUCE / SELL
+    # decisions are untouched.
+    #
+    # Candidate Selection's BUY NEW Priority Rank is used only
+    # as the deterministic ordering for the available BUY NEW
+    # slots. Capital Allocation's selected BUY NEW rows are NOT
+    # reused here.
+    # --------------------------------------------------------
+
+    def _buy_new_priority_value(
+        value,
+    ):
+        try:
+            numeric = float(
+                value
+            )
+
+            if pd.isna(
+                numeric
+            ):
+                return float(
+                    "inf"
+                )
+
+            return numeric
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return float(
+                "inf"
+            )
+
+    buy_new_results = [
+        result
+        for result in results
+        if not safe_bool(
+            result.get(
+                "Existing Holding",
+                False,
+            )
+        )
+        and safe_text(
+            result.get(
+                "Final Action",
+                "",
+            ),
+            "",
+        ).upper()
+        == "BUY NEW"
+    ]
+
+    buy_new_results.sort(
+        key=lambda result: (
+            _buy_new_priority_value(
+                result.get(
+                    "BUY NEW Priority Rank"
+                )
+            ),
+            -_buy_new_priority_value(
+                result.get(
+                    "Investment Score",
+                    0,
+                )
+            ),
+            safe_text(
+                result.get(
+                    "Ticker",
+                    "",
+                ),
+                "",
+            ).upper(),
+        )
+    )
+
+    selected_buy_new_tickers = {
+        safe_text(
+            result.get(
+                "Ticker",
+                "",
+            ),
+            "",
+        ).upper()
+        for result in buy_new_results[
+            :MAX_FINAL_BUY_NEW_DECISIONS
+        ]
+        if safe_text(
+            result.get(
+                "Ticker",
+                "",
+            ),
+            "",
+        )
+    }
+
+    for result in buy_new_results:
+
+        ticker = safe_text(
+            result.get(
+                "Ticker",
+                "",
+            ),
+            "",
+        ).upper()
+
+        if ticker in selected_buy_new_tickers:
+            continue
+
+        # The governed AI chain independently reached BUY NEW,
+        # but this candidate did not receive one of the available
+        # portfolio BUY NEW slots.
+        result[
+            "Final Action"
+        ] = "HOLD"
+
+        result[
+            "Final Decision"
+        ] = "HOLD"
+
+        result[
+            "Action"
+        ] = "HOLD"
+
+        result[
+            "Decision Changed"
+        ] = True
+
+        result[
+            "Decision Status"
+        ] = "BUY NEW SLOT NOT SELECTED"
+
+        result[
+            "Final Reason"
+        ] = (
+            "Governed BUY NEW decision was not selected within "
+            "the maximum portfolio BUY NEW allocation slots."
+        )
+
+        result[
+            "Explanation"
+        ] = result[
+            "Final Reason"
+        ]
+
+    # --------------------------------------------------------
+    # LLM REVIEW AND FINAL RECONCILIATION.
+    #
+    # BUY NEW slot selection has now completed.
+    #
+    # Therefore the LLM review policy can operate against the
+    # actual portfolio-level Final Decision.
+    #
+    # Non-selected BUY NEW candidates are explicitly excluded
+    # by should_call_llm_review().
+    #
+    # Deterministic governance remains authoritative.
+    # --------------------------------------------------------
+
+    for audit_record in audit_records:
+
+        ticker = audit_record[
+            "ticker"
+        ]
+
+        base_row = audit_record[
+            "base_row"
+        ]
+
+        chain = audit_record[
+            "chain"
+        ]
+
+        result = audit_record[
+            "result"
+        ]
+
+        proposed_action_for_review = upper_text(
+            result.get(
+                "Proposed Action",
+                "HOLD",
+            ),
+            "HOLD",
+        )
+
+        final_decision_for_review = upper_text(
+            result.get(
+                "Final Decision",
+                result.get(
+                    "Final Action",
+                    "HOLD",
+                ),
+            ),
+            "HOLD",
+        )
+
+        existing_holding_for_review = safe_bool(
+            result.get(
+                "Existing Holding",
+                False,
+            )
+        )
+
+        decision_status_for_review = upper_text(
+            result.get(
+                "Decision Status",
+                "",
+            ),
+            "",
+        )
+
+        review_required = should_call_llm_review(
+            proposed_action=proposed_action_for_review,
+            final_decision=final_decision_for_review,
+            existing_holding=existing_holding_for_review,
+            decision_status=decision_status_for_review,
+        )
+
+        review = {}
+
+        if review_required:
+
+            print(
+                f"LLM REVIEW REQUIRED: {ticker} | "
+                f"Proposed={proposed_action_for_review} | "
+                f"Final={final_decision_for_review}"
+            )
+
+            review = review_ai_decision(
+                portfolio=chain[
+                    "context"
+                ],
+                candidate=chain[
+                    "candidate"
+                ],
+                decision=chain[
+                    "deterministic"
+                ],
+            )
+
+        else:
+
+            print(
+                f"LLM REVIEW NOT REQUIRED: {ticker} | "
+                f"Proposed={proposed_action_for_review} | "
+                f"Final={final_decision_for_review}"
+            )
+
+            review = {
+                "Ticker": ticker,
+                "LLM Assessment": "NOT REQUIRED",
+                "LLM Confidence": 0.0,
+                "LLM Reason": (
+                    "LLM REVIEW NOT REQUIRED — "
+                    "DETERMINISTIC DECISION"
+                ),
+                "LLM Decision": "NOT REQUIRED",
+                "Review Decision": "NOT REQUIRED",
+                "Confidence": 0.0,
+                "Challenge": False,
+                "Reason": (
+                    "LLM REVIEW NOT REQUIRED — "
+                    "DETERMINISTIC DECISION"
+                ),
+                "Key Points": [],
+                "LLM Key Points": [],
+                "Evidence Gaps": [],
+                "LLM Evidence Gaps": [],
+                "Proposed Action": proposed_action_for_review,
+                "Reviewer Status": "LLM REVIEW NOT REQUIRED",
+            }
+
+        # ----------------------------------------------------
+        # FINAL RECONCILIATION
+        #
+        # Always use the existing reconciler.
+        #
+        # An empty review means deterministic governance remains
+        # authoritative without an unnecessary LLM call.
+        # ----------------------------------------------------
+
+        reconciliation = reconcile_ai_decision(
+            decision=chain[
+                "deterministic"
+            ],
+            review=review,
+        )
+
+        chain[
+            "review"
+        ] = review
+
+        chain[
+            "reconciliation"
+        ] = reconciliation
+
+        # ----------------------------------------------------
+        # Rebuild the final report result using the completed
+        # chain.
+        # ----------------------------------------------------
+
+        final_result = build_final_result(
+            base_row=base_row,
+            chain=chain,
+            ticker_horizon_learning=(
+                result.get(
+                    "learning_ticker_horizon_performance",
+                    {},
+                )
+            ),
+        )
+
+        # ----------------------------------------------------
+        # Portfolio-level BUY NEW slot selection is authoritative
+        # over the individual deterministic BUY NEW result.
+        #
+        # Non-selected BUY NEW candidates must remain HOLD and
+        # must retain their explicit slot-selection status.
+        # ----------------------------------------------------
+
+        if (
+            decision_status_for_review
+            == "BUY NEW SLOT NOT SELECTED"
+        ):
+
+            final_result[
+                "Final Action"
+            ] = "HOLD"
+
+            final_result[
+                "Final Decision"
+            ] = "HOLD"
+
+            final_result[
+                "Action"
+            ] = "HOLD"
+
+            final_result[
+                "Decision Changed"
+            ] = True
+
+            final_result[
+                "Decision Status"
+            ] = (
+                "BUY NEW SLOT NOT SELECTED"
+            )
+
+            final_result[
+                "Final Reason"
+            ] = (
+                "Governed BUY NEW decision was not selected "
+                "within the maximum portfolio BUY NEW "
+                "allocation slots."
+            )
+
+            final_result[
+                "Explanation"
+            ] = final_result[
+                "Final Reason"
+            ]
+
+        # ----------------------------------------------------
+        # Update the audit record with the completed chain and
+        # final production result.
+        # ----------------------------------------------------
+
+        audit_record[
+            "chain"
+        ] = chain
+
+        audit_record[
+            "result"
+        ] = final_result
+
+        # ----------------------------------------------------
+        # Replace the provisional result in the main result list.
+        # ----------------------------------------------------
+
+        for index, existing_result in enumerate(
+            results
+        ):
+
+            if (
+                safe_text(
+                    existing_result.get(
+                        "Ticker",
+                        "",
+                    ),
+                    "",
+                ).upper()
+                == ticker.upper()
+            ):
+
+                results[
+                    index
+                ] = final_result
+
+                break
+
+
+    # --------------------------------------------------------
+    # Record the exact governed decision chain.
+    #
+    # Audit capture remains observational only.
+    #
+    # Audit is deliberately performed AFTER the portfolio-level
+    # BUY NEW slot selection so that the stored Final Action
+    # matches the production result.
+    # --------------------------------------------------------
+
+    for audit_record in audit_records:
+
+        ticker = audit_record[
+            "ticker"
+        ]
+
+        try:
+
+            result = audit_record[
+                "result"
+            ]
+
+            print(
+                f"AUDIT CAPTURE: {ticker} | "
+                f"Proposed={result.get('Proposed Action')} | "
+                f"Final={result.get('Final Action')}"
+            )
+
+            record_decision_audit(
+                conn=audit_conn,
+                audit_run_id=audit_run_id,
+                base_row=audit_record[
+                    "base_row"
+                ],
+                chain=audit_record[
+                    "chain"
+                ],
+                final_result=result,
+            )
+
+        except Exception as audit_exc:
+
+            print(
+                f"WARNING: Audit capture failed for "
+                f"{ticker}: {audit_exc}"
+            )
 
     # --------------------------------------------------------
     # Build dataframe.
@@ -5957,10 +6517,22 @@ def generate_final_portfolio_decisions(
         .sum()
     )
 
-    buy_new_count = int(
+    buy_new_proposals_count = int(
         (
             result_df[
                 "Proposed Action"
+            ]
+            .astype(str)
+            .str.upper()
+            ==
+            "BUY NEW"
+        ).sum()
+    )
+
+    buy_new_final_count = int(
+        (
+            result_df[
+                "Final Action"
             ]
             .astype(str)
             .str.upper()
@@ -5989,7 +6561,12 @@ def generate_final_portfolio_decisions(
 
     print(
         f"BUY NEW proposals reviewed: "
-        f"{buy_new_count}"
+        f"{buy_new_proposals_count}"
+    )
+
+    print(
+        f"Final BUY NEW decisions: "
+        f"{buy_new_final_count}"
     )
 
     print(

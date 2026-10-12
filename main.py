@@ -733,6 +733,9 @@ def main():
                     "Growth Score":
                         growth_score,
 
+                    "Risk Score":
+                        risk_score,
+
                     # Confidence Engine
                     "Confidence":
                         recommendation[
@@ -1438,23 +1441,176 @@ def main():
                 decision
             )
 
-        # ---------------------------------
+        # Convert stock results into dataframe for capital allocator
+        #
+        # IMPORTANT:
+        # Capital Allocation receives the full production
+        # opportunity population. It applies its own
+        # authoritative BUY NEW / BUY MORE eligibility
+        # and allocation logic.
+        #
+        # Do not restrict this dataframe to Candidate Selection
+        # here, as that changes Capital Allocation behaviour.
+
+        opportunities_df = pd.DataFrame(
+            results
+        )
+
+        capital_allocation = generate_capital_allocation(
+            portfolio_summary=portfolio_summary,
+            opportunities=opportunities_df,
+            portfolio_decisions=portfolio_decisions,
+            metadata_source=market_intelligence,
+            buy_new_candidates=buy_new_candidates,
+        )
+
+        # ========================================================
         # MARKET & EVENT INTELLIGENCE
-        # Shadow mode — does not alter
-        # portfolio decisions
-        # ---------------------------------
+        #
+        # IMPORTANT:
+        # Market Intelligence must evaluate the BUY NEW
+        # population produced by Capital Allocation.
+        #
+        # This keeps Market Intelligence aligned with the
+        # downstream BUY NEW recommendations rather than
+        # independently using Portfolio Decisions.
+        # ========================================================
+
+        allocation_df = (
+
+            capital_allocation.get(
+
+                "Capital Allocation",
+
+                pd.DataFrame()
+
+            )
+
+            if isinstance(
+
+                capital_allocation,
+
+                dict
+
+            )
+
+            else pd.DataFrame()
+
+        )
+
+        if allocation_df is None:
+
+            allocation_df = pd.DataFrame()
+
+        if not isinstance(
+
+            allocation_df,
+
+            pd.DataFrame
+
+        ):
+
+            allocation_df = pd.DataFrame(
+
+                allocation_df
+
+            )
+
+        buy_new_allocation = (
+
+            allocation_df[
+
+                allocation_df[
+
+                    "Action"
+
+                ]
+
+                .astype(str)
+
+                .str.upper()
+
+                .eq(
+
+                    "BUY NEW"
+
+                )
+
+            ].copy()
+
+            if (
+
+                not allocation_df.empty
+
+                and
+
+                "Action"
+
+                in allocation_df.columns
+
+            )
+
+            else pd.DataFrame()
+
+        )
+
+        market_intelligence_decisions = (
+
+            buy_new_allocation.to_dict(
+
+                "records"
+
+            )
+
+        )
 
         print(
             "\nMARKET & EVENT INTELLIGENCE"
         )
 
+        print(
+            "\nMARKET INTELLIGENCE BUY NEW POPULATION"
+        )
+
+        if not buy_new_allocation.empty:
+
+            print(
+                buy_new_allocation[
+                    [
+                        column
+                        for column in [
+                            "Ticker",
+                            "Action",
+                            "Investment Score",
+                            "Entry Quality",
+                            "Valuation",
+                        ]
+                        if column in buy_new_allocation.columns
+                    ]
+                ].to_string(
+                    index=False
+                )
+            )
+
+        else:
+
+            print(
+                "No BUY NEW candidates passed to "
+                "Market Intelligence."
+            )
+
         market_intelligence = (
+
             assess_market_intelligence(
+
                 holdings,
-                portfolio_decisions,
+
+                market_intelligence_decisions,
+
                 force_refresh=True
 
             )
+
         )
 
         print(
@@ -1480,45 +1636,170 @@ def main():
                 )
             )
 
-        # Convert stock results into dataframe for capital allocator
+        # ========================================================
+        # BUY NEW PIPELINE ALIGNMENT DIAGNOSTIC
+        # ========================================================
 
-        opportunities_df = pd.DataFrame(
-            results
-        )
+        candidate_selection_tickers = {
 
-        capital_allocation = (
+            str(ticker).strip().upper()
 
-            generate_capital_allocation(
+            for ticker in (
 
-                portfolio_summary=(
+                buy_new_candidates["Ticker"]
 
-                    portfolio_summary
+                if (
 
-                ),
+                    isinstance(
 
-                opportunities=(
+                        buy_new_candidates,
 
-                    opportunities_df
+                        pd.DataFrame
 
-                ),
+                    )
 
-                portfolio_decisions=(
+                    and
 
-                    portfolio_decisions
+                    "Ticker"
 
-                ),
-
-                metadata_source=(
-
-                    market_intelligence
+                    in buy_new_candidates.columns
 
                 )
 
+                else []
+
             )
 
+        }
+
+        capital_allocation_tickers = {
+
+            str(ticker).strip().upper()
+
+            for ticker in (
+
+                buy_new_allocation["Ticker"]
+
+                if (
+
+                    "Ticker"
+
+                    in buy_new_allocation.columns
+
+                )
+
+                else []
+
+            )
+
+        }
+
+        portfolio_decision_tickers = {
+
+            str(
+
+                row.get(
+
+                    "Ticker",
+
+                    ""
+
+                )
+
+            ).strip().upper()
+
+            for row in portfolio_decisions
+
+            if (
+
+                str(
+
+                    row.get(
+
+                        "Action",
+
+                        ""
+
+                    )
+
+                ).strip().upper()
+
+                == "BUY NEW"
+
+            )
+
+        }
+
+        market_intelligence_tickers = {
+
+            str(ticker).strip().upper()
+
+            for ticker in (
+
+                market_intelligence["Ticker"]
+
+                if (
+
+                    not market_intelligence.empty
+
+                    and
+
+                    "Ticker"
+
+                    in market_intelligence.columns
+
+                )
+
+                else []
+
+            )
+
+        }
+
+        print(
+            "\n===== BUY NEW PIPELINE ALIGNMENT ====="
         )
 
+        print(
+            "Candidate Selection:",
+            sorted(candidate_selection_tickers)
+        )
 
+        print(
+            "Portfolio Decisions:",
+            sorted(portfolio_decision_tickers)
+        )
+
+        print(
+            "Capital Allocation:",
+            sorted(capital_allocation_tickers)
+        )
+
+        print(
+            "Market Intelligence:",
+            sorted(market_intelligence_tickers)
+        )
+
+        print(
+            "Candidate Selection count:",
+            len(candidate_selection_tickers)
+        )
+
+        print(
+            "Portfolio Decisions BUY NEW count:",
+            len(portfolio_decision_tickers)
+        )
+
+        print(
+            "Capital Allocation BUY NEW count:",
+            len(capital_allocation_tickers)
+        )
+
+        print(
+            "Market Intelligence count:",
+            len(market_intelligence_tickers)
+        )
+                        
         decisions = generate_decisions(
             portfolio_summary,
             results,
@@ -1611,7 +1892,8 @@ def main():
     except Exception as e:
 
         print(
-            "PORTFOLIO ANALYSIS ERROR:"
+            "\nPORTFOLIO ANALYSIS ERROR:",
+            repr(e)
         )
 
         traceback.print_exc()
@@ -1886,6 +2168,7 @@ def main():
                 portfolio_manager_review=portfolio_manager_review,
                 portfolio_health=portfolio_health,
                 capital_allocation=capital_allocation,
+                buy_new_candidates=buy_new_candidates,
                 recommendation_intelligence=(
                     recommendation_intelligence
                 ),
@@ -1893,7 +2176,6 @@ def main():
                     learning_ticker_horizon_performance
                 ),
                 market_intelligence=market_intelligence,
-
             )
         )
 

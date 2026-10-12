@@ -5789,6 +5789,18 @@ def create_report(
 
             )
 
+            reallocation_audit = (
+
+                portfolio_reallocation.get(
+
+                    "audit",
+
+                    {}
+
+                )
+
+            )
+
         elif isinstance(
 
             portfolio_reallocation,
@@ -5805,11 +5817,15 @@ def create_report(
 
             reallocation_summary = {}
 
+            reallocation_audit = {}
+
         else:
 
             reallocation_report = pd.DataFrame()
 
             reallocation_summary = {}
+
+            reallocation_audit = {}
 
         # -----------------------------------------------------
         # Ensure the detail is always a DataFrame.
@@ -5963,6 +5979,253 @@ def create_report(
 
             )
 
+        # -----------------------------------------------------
+        # READ-ONLY REALLOCATION AUDIT
+        # -----------------------------------------------------
+
+        if not isinstance(
+
+            reallocation_audit,
+
+            dict
+
+        ):
+
+            reallocation_audit = {}
+
+        audit_summary = reallocation_audit.get(
+
+            "summary",
+
+            {}
+
+        )
+
+        destination_audit = reallocation_audit.get(
+
+            "destination_audit",
+
+            pd.DataFrame()
+
+        )
+
+        funding_audit = reallocation_audit.get(
+
+            "funding_audit",
+
+            pd.DataFrame()
+
+        )
+
+        if not isinstance(
+
+            destination_audit,
+
+            pd.DataFrame
+
+        ):
+
+            destination_audit = pd.DataFrame(
+
+                destination_audit
+
+            )
+
+        if not isinstance(
+
+            funding_audit,
+
+            pd.DataFrame
+
+        ):
+
+            funding_audit = pd.DataFrame(
+
+                funding_audit
+
+            )
+
+        worksheet = writer.sheets[
+
+            portfolio_reallocation_sheet_name
+
+        ]
+
+        audit_summary_heading_row = (
+
+            max(
+                detail_heading_row + len(reallocation_report) + 3,
+                detail_heading_row + 6
+            )
+
+        )
+
+        worksheet.cell(
+
+            row=audit_summary_heading_row,
+
+            column=1,
+
+            value="REALLOCATION AUDIT SUMMARY"
+
+        )
+
+        if isinstance(audit_summary, dict) and audit_summary:
+
+            pd.DataFrame(
+
+                [audit_summary]
+
+            ).to_excel(
+
+                writer,
+
+                sheet_name=portfolio_reallocation_sheet_name,
+
+                startrow=audit_summary_heading_row,
+
+                index=False
+
+            )
+
+        else:
+
+            pd.DataFrame(
+
+                {
+                    "Status": [
+                        "No portfolio reallocation audit data available"
+                    ]
+                }
+
+            ).to_excel(
+
+                writer,
+
+                sheet_name=portfolio_reallocation_sheet_name,
+
+                startrow=audit_summary_heading_row,
+
+                index=False
+
+            )
+
+        destination_heading_row = (
+
+            audit_summary_heading_row
+            + 3
+            + max(
+                1,
+                len(audit_summary)
+                if isinstance(audit_summary, dict)
+                else 1
+            )
+
+        )
+
+        worksheet.cell(
+
+            row=destination_heading_row,
+
+            column=1,
+
+            value="DESTINATION AUDIT"
+
+        )
+
+        if destination_audit.empty:
+
+            pd.DataFrame(
+
+                {
+                    "Status": [
+                        "No destination audit data available"
+                    ]
+                }
+
+            ).to_excel(
+
+                writer,
+
+                sheet_name=portfolio_reallocation_sheet_name,
+
+                startrow=destination_heading_row,
+
+                index=False
+
+            )
+
+        else:
+
+            destination_audit.to_excel(
+
+                writer,
+
+                sheet_name=portfolio_reallocation_sheet_name,
+
+                startrow=destination_heading_row,
+
+                index=False
+
+            )
+
+        funding_heading_row = (
+
+            destination_heading_row
+            + 3
+            + max(
+                1,
+                len(destination_audit)
+            )
+
+        )
+
+        worksheet.cell(
+
+            row=funding_heading_row,
+
+            column=1,
+
+            value="FUNDING SOURCE AUDIT"
+
+        )
+
+        if funding_audit.empty:
+
+            pd.DataFrame(
+
+                {
+                    "Status": [
+                        "No funding source audit data available"
+                    ]
+                }
+
+            ).to_excel(
+
+                writer,
+
+                sheet_name=portfolio_reallocation_sheet_name,
+
+                startrow=funding_heading_row,
+
+                index=False
+
+            )
+
+        else:
+
+            funding_audit.to_excel(
+
+                writer,
+
+                sheet_name=portfolio_reallocation_sheet_name,
+
+                startrow=funding_heading_row,
+
+                index=False
+
+            )
+
         # =====================================================
         # STOCK RANKINGS
         # =====================================================
@@ -6105,6 +6368,18 @@ def create_report(
             "Creating Final Portfolio Decisions"
         )
 
+        # =====================================================
+        # FINAL PORTFOLIO DECISIONS
+        #
+        # Presentation only:
+        #   1. Selected BUY NEW decisions
+        #   2. Blank line / separator
+        #   3. BUY NEW candidates assessed but not selected
+        #   4. All other portfolio decisions
+        #
+        # The underlying decision dataframe is not modified.
+        # =====================================================
+
         final_report = (
             prepare_final_portfolio_decisions_report(
                 final_portfolio_decisions,
@@ -6112,12 +6387,87 @@ def create_report(
             )
         )
 
-        final_report.to_excel(
+
+        final_report_selected = final_report[
+            final_report["Final Decision"]
+            .astype(str)
+            .str.upper()
+            .eq("BUY NEW")
+        ].copy()
+
+        final_report_not_selected = final_report[
+            (
+                final_report["Proposed Action"]
+                .astype(str)
+                .str.upper()
+                .eq("BUY NEW")
+            )
+            &
+            ~(
+                final_report["Final Decision"]
+                .astype(str)
+                .str.upper()
+                .eq("BUY NEW")
+            )
+        ].copy()
+
+        final_report_other = final_report[
+            ~(
+                final_report["Proposed Action"]
+                .astype(str)
+                .str.upper()
+                .eq("BUY NEW")
+            )
+        ].copy()
+
+        final_report_selected.to_excel(
             writer,
             sheet_name="Final Portfolio Decisions",
-            index=False
+            index=False,
+            startrow=0,
         )
 
+        worksheet = writer.sheets["Final Portfolio Decisions"]
+
+        
+        separator_row = (
+            len(final_report_selected)
+            + 3
+        )
+
+        worksheet.cell(
+            row=separator_row,
+            column=1,
+            value="BUY NEW CANDIDATES ASSESSED BUT NOT SELECTED",
+        )
+
+        if not final_report_not_selected.empty:
+
+            final_report_not_selected.to_excel(
+                writer,
+                sheet_name="Final Portfolio Decisions",
+                index=False,
+                startrow=separator_row + 1,
+                header=True,
+            )
+
+        not_selected_end_row = (
+            separator_row
+            + 1
+            + len(final_report_not_selected)
+            + 2
+        )
+
+        if not final_report_other.empty:
+
+            final_report_other.to_excel(
+                writer,
+                sheet_name="Final Portfolio Decisions",
+                index=False,
+                startrow=not_selected_end_row,
+                header=True,
+            )
+        
         # =====================================================
         # INVESTMENT DECISIONS
         # =====================================================

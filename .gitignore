@@ -34,3 +34,9 @@ __pycache__/
 backups/
 Documents/
 *.log
+data/fundamentals/*.json
+
+# Generated data and analysis outputs
+*.csv
+*.json
+*.xlsx

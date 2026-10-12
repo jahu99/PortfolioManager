@@ -72,6 +72,10 @@ in the wider portfolio analysis.
 import os
 import pandas as pd
 
+from analysis.candidate_selection import (
+    buy_new_priority_regime,
+)
+
 from config.investment_config import (
     DISCRETIONARY_SPEND_LIMIT,
     MAX_NEW_BUYS,
@@ -643,7 +647,8 @@ def generate_capital_allocation(
     portfolio_summary,
     opportunities=None,
     portfolio_decisions=None,
-    metadata_source=None
+    metadata_source=None,
+    buy_new_candidates=None,
 ):
     """
     Generate portfolio capital allocation.
@@ -680,6 +685,33 @@ def generate_capital_allocation(
 
     if opportunities is None:
         opportunities = pd.DataFrame()
+
+    # ========================================================
+    # BUY NEW CANDIDATE SHORTLIST
+    #
+    # When supplied, this limits BUY NEW eligibility to the
+    # ordered shortlist produced by candidate_selection.py.
+    #
+    # The full opportunities dataframe remains available for
+    # BUY MORE decisions and other existing allocator logic.
+    #
+    # None preserves legacy behaviour for existing callers.
+    # An empty dataframe means no BUY NEW candidates are eligible.
+    # ========================================================
+
+    buy_new_candidate_tickers = None
+
+    if isinstance(buy_new_candidates, pd.DataFrame):
+
+        buy_new_candidate_tickers = set()
+
+        if "Ticker" in buy_new_candidates.columns:
+
+            buy_new_candidate_tickers = {
+                clean_ticker(ticker)
+                for ticker in buy_new_candidates["Ticker"]
+                if clean_ticker(ticker)
+            }
 
     # ========================================================
     # NORMALISE PORTFOLIO DECISIONS
@@ -1336,6 +1368,23 @@ def generate_capital_allocation(
                 ownership
             )
 
+            # ------------------------------------------------
+            # BUY NEW SHORTLIST GATE
+            #
+            # Only genuinely unowned securities are restricted
+            # to the Candidate Selection shortlist.
+            #
+            # Existing holdings remain eligible for BUY MORE
+            # from the full opportunities universe.
+            # ------------------------------------------------
+
+            if (
+                not owned
+                and buy_new_candidate_tickers is not None
+                and ticker not in buy_new_candidate_tickers
+            ):
+                continue
+
             if owned:
 
                 action = "BUY MORE"
@@ -1675,19 +1724,89 @@ def generate_capital_allocation(
 
 
     # ========================================================
-    # RANK ALL BUY OPPORTUNITIES TOGETHER
+    # SELECT BUY NEW CANDIDATES
     #
-    # Stocks and ETFs compete on Allocation Score.
+    # BUY NEW uses the canonical A6 BUY NEW regime ranking.
     #
-    # Stock:
-    #     Allocation Score = Investment Score
+    # Highest-priority regime:
     #
-    # ETF:
-    #     Allocation Score = ETF Score
+    #     Investment Score 80-89.99
+    #     + Entry Quality MODERATELY EXTENDED
+    #
+    # This selection is independent of BUY MORE.
     # ========================================================
 
+    buy_candidates_list = list(
+        buy_candidates.values()
+    )
+
+    print("\nDEBUG BUY CANDIDATES TYPES")
+    for _candidate in buy_candidates_list:
+        print(
+            type(_candidate).__name__,
+            repr(_candidate)[:300]
+        )
+
+    buy_new_candidates_for_selection = [
+        candidate
+        for candidate in buy_candidates_list
+        if candidate.get(
+            "Action"
+        ) == "BUY NEW"
+    ]
+
+    buy_more_candidates_for_selection = [
+        candidate
+        for candidate in buy_candidates_list
+        if candidate.get(
+            "Action"
+        ) == "BUY MORE"
+    ]
+
+    buy_new_candidates_for_selection = sorted(
+        buy_new_candidates_for_selection,
+        key=lambda candidate: (
+            buy_new_priority_regime(
+                candidate
+            ),
+            -float(
+                candidate.get(
+                    "_Allocation Score",
+                    0.0
+                )
+            ),
+            candidate.get(
+                "Ticker",
+                ""
+            ),
+        )
+    )
+
+    # Independently select the maximum BUY NEW population
+    # using the canonical BUY NEW regime.
+    selected_buy_new_candidates = (
+        buy_new_candidates_for_selection[
+            :MAX_NEW_BUYS
+        ]
+    )
+
+    # ========================================================
+    # RANK REMAINING BUY OPPORTUNITIES TOGETHER
+    #
+    # There is still NO BUY MORE-first rule.
+    #
+    # The selected BUY NEW candidates compete with BUY MORE
+    # using Allocation Score, preserving the existing capital
+    # allocation behaviour.
+    # ========================================================
+
+    allocation_candidates = (
+        selected_buy_new_candidates
+        + buy_more_candidates_for_selection
+    )
+
     buy_candidates = sorted(
-        buy_candidates.values(),
+        allocation_candidates,
         key=lambda x: (
             -x["_Allocation Score"],
             x["Ticker"]
@@ -1697,12 +1816,12 @@ def generate_capital_allocation(
     # ========================================================
     # SELECT CANDIDATES
     #
-    # There is NO BUY MORE-first rule.
+    # BUY NEW has already been independently limited to
+    # MAX_NEW_BUYS using the canonical BUY NEW regime.
     #
-    # A BUY NEW with a higher allocation score can therefore
-    # beat a BUY MORE.
+    # BUY MORE remains governed by MAX_BUY_MORE.
     #
-    # MAX_NEW_BUYS and MAX_BUY_MORE remain category safeguards.
+    # There is still NO BUY MORE-first rule.
     # ========================================================
 
     selected_candidates = []

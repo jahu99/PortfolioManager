@@ -50,6 +50,10 @@ from pathlib import Path
 
 from typing import Any
 
+import re
+from datetime import datetime, timezone
+
+
 import requests
 
 from google import genai
@@ -1015,14 +1019,26 @@ provide current market, company or event context.
 It does NOT replace, modify or override deterministic scores, signals,
 evidence scoring, historical learning or portfolio governance.
 
-Use it only where a specific supplied contextual fact materially supports,
-weakens or contradicts the proposed action.
+Review Market & Event Intelligence when supplied.
+
+Classify it as SUPPORTS, WEAKENS, CONTRADICTS or NEUTRAL.
+
+A conflicting analyst view, downgrade, negative headline or scheduled event
+does not by itself make the proposed action wrong. Assess materiality against
+the complete supplied evidence.
+
+Use CHALLENGE only when the intelligence materially weakens the proposed
+action but does not provide sufficient evidence for REJECT.
+
+Use REJECT only when supplied intelligence provides specific, substantive,
+action-specific evidence that the proposed action should NOT be taken.
+
+If the conflict is not material, ACCEPT may still be appropriate.
 
 Missing Market & Event Intelligence is neutral. Do not treat its absence as
 negative evidence.
 
-Do not invent current events, news, earnings information, sentiment or market
-conditions that are not explicitly supplied.
+Do not invent or infer facts not supplied.
 
 Contextual intelligence may strengthen confidence in an action, identify a
 material risk, or provide a specific action-relevant contradiction. It must
@@ -1164,6 +1180,13 @@ Rules for the JSON:
   adding capital versus leaving the existing position unchanged.
 - Do not use allocation, position size or capital sizing as evidence.
 - Do not invent missing information.
+- If supplied Market & Event Intelligence materially conflicts with the
+  proposed action, the reason MUST explicitly acknowledge the conflict and
+  explain whether it is material enough to produce CHALLENGE or REJECT.
+- If supplied Market & Event Intelligence is relevant but does not materially
+  conflict with the proposed action, the reason may acknowledge it where it
+  materially affects the review.
+
 """
 
 
@@ -1888,6 +1911,122 @@ def _call_gemini_once(prompt: str) -> dict:
 
     return result
 
+class LLMMarketClosedNoCache(Exception):
+    """Raised when a required LLM review has no usable cache on a non-market day."""
+
+
+def _get_prompt_ticker(prompt: str) -> str:
+    """Extract the ticker from the governed review prompt."""
+
+    match = re.search(
+        r'"ticker"\s*:\s*"([^"]+)"',
+        prompt,
+        flags=re.IGNORECASE,
+    )
+
+    if match:
+        return match.group(1).strip().upper()
+
+    match = re.search(
+        r"\bTicker\s*:\s*([A-Z0-9.\-]+)",
+        prompt,
+        flags=re.IGNORECASE,
+    )
+
+    if match:
+        return match.group(1).strip().upper()
+
+    return ""
+
+
+def _is_market_day() -> bool:
+    """
+    Return whether today is a normal market day.
+
+    This deliberately uses weekday semantics only. Exchange-specific holiday
+    calendars are not currently part of the project, and this review cache is
+    not used for order execution.
+    """
+
+    return datetime.now(
+        timezone.utc
+    ).weekday() < 5
+
+
+def _get_latest_prior_cached_review(
+    cache: dict,
+    ticker: str,
+    provider: str,
+    model: str,
+    decision_date: str,
+) -> dict | None:
+    """
+    Return the latest prior self-describing cache entry for this ticker.
+
+    Older cache entries without metadata are intentionally ignored here.
+    They remain available through the normal exact cache-key lookup.
+    """
+
+    latest_entry = None
+    latest_date = ""
+
+    for entry in cache.values():
+
+        if not isinstance(
+            entry,
+            dict,
+        ):
+            continue
+
+        if _clean_text(
+            entry.get("ticker", "")
+        ).upper() != ticker:
+
+            continue
+
+        if _clean_text(
+            entry.get("provider", "")
+        ).lower() != provider:
+
+            continue
+
+        entry_model = _clean_text(
+            entry.get("model", "")
+        )
+
+        if entry_model != model:
+            continue
+
+        entry_date = _clean_text(
+            entry.get("decision_date", "")
+        )
+
+        if not entry_date:
+            continue
+
+        if entry_date >= decision_date:
+            continue
+
+        response = entry.get(
+            "response"
+        )
+
+        if not isinstance(
+            response,
+            dict,
+        ):
+            continue
+
+        if (
+            not latest_date
+            or entry_date > latest_date
+        ):
+
+            latest_date = entry_date
+            latest_entry = response
+
+    return latest_entry
+
 def call_llm(prompt: str) -> dict:
     """Call the configured LLM provider with optional response caching."""
 
@@ -1910,40 +2049,109 @@ def call_llm(prompt: str) -> dict:
         prompt
     )
 
+    decision_date = datetime.now(
+        timezone.utc
+    ).date().isoformat()
+
+    ticker = _get_prompt_ticker(
+        prompt
+    )
+
+    model = (
+        GEMINI_MODEL
+        if provider == "gemini"
+        else OLLAMA_MODEL
+    )
+
+    market_day = _is_market_day()
+
     if LLM_CACHE_ENABLED:
 
         cache = _load_llm_cache()
 
-        cached = cache.get(
-            cache_key
-        )
+        # --------------------------------------------------------
+        # MARKET DAY
+        # --------------------------------------------------------
+        #
+        # Preserve the existing exact cache-key behaviour.
+        # --------------------------------------------------------
 
-        if isinstance(
-            cached,
-            dict,
-        ):
+        if market_day:
 
-            response = cached.get(
-                "response"
+            cached = cache.get(
+                cache_key
             )
 
             if isinstance(
-                response,
+                cached,
+                dict,
+            ):
+
+                response = cached.get(
+                    "response"
+                )
+
+                if isinstance(
+                    response,
+                    dict,
+                ):
+
+                    print(
+                        f"LLM CACHE HIT: {provider.upper()}"
+                        f"KEY={cache_key[:12]}"
+                    )
+
+                    return response
+
+            print(
+                f"LLM CACHE MISS: {provider.upper()}"
+                f"KEY={cache_key[:12]}"
+            )
+
+        # --------------------------------------------------------
+        # NON-MARKET DAY
+        # --------------------------------------------------------
+        #
+        # Do NOT require today's cache key.
+        # Use the latest prior applicable cached review instead.
+        # --------------------------------------------------------
+
+        else:
+
+            cached = _get_latest_prior_cached_review(
+                cache=cache,
+                ticker=ticker,
+                provider=provider,
+                model=model,
+                decision_date=decision_date,
+            )
+
+            if isinstance(
+                cached,
                 dict,
             ):
 
                 print(
-                    f"LLM CACHE HIT: {provider.upper()}"
-                    f"KEY={cache_key[:12]}"
+                    f"LLM CACHE PRIOR-DAY HIT: {provider.upper()} "
+                    f"TICKER={ticker} "
+                    f"DATE<{decision_date}"
                 )
 
-                return response
+                return cached
 
-        print(
-            f"LLM CACHE MISS: {provider.upper()}"
-            f"KEY={cache_key[:12]}"
-        )
+            message = (
+                "NON-MARKET DAY — "
+                "NO LLM CALL TODAY"
+            )
 
+            print(
+                f"{message}: "
+                f"{ticker or 'UNKNOWN'}"
+            )
+
+            raise LLMMarketClosedNoCache(
+                message
+            )
 
     print(
         f"CALLING LLM PROVIDER: {provider.upper()}"
@@ -1971,11 +2179,9 @@ def call_llm(prompt: str) -> dict:
 
         cache[cache_key] = {
             "provider": provider,
-            "model": (
-                GEMINI_MODEL
-                if provider == "gemini"
-                else OLLAMA_MODEL
-            ),
+            "model": model,
+            "ticker": ticker,
+            "decision_date": decision_date,
             "response": result,
         }
 
@@ -1988,9 +2194,6 @@ def call_llm(prompt: str) -> dict:
         )
 
     return result
-
-
-
 
 def call_ollama(prompt: str) -> dict:
     """Send a review request to Ollama and validate the response contract.
@@ -2883,6 +3086,21 @@ def review_ai_decision(
         )
 
         return review
+
+    except LLMMarketClosedNoCache as exc:
+        message = str(exc)
+
+        print(
+            f"LLM REVIEW NOT AVAILABLE: "
+            f"{ticker} | {message}"
+        )
+
+        return _review_failure(
+            ticker=ticker,
+            decision=decision,
+            message=message,
+            status="LLM REVIEW NOT AVAILABLE",
+        )
 
     except requests.exceptions.Timeout as exc:
         message = (

@@ -1,0 +1,4 @@
+Copy the calibration/ folder into the ROOT of stock-momentum-agent.
+Do NOT import calibration from main.py.
+Run from the repository root:
+python -m calibration.buy_new_calibration --start-date 2026-08-01 --end-date 2026-09-25 --universe BOTH --top-n 10 --forward-days 28
