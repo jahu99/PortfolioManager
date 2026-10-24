@@ -1095,7 +1095,62 @@ def _collect_audit_reasons(
             actual_value=final_action,
             threshold_value=original_action,
             unit="action",
-            source_layer="reconciliation",
+            source_layer=(
+                "portfolio_slot_selection"
+                if safe_text(
+                    final_result.get("Decision Status"),
+                    "",
+                ).upper() == "BUY NEW SLOT NOT SELECTED"
+                else "reconciliation"
+            ),
+            severity="MATERIAL",
+        )
+
+    # --------------------------------------------------------
+    # Portfolio-level BUY NEW slot selection.
+    # --------------------------------------------------------
+
+    if (
+        safe_text(
+            final_result.get("Decision Status"),
+            "",
+        ).upper() == "BUY NEW SLOT NOT SELECTED"
+    ):
+        slot_position = final_result.get(
+            "BUY NEW Slot Selection Position"
+        )
+        slot_limit = final_result.get(
+            "BUY NEW Slot Limit"
+        )
+        priority_rank = final_result.get(
+            "BUY NEW Priority Rank"
+        )
+        investment_score = final_result.get(
+            "Investment Score"
+        )
+        score_threshold = final_result.get(
+            "Investment Score Threshold",
+            75.0,
+        )
+
+        add_reason_once(
+            reason_code="BUY_NEW_SLOT_NOT_SELECTED",
+            reason_category="portfolio_selection",
+            reason_description=(
+                "The governed BUY NEW candidate was changed to "
+                "HOLD because its portfolio selection position "
+                f"({slot_position}) exceeded the slot limit "
+                f"({slot_limit}). Candidate Selection priority "
+                f"rank: {priority_rank}. Investment Score: "
+                f"{investment_score}; minimum eligibility "
+                f"threshold: {score_threshold}. This is a "
+                "portfolio-capacity decision, not an Investment "
+                "Score threshold failure."
+            ),
+            actual_value=slot_position,
+            threshold_value=slot_limit,
+            unit="slot_position",
+            source_layer="portfolio_slot_selection",
             severity="MATERIAL",
         )
 

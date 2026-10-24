@@ -783,6 +783,3114 @@ def is_hold_funding_eligible(position):
     return True
 
 
+def _normalise_economic_sector(value):
+    """Accept economic-sector labels, not instrument-type labels."""
+    sector = str(value or "").strip()
+    if not sector:
+        return ""
+
+    invalid_labels = {
+        "ETF", "STOCK", "EQUITY", "SHARE",
+        "CASH", "BOND", "FUND", "MUTUAL FUND", "INDEX FUND",
+    }
+    return "" if sector.upper() in invalid_labels else sector
+
+
+def _build_price_deterioration_assessment(ticker):
+    """Return advisory-only price-risk evidence; never alter trade decisions."""
+    result = {
+        "status": "UNASSESSED",
+        "source": "cache/prices/{TICKER}_1y.parquet (cache-only)",
+        "observation_date": None,
+        "freshness": "UNKNOWN",
+        "return_20_session_percent": None,
+        "return_60_session_percent": None,
+        "drawdown_from_52w_intraday_high_percent": None,
+        "severity": "UNKNOWN",
+        "reasons": [],
+    }
+
+    try:
+        from data import market_data
+
+        # SHADOW risk assessment must never trigger live market-data downloads.
+        cache_file = market_data._cache_file(ticker, "1y")
+
+        if not os.path.exists(cache_file):
+            result["reasons"].append(
+                "No cached historical price observations; "
+                "network refresh intentionally skipped."
+            )
+            return result
+
+        data = pd.read_parquet(cache_file)
+
+        if data is None or data.empty:
+            result["reasons"].append(
+                "No historical price observations returned."
+            )
+            return result
+
+        data = data.copy()
+        data.index = pd.to_datetime(data.index, errors="coerce")
+        data = data.loc[~data.index.isna()].sort_index()
+        data = data.loc[~data.index.duplicated(keep="last")]
+
+        if data.empty:
+            result["reasons"].append(
+                "Historical price dates are invalid."
+            )
+            return result
+
+        latest_date = pd.Timestamp(data.index[-1]).normalize()
+        result["observation_date"] = latest_date.strftime("%Y-%m-%d")
+
+        latest_session_fn = getattr(
+            market_data, "_latest_completed_us_trading_date", None
+        )
+
+        if callable(latest_session_fn):
+            expected_date = pd.Timestamp(
+                latest_session_fn()
+            ).normalize()
+            fresh = latest_date >= expected_date
+        else:
+            fresh = (
+                pd.Timestamp.now().normalize() - latest_date
+            ).days <= 5
+
+        result["freshness"] = "CURRENT" if fresh else "STALE"
+
+        if not fresh:
+            result["reasons"].append(
+                "Latest observation is older than the expected completed US "
+                "trading session; price risk remains unassessed."
+            )
+            return result
+
+        if "Close" not in data.columns:
+            result["reasons"].append(
+                "Historical data has no Close column."
+            )
+            return result
+
+        close = pd.to_numeric(
+            data["Close"], errors="coerce"
+        ).dropna()
+
+        if close.empty or float(close.iloc[-1]) <= 0:
+            result["reasons"].append(
+                "No valid latest closing price is available."
+            )
+            return result
+
+        latest_close = float(close.iloc[-1])
+
+        if len(close) >= 21 and float(close.iloc[-21]) > 0:
+            result["return_20_session_percent"] = round(
+                (latest_close / float(close.iloc[-21]) - 1) * 100,
+                2,
+            )
+        else:
+            result["reasons"].append(
+                "Insufficient data for a 20-session return."
+            )
+
+        if len(close) >= 61 and float(close.iloc[-61]) > 0:
+            result["return_60_session_percent"] = round(
+                (latest_close / float(close.iloc[-61]) - 1) * 100,
+                2,
+            )
+        else:
+            result["reasons"].append(
+                "Insufficient data for a 60-session return."
+            )
+
+        if "High" in data.columns:
+            high = pd.to_numeric(
+                data["High"], errors="coerce"
+            ).dropna().tail(252)
+
+            if not high.empty and float(high.max()) > 0:
+                result[
+                    "drawdown_from_52w_intraday_high_percent"
+                ] = round(
+                    (latest_close / float(high.max()) - 1) * 100,
+                    2,
+                )
+            else:
+                result["reasons"].append(
+                    "No valid daily highs available."
+                )
+        else:
+            result["reasons"].append(
+                "Historical data has no High column."
+            )
+
+        r20 = result["return_20_session_percent"]
+        r60 = result["return_60_session_percent"]
+        dd = result["drawdown_from_52w_intraday_high_percent"]
+
+        # Incomplete history must never be labelled assessed or low risk.
+        if r20 is None or r60 is None or dd is None:
+            result["severity"] = "UNKNOWN"
+            result["reasons"].append(
+                "Incomplete price history; full price-risk assessment unavailable."
+            )
+            return result
+
+        if r60 <= -25 or dd <= -40:
+            result["severity"] = "HIGH"
+            result["reasons"].append(
+                "Severe price deterioration review threshold breached."
+            )
+        elif r20 <= -10 or r60 <= -15 or dd <= -25:
+            result["severity"] = "REVIEW"
+            result["reasons"].append(
+                "Price deterioration review threshold breached."
+            )
+        else:
+            result["severity"] = "NO_THRESHOLD_BREACH"
+            result["reasons"].append(
+                "No configured price review threshold breached; this does not "
+                "establish that the stock is low risk."
+            )
+
+        result["status"] = "ASSESSED"
+        return result
+
+    except Exception as exc:
+        result["reasons"].append(
+            "Price-risk assessment failed: " + type(exc).__name__ + "."
+        )
+        return result
+
+def _build_macro_regime_assessment():
+    """Assess a small set of cache-only macro-risk proxies for SHADOW review.
+
+    These proxies are not a complete macroeconomic model. Missing or stale
+    inputs remain UNASSESSED; this function never refreshes market data.
+    """
+    from data import market_data
+
+    result = {
+        "status": "UNASSESSED",
+        "regime": "UNASSESSED",
+        "as_of": None,
+        "indicators": [],
+        "historical_pre_trade_status": "NOT_ASSESSED",
+        "historical_pre_trade_reason": (
+            "The current assessment has no purchase date or point-in-time macro "
+            "snapshot. Current cached data cannot establish what was knowable "
+            "before a historical purchase."
+        ),
+        "advisory_only": True,
+    }
+
+    today = pd.Timestamp.now().normalize()
+    cache = {}
+
+    def load_closes(ticker):
+        if ticker in cache:
+            return cache[ticker]
+        path = market_data._cache_file(ticker, "1y")
+        if not os.path.exists(path):
+            cache[ticker] = (None, "No cached history; network refresh skipped.")
+            return cache[ticker]
+        try:
+            frame = pd.read_parquet(path)
+            if frame is None or frame.empty or "Close" not in frame.columns:
+                cache[ticker] = (None, "Cached history has no usable Close column.")
+                return cache[ticker]
+            frame = frame.copy()
+            frame.index = pd.to_datetime(frame.index, errors="coerce")
+            frame = frame.loc[~frame.index.isna()].sort_index()
+            frame = frame.loc[~frame.index.duplicated(keep="last")]
+            price_column = "Adj Close" if ticker not in {"^TNX", "CL=F"} and "Adj Close" in frame.columns else "Close"
+            closes = pd.to_numeric(frame[price_column], errors="coerce").dropna()
+            if closes.empty:
+                cache[ticker] = (None, "No valid cached closing observations.")
+                return cache[ticker]
+            latest_date = pd.Timestamp(closes.index[-1])
+            if latest_date.tzinfo is not None:
+                latest_date = latest_date.tz_localize(None)
+            if (today - latest_date.normalize()).days > 5:
+                cache[ticker] = (None, f"Cached data stale; latest observation {latest_date:%Y-%m-%d}.")
+                return cache[ticker]
+            cache[ticker] = (closes, None)
+            return cache[ticker]
+        except Exception as exc:
+            cache[ticker] = (None, f"Cache read failed: {type(exc).__name__}.")
+            return cache[ticker]
+
+    def base_indicator(name, proxy, ticker_list, metric):
+        return {
+            "Indicator": name,
+            "Proxy": proxy,
+            "Tickers": ticker_list,
+            "Metric": metric,
+            "Status": "UNASSESSED",
+            "Observation Date": None,
+            "Value": None,
+            "Threshold Basis": "PROVISIONAL SHADOW REVIEW THRESHOLDS",
+            "Evidence": "",
+            "Advisory Only": True,
+        }
+
+    # 10-year Treasury yield: ^TNX is quoted in yield percentage points.
+    row = base_indicator(
+        "US 10-year Treasury yield change",
+        "^TNX cached close; yield-change proxy, not a complete rate outlook",
+        "^TNX",
+        "20-session change (basis points)",
+    )
+    closes, error = load_closes("^TNX")
+    if closes is None:
+        row["Evidence"] = error
+    elif len(closes) < 21 or float(closes.iloc[-21]) <= 0:
+        row["Evidence"] = f"Insufficient cached history: {len(closes)} observations; need 21."
+    else:
+        latest = float(closes.iloc[-1])
+        change_bps = (latest - float(closes.iloc[-21])) * 100.0
+        row["Observation Date"] = pd.Timestamp(closes.index[-1]).strftime("%Y-%m-%d")
+        row["Value"] = round(change_bps, 1)
+        if change_bps >= 60:
+            row["Status"] = "HIGH RISK SIGNAL"
+        elif change_bps >= 35:
+            row["Status"] = "ELEVATED RISK SIGNAL"
+        else:
+            row["Status"] = "NO CONFIGURED THRESHOLD BREACH"
+        row["Evidence"] = (
+            f"20-session yield change {change_bps:+.1f} bps; provisional review "
+            "threshold +35 bps and high-risk threshold +60 bps."
+        )
+    result["indicators"].append(row)
+
+    # Oil: a sharp increase can add inflation/cost pressure, but is not
+    # interpreted as universally negative for every company or sector.
+    row = base_indicator(
+        "Crude oil price change",
+        "CL=F cached close; energy-price/inflation-pressure proxy",
+        "CL=F",
+        "20-session return (%)",
+    )
+    closes, error = load_closes("CL=F")
+    if closes is None:
+        row["Evidence"] = error
+    elif len(closes) < 21 or float(closes.iloc[-21]) <= 0:
+        row["Evidence"] = f"Insufficient cached history: {len(closes)} observations; need 21."
+    else:
+        latest = float(closes.iloc[-1])
+        change_pct = (latest / float(closes.iloc[-21]) - 1.0) * 100.0
+        row["Observation Date"] = pd.Timestamp(closes.index[-1]).strftime("%Y-%m-%d")
+        row["Value"] = round(change_pct, 2)
+        if change_pct >= 20:
+            row["Status"] = "HIGH RISK SIGNAL"
+        elif change_pct >= 10:
+            row["Status"] = "ELEVATED RISK SIGNAL"
+        else:
+            row["Status"] = "NO CONFIGURED THRESHOLD BREACH"
+        row["Evidence"] = (
+            f"20-session crude-oil return {change_pct:+.2f}%; provisional review "
+            "threshold +10% and high-risk threshold +20%. An oil-price rise can "
+            "affect sectors differently."
+        )
+    result["indicators"].append(row)
+
+    # High-yield versus investment-grade bond ETF relative performance is only
+    # a credit-risk-appetite proxy; it is not a measured credit spread.
+    row = base_indicator(
+        "Credit-risk appetite proxy",
+        "HYG relative to LQD cached 20-session returns; not a measured credit spread",
+        "HYG; LQD",
+        "HYG return minus LQD return (percentage points)",
+    )
+    hyg, hyg_error = load_closes("HYG")
+    lqd, lqd_error = load_closes("LQD")
+    if hyg is None or lqd is None:
+        row["Evidence"] = "; ".join(error for error in (hyg_error, lqd_error) if error)
+    elif len(hyg) < 21 or len(lqd) < 21 or float(hyg.iloc[-21]) <= 0 or float(lqd.iloc[-21]) <= 0:
+        row["Evidence"] = "Insufficient cached history for both HYG and LQD; need 21 observations each."
+    else:
+        hyg_return = (float(hyg.iloc[-1]) / float(hyg.iloc[-21]) - 1.0) * 100.0
+        lqd_return = (float(lqd.iloc[-1]) / float(lqd.iloc[-21]) - 1.0) * 100.0
+        relative = hyg_return - lqd_return
+        hyg_date = pd.Timestamp(hyg.index[-1])
+        lqd_date = pd.Timestamp(lqd.index[-1])
+        if hyg_date.tzinfo is not None:
+            hyg_date = hyg_date.tz_localize(None)
+        if lqd_date.tzinfo is not None:
+            lqd_date = lqd_date.tz_localize(None)
+        if abs((hyg_date.normalize() - lqd_date.normalize()).days) > 3:
+            row["Evidence"] = (
+                f"HYG and LQD observations are not date-aligned ({hyg_date:%Y-%m-%d} vs "
+                f"{lqd_date:%Y-%m-%d}); relative performance not assessed."
+            )
+        else:
+            row["Observation Date"] = min(hyg_date, lqd_date).strftime("%Y-%m-%d")
+            row["Value"] = round(relative, 2)
+            if relative <= -6:
+                row["Status"] = "HIGH RISK SIGNAL"
+            elif relative <= -3:
+                row["Status"] = "ELEVATED RISK SIGNAL"
+            else:
+                row["Status"] = "NO CONFIGURED THRESHOLD BREACH"
+            row["Evidence"] = (
+                f"HYG 20-session return {hyg_return:+.2f}%; LQD {lqd_return:+.2f}%; "
+                f"relative performance {relative:+.2f} percentage points. Provisional "
+                "review threshold -3 pp and high-risk threshold -6 pp; this is not a "
+                "direct credit-spread measurement."
+            )
+    result["indicators"].append(row)
+
+    assessed = [
+        item for item in result["indicators"]
+        if item["Status"] != "UNASSESSED"
+    ]
+    high_count = sum(item["Status"] == "HIGH RISK SIGNAL" for item in assessed)
+    elevated_count = sum(item["Status"] == "ELEVATED RISK SIGNAL" for item in assessed)
+    result["assessed_indicator_count"] = len(assessed)
+    result["indicator_count"] = len(result["indicators"])
+    result["high_risk_signal_count"] = high_count
+    result["elevated_risk_signal_count"] = elevated_count
+    dates = [item["Observation Date"] for item in assessed if item["Observation Date"]]
+    result["as_of"] = min(dates) if dates else None
+
+    if high_count or elevated_count >= 2:
+        result["status"] = "ADVERSE"
+        result["regime"] = "ADVERSE"
+        result["summary"] = (
+            f"Macro-risk proxy review signals detected: {high_count} high and "
+            f"{elevated_count} elevated. Review candidate sensitivity and sizing."
+        )
+    elif elevated_count == 1 and len(assessed) == 3:
+        result["status"] = "CAUTION"
+        result["regime"] = "CAUTION"
+        result["summary"] = (
+            "One configured macro proxy has an elevated-risk signal. Review "
+            "sensitive candidates even though the proxy set is not classified as adverse."
+        )
+    elif len(assessed) == 3:
+        result["status"] = "NEUTRAL"
+        result["regime"] = "NEUTRAL"
+        result["summary"] = (
+            "All three configured macro proxies were assessed without a configured "
+            "risk threshold breach. This is not a forecast or proof that macro risk is low."
+        )
+    else:
+        result["status"] = "UNASSESSED"
+        result["regime"] = "UNASSESSED"
+        result["summary"] = (
+            f"Only {len(assessed)} of 3 macro proxies were assessed. A complete "
+            "macro regime cannot be assigned; missing inputs are not treated as low risk."
+        )
+
+    result["limitations"] = [
+        "This is a limited macro-proxy screen, not a full macroeconomic regime model.",
+        "The configured thresholds are provisional and require validation before use beyond SHADOW review.",
+        "No CPI/inflation-release surprises, central-bank expectations, real yields, FX, or economic-growth surprises are directly assessed.",
+        "HYG/LQD relative performance is a credit-risk-appetite proxy, not a measured credit spread.",
+        "No purchase-date or point-in-time macro snapshots were supplied; historical pre-purchase warnings remain unassessed.",
+    ]
+    return result
+
+
+def _build_market_risk_assessment(
+    final_portfolio_decisions,
+    portfolio_value,
+    market_intelligence=None,
+    reallocation=None,
+):
+    """
+    Build an advisory-only market and portfolio risk assessment.
+
+    This function does not change production decisions,
+    allocation eligibility, trade sizing, or reallocation.
+    """
+
+    from analysis.security_classifier import classify_security
+
+    # --------------------------------------------------------
+    assessment = {
+        "mode": "SHADOW",
+        "macro_risk_status": "UNASSESSED",
+        "macro_news_assessment": {
+            "status": "UNASSESSED",
+            "summary": "Macro news has not been screened.",
+            "as_of": None,
+            "items": [],
+            "limitations": [],
+            "advisory_only": True,
+        },
+        "portfolio_concentration": [],
+        "proposed_portfolio_concentration": [],
+        "portfolio_exposure_comparison": [],
+        "exposure_validation": [],
+        "classification_coverage": [],
+        "known_etf_holdings": [],
+        "company_risk_flags": [],
+        "individual_stock_assessments": [],
+        "transaction_risk_reviews": [],
+        "recommendations": [],
+        "data_quality": {
+            "portfolio_data_available": False,
+            "market_intelligence_available": False,
+            "transaction_data_available": False,
+            "sector_country_classification_available": False,
+            "instrument_type_classification_available": False,
+            "known_etf_holdings_count": 0,
+            "known_etf_holdings_value": 0.0,
+            "etf_lookthrough_assessed": False,
+            "current_sector_classification_complete": False,
+            "current_country_classification_complete": False,
+            "proposed_exposure_calculated": False,
+            "macro_risk_assessed": False,
+            "correlated_theme_assessed": False,
+        },
+        "limitations": [
+            "Macro risk is screened using a limited cache-only proxy set; a complete macroeconomic regime is not assessed.",
+            "Company news headlines are not independently sentiment-scored.",
+            "Analyst target upside is an indicator, not a reliable forecast.",
+            "Earnings risk requires a reliable event date and current date.",
+            "Correlated investment themes require explicit sector, industry, "
+            "or theme data.",
+            "Proposed exposure is an estimate based on the supplied holdings "
+            "and transaction records; it is not an execution or live-price forecast.",
+            "This assessment does not change reallocation decisions.",
+        ],
+    }
+
+    # --------------------------------------------------------
+    # SHADOW BROAD-MARKET STRESS INDICATORS
+    # --------------------------------------------------------
+    # These indicators provide market context only.
+    # They do not change production decisions or trade sizing.
+
+    from datetime import datetime
+    from data.market_data import get_stock_data
+
+    assessment["market_stress_indicators"] = []
+
+    assessment["data_quality"]["market_stress_assessed"] = False
+    assessment["data_quality"]["market_benchmarks_available"] = 0
+
+    benchmark_definitions = [
+        {
+            "ticker": "^GSPC",
+            "name": "S&P 500",
+            "role": "Broad US equity market",
+            "return_20d_stress": -5.0,
+            "return_60d_stress": -10.0,
+        },
+        {
+            "ticker": "QQQ",
+            "name": "Nasdaq-100 ETF",
+            "role": "Growth and technology-sensitive market",
+            "return_20d_stress": -7.0,
+            "return_60d_stress": -12.0,
+        },
+        {
+            "ticker": "^VIX",
+            "name": "VIX",
+            "role": "Implied US equity-market volatility",
+            "return_20d_stress": None,
+            "return_60d_stress": None,
+        },
+    ]
+
+    today = pd.Timestamp(datetime.now().date())
+
+    for benchmark in benchmark_definitions:
+        ticker = benchmark["ticker"]
+
+        indicator = {
+            "Ticker": ticker,
+            "Benchmark": benchmark["name"],
+            "Role": benchmark["role"],
+            "Status": "UNASSESSED",
+            "Latest Observation": None,
+            "Return 20 Sessions %": None,
+            "Return 60 Sessions %": None,
+            "Realised Volatility 20 Sessions % Annualised": None,
+            "Drawdown From 52 Week High %": None,
+            "VIX Level": None,
+            "Evidence": "",
+            "Threshold Basis": "PROVISIONAL SHADOW THRESHOLDS",
+            "Advisory Only": True,
+        }
+
+        try:
+            prices = get_stock_data(ticker, period="1y")
+
+            if prices is None or prices.empty or "Close" not in prices.columns:
+                indicator["Evidence"] = "No usable benchmark price data."
+                assessment["market_stress_indicators"].append(indicator)
+                continue
+
+            prices = prices.copy()
+            prices.index = pd.to_datetime(prices.index)
+            prices = prices.sort_index()
+
+            price_column = (
+                "Adj Close"
+                if ticker != "^VIX" and "Adj Close" in prices.columns
+                else "Close"
+            )
+
+            closes = pd.to_numeric(
+                prices[price_column],
+                errors="coerce",
+            ).dropna()
+
+            if closes.empty:
+                indicator["Evidence"] = "No valid closing prices."
+                assessment["market_stress_indicators"].append(indicator)
+                continue
+
+            latest_date = pd.Timestamp(closes.index[-1])
+
+            if latest_date.tzinfo is not None:
+                latest_date = latest_date.tz_localize(None)
+
+            indicator["Latest Observation"] = latest_date.strftime("%Y-%m-%d")
+
+            # Avoid interpreting stale cached prices as current conditions.
+            if (today - latest_date.normalize()).days > 5:
+                indicator["Evidence"] = (
+                    "Latest observation is more than five calendar days old."
+                )
+                assessment["market_stress_indicators"].append(indicator)
+                continue
+
+            latest = float(closes.iloc[-1])
+
+            if latest <= 0:
+                indicator["Evidence"] = "Latest closing value is not positive."
+                assessment["market_stress_indicators"].append(indicator)
+                continue
+
+            if ticker == "^VIX":
+                indicator["VIX Level"] = round(latest, 2)
+
+                if latest >= 30:
+                    indicator["Status"] = "HIGH STRESS"
+                elif latest >= 25:
+                    indicator["Status"] = "ELEVATED STRESS"
+                else:
+                    indicator["Status"] = "NO VIX THRESHOLD BREACH"
+
+                indicator["Evidence"] = (
+                    f"VIX close {latest:.2f}; "
+                    "25 and 30 are provisional review thresholds."
+                )
+
+            else:
+                if len(closes) >= 21:
+                    return_20d = (
+                        latest / float(closes.iloc[-21]) - 1
+                    ) * 100
+
+                    indicator["Return 20 Sessions %"] = round(
+                        return_20d, 2
+                    )
+
+                if len(closes) >= 61:
+                    return_60d = (
+                        latest / float(closes.iloc[-61]) - 1
+                    ) * 100
+
+                    indicator["Return 60 Sessions %"] = round(
+                        return_60d, 2
+                    )
+
+                daily_returns = closes.pct_change().dropna()
+
+                if len(daily_returns) >= 20:
+                    realised_volatility = (
+                        daily_returns.tail(20).std() * (252 ** 0.5) * 100
+                    )
+
+                    indicator[
+                        "Realised Volatility 20 Sessions % Annualised"
+                    ] = round(float(realised_volatility), 2)
+
+                trailing_high = closes.tail(252).max()
+
+                indicator["Drawdown From 52 Week High %"] = round(
+                    (latest / float(trailing_high) - 1) * 100,
+                    2,
+                )
+
+                return_20d = indicator["Return 20 Sessions %"]
+                return_60d = indicator["Return 60 Sessions %"]
+                volatility_20d = indicator[
+                    "Realised Volatility 20 Sessions % Annualised"
+                ]
+                drawdown_52w = indicator[
+                    "Drawdown From 52 Week High %"
+                ]
+
+                # Provisional shadow-only review thresholds.
+                breaches = []
+                high_stress_signals = []
+
+                if (
+                    return_20d is not None
+                    and return_20d <= benchmark["return_20d_stress"]
+                ):
+                    breaches.append(
+                        f"20-session return {return_20d:.2f}% "
+                        f"(threshold {benchmark['return_20d_stress']:.2f}%)"
+                    )
+
+                if (
+                    return_60d is not None
+                    and return_60d <= benchmark["return_60d_stress"]
+                ):
+                    breaches.append(
+                        f"60-session return {return_60d:.2f}% "
+                        f"(threshold {benchmark['return_60d_stress']:.2f}%)"
+                    )
+
+                if drawdown_52w is not None:
+                    if drawdown_52w <= -15.0:
+                        high_stress_signals.append(
+                            f"52-week-high drawdown {drawdown_52w:.2f}% "
+                            "(provisional high-stress threshold -15.00%)"
+                        )
+                    elif drawdown_52w <= -10.0:
+                        breaches.append(
+                            f"52-week-high drawdown {drawdown_52w:.2f}% "
+                            "(provisional review threshold -10.00%)"
+                        )
+
+                if volatility_20d is not None:
+                    if volatility_20d >= 40.0:
+                        high_stress_signals.append(
+                            f"Annualised realised volatility "
+                            f"{volatility_20d:.2f}% "
+                            "(provisional high-stress threshold 40.00%)"
+                        )
+                    elif volatility_20d >= 30.0:
+                        breaches.append(
+                            f"Annualised realised volatility "
+                            f"{volatility_20d:.2f}% "
+                            "(provisional review threshold 30.00%)"
+                        )
+
+                if high_stress_signals:
+                    indicator["Status"] = "HIGH STRESS"
+                    breaches.extend(high_stress_signals)
+                    indicator["Evidence"] = "; ".join(breaches)
+                elif breaches:
+                    indicator["Status"] = "ELEVATED STRESS"
+                    indicator["Evidence"] = "; ".join(breaches)
+                else:
+                    indicator["Status"] = (
+                        "NO PROVISIONAL THRESHOLD BREACH"
+                    )
+                    indicator["Evidence"] = (
+                        "No provisional return, drawdown or realised-volatility "
+                        "threshold breached. Broader macroeconomic and "
+                        "geopolitical risks remain outside this assessment."
+                    )
+
+                indicator["Threshold Basis"] = (
+                    "PROVISIONAL SHADOW REVIEW THRESHOLDS: "
+                    f"20-session return {benchmark['return_20d_stress']}%; "
+                    f"60-session return {benchmark['return_60d_stress']}%; "
+                    "drawdown review -10%, high stress -15%; "
+                    "annualised realised volatility review 30%, "
+                    "high stress 40%."
+                )
+
+            assessment["data_quality"]["market_benchmarks_available"] += 1
+
+        except Exception as exc:
+            indicator["Status"] = "UNASSESSED"
+            indicator["Evidence"] = (
+                f"Benchmark assessment failed: {type(exc).__name__}: {exc}"
+            )
+
+        assessment["market_stress_indicators"].append(indicator)
+
+    assessed_benchmarks = [
+        item
+        for item in assessment["market_stress_indicators"]
+        if item["Status"] != "UNASSESSED"
+    ]
+
+    assessment["data_quality"]["market_stress_assessed"] = bool(
+        assessed_benchmarks
+    )
+
+    if assessed_benchmarks:
+        stress_count = sum(
+            item["Status"] in ("HIGH STRESS", "ELEVATED STRESS")
+            for item in assessed_benchmarks
+        )
+
+        if stress_count:
+            assessment["market_stress_status"] = "STRESS SIGNAL DETECTED"
+            assessment["recommendations"].append({
+                "Priority": "REVIEW",
+                "Recommendation": (
+                    "Review proposed allocation sizing and timing against "
+                    "the broad-market stress indicators before implementation."
+                ),
+                "Evidence": (
+                    f"{stress_count} assessed benchmark(s) breached "
+                    "a provisional stress threshold."
+                ),
+                "Governance": "ADVISORY ONLY — NO AUTOMATIC DECISION CHANGE",
+            })
+        else:
+            assessment["market_stress_status"] = (
+                "NO PROVISIONAL STRESS THRESHOLD BREACH"
+            )
+    else:
+        assessment["market_stress_status"] = "UNASSESSED"
+
+    # --------------------------------------------------------
+    # CACHE-ONLY MACRO PROXY ASSESSMENT (SHADOW)
+    # --------------------------------------------------------
+    macro_assessment = _build_macro_regime_assessment()
+    assessment["macro_risk_assessment"] = macro_assessment
+    assessment["macro_risk_status"] = macro_assessment["status"]
+    assessment["data_quality"]["macro_risk_assessed"] = (
+        macro_assessment["status"] != "UNASSESSED"
+    )
+    assessment["data_quality"]["macro_proxy_indicators_assessed"] = (
+        macro_assessment.get("assessed_indicator_count", 0)
+    )
+    assessment["data_quality"]["macro_proxy_indicators_total"] = (
+        macro_assessment.get("indicator_count", 0)
+    )
+
+    if macro_assessment["status"] in {"ADVERSE", "CAUTION"}:
+        assessment["recommendations"].append({
+            "Priority": "REVIEW",
+            "Recommendation": (
+                "Review proposed purchases against the macro-risk proxy signals; "
+                "consider staged entry or reduced proposed sizing where the candidate "
+                "is sensitive to the flagged driver."
+            ),
+            "Evidence": macro_assessment["summary"],
+            "Governance": "ADVISORY ONLY — NO AUTOMATIC DECISION CHANGE",
+        })
+
+    # --------------------------------------------------------
+    # READ-ONLY SECURITY METADATA FOR SHADOW EXPOSURE
+    # --------------------------------------------------------
+    import json
+    import sqlite3
+    from pathlib import Path
+
+    # Read existing fundamentals cache only; never request data from Yahoo here.
+    fundamentals_by_ticker = {}
+    fundamentals_cache_dir = Path("data/cache/fundamentals")
+
+    if fundamentals_cache_dir.exists():
+        for cache_file in fundamentals_cache_dir.glob("*.json"):
+            try:
+                cached = json.loads(cache_file.read_text())
+                quote_type = str(cached.get("Quote Type") or "").strip().upper()
+
+                if quote_type in {"ETF", "EQUITY"}:
+                    fundamentals_by_ticker[cache_file.stem.upper()] = quote_type
+            except (OSError, ValueError, TypeError):
+                continue
+
+    metadata_by_ticker = {}
+    metadata_db_path = Path("data/portfolio_manager.db")
+    metadata_error = None
+
+    try:
+        with sqlite3.connect(str(metadata_db_path)) as metadata_connection:
+            metadata_connection.row_factory = sqlite3.Row
+
+            evidence_rows = metadata_connection.execute("""
+                SELECT ticker, sector, industry, capture_date
+                FROM recommendation_evidence
+                WHERE ticker IS NOT NULL AND TRIM(ticker) <> ''
+                ORDER BY capture_date DESC, id DESC
+            """).fetchall()
+
+            for record in evidence_rows:
+                metadata_ticker = str(record["ticker"] or "").strip().upper()
+                if not metadata_ticker:
+                    continue
+
+                metadata = metadata_by_ticker.setdefault(
+                    metadata_ticker,
+                    {
+                        "sector": "",
+                        "industry": "",
+                        "capture_date": "",
+                        "asset_type": "",
+                    },
+                )
+
+                capture_date = str(record["capture_date"] or "").strip()
+                if not metadata["capture_date"] and capture_date:
+                    metadata["capture_date"] = capture_date
+
+                sector = str(record["sector"] or "").strip()
+                if sector.upper() in {"UNKNOWN", "N/A", "NA", "NONE", "NULL"}:
+                    sector = ""
+                if not metadata["sector"] and sector:
+                    metadata["sector"] = sector
+
+                industry = str(record["industry"] or "").strip()
+                if industry.upper() in {"UNKNOWN", "N/A", "NA", "NONE", "NULL"}:
+                    industry = ""
+                if not metadata["industry"] and industry:
+                    metadata["industry"] = industry
+
+            audit_rows = metadata_connection.execute("""
+                SELECT ticker, asset_type
+                FROM audit_decisions
+                WHERE ticker IS NOT NULL AND TRIM(ticker) <> ''
+                  AND asset_type IS NOT NULL AND TRIM(asset_type) <> ''
+                ORDER BY created_at DESC, id DESC
+            """).fetchall()
+
+            seen_asset_types = set()
+            for record in audit_rows:
+                metadata_ticker = str(record["ticker"]).strip().upper()
+                if not metadata_ticker or metadata_ticker in seen_asset_types:
+                    continue
+                seen_asset_types.add(metadata_ticker)
+                metadata_by_ticker.setdefault(metadata_ticker, {
+                    "sector": "",
+                    "industry": "",
+                    "capture_date": "",
+                    "asset_type": "",
+                })
+                metadata_by_ticker[metadata_ticker]["asset_type"] = (
+                    str(record["asset_type"]).strip().upper()
+                )
+
+    except (sqlite3.Error, OSError) as exc:
+        metadata_error = str(exc)
+        metadata_by_ticker = {}
+
+    assessment["data_quality"]["exposure_metadata_enrichment_available"] = (
+        metadata_error is None
+    )
+    assessment["data_quality"]["exposure_metadata_tickers_available"] = len(
+        metadata_by_ticker
+    )
+    assessment["data_quality"]["exposure_metadata_latest_capture_date"] = max(
+        (
+            item["capture_date"]
+            for item in metadata_by_ticker.values()
+            if item["capture_date"]
+        ),
+        default=None,
+    )
+    if metadata_error:
+        assessment["data_quality"]["exposure_metadata_error"] = metadata_error
+
+    # NORMALISE INPUTS
+    # --------------------------------------------------------
+
+    if isinstance(final_portfolio_decisions, pd.DataFrame):
+        rows = final_portfolio_decisions.to_dict("records")
+    elif final_portfolio_decisions is None:
+        rows = []
+    else:
+        rows = list(final_portfolio_decisions)
+
+    if isinstance(market_intelligence, pd.DataFrame):
+        intelligence_rows = market_intelligence.to_dict("records")
+    elif market_intelligence is None:
+        intelligence_rows = []
+    else:
+        intelligence_rows = list(market_intelligence)
+
+    if isinstance(reallocation, pd.DataFrame):
+        transaction_rows = reallocation.to_dict("records")
+    elif reallocation is None:
+        transaction_rows = []
+    else:
+        transaction_rows = list(reallocation)
+
+    assessment["data_quality"]["portfolio_data_available"] = bool(rows)
+    assessment["data_quality"]["market_intelligence_available"] = bool(
+        intelligence_rows
+    )
+    assessment["data_quality"]["transaction_data_available"] = bool(
+        transaction_rows
+    )
+
+    # --------------------------------------------------------
+    # CANDIDATE-LEVEL MACRO SENSITIVITY (HEURISTIC, SHADOW ONLY)
+    # --------------------------------------------------------
+    # Sector/industry labels indicate a review hypothesis, not a measured stock beta.
+    assessment["candidate_macro_reviews"] = []
+    _macro = assessment.get("macro_risk_assessment", {})
+    _macro_indicators = {
+        item.get("Indicator"): item
+        for item in _macro.get("indicators", [])
+    }
+    _yield_indicator = _macro_indicators.get("US 10-year Treasury yield change", {})
+    _oil_indicator = _macro_indicators.get("Crude oil price change", {})
+    _credit_indicator = _macro_indicators.get("Credit-risk appetite proxy", {})
+    _flagged_macro_statuses = {"HIGH RISK SIGNAL", "ELEVATED RISK SIGNAL"}
+
+    _candidate_rows = {}
+    for _row in rows:
+        _ticker = clean_ticker(_row.get("Ticker", ""))
+        _decision = normalise_action(
+            _row.get("Final Decision", _row.get("Action", _row.get("Recommendation", "")))
+        )
+        if _ticker and _decision in {"BUY NEW", "BUY MORE"}:
+            _candidate_rows[_ticker] = dict(_row)
+
+    for _transaction in transaction_rows:
+        _ticker = clean_ticker(_transaction.get("Destination Ticker", ""))
+        if _ticker and _ticker not in {"CASH", "ASSESSMENT CASH", "ASSESSMENT_CASH"}:
+            _candidate_rows.setdefault(_ticker, dict(_transaction))
+
+    _rate_sensitive_sectors = {
+        "TECHNOLOGY", "COMMUNICATION SERVICES", "CONSUMER CYCLICAL",
+        "CONSUMER DISCRETIONARY", "REAL ESTATE", "UTILITIES",
+    }
+    _credit_sensitive_sectors = {
+        "FINANCIAL SERVICES", "REAL ESTATE", "CONSUMER CYCLICAL",
+        "CONSUMER DISCRETIONARY",
+    }
+    _oil_cost_sensitive_sectors = {
+        "INDUSTRIALS", "CONSUMER CYCLICAL", "CONSUMER DISCRETIONARY",
+        "CONSUMER DEFENSIVE", "MATERIALS",
+    }
+
+    for _ticker, _candidate in sorted(_candidate_rows.items()):
+        _metadata = metadata_by_ticker.get(_ticker, {})
+        _sector = _normalise_economic_sector(
+            _candidate.get("Sector") or _metadata.get("sector", "")
+        )
+        _industry = str(
+            _candidate.get("Industry") or _candidate.get("industry")
+            or _metadata.get("industry", "") or ""
+        ).strip()
+        _decision = normalise_action(
+            _candidate.get("Final Decision", _candidate.get("Action", _candidate.get("Recommendation", "")))
+        )
+        _sensitivities = []
+        _reasons = []
+
+        if _sector.upper() in _rate_sensitive_sectors:
+            _sensitivities.append("INTEREST_RATE / VALUATION SENSITIVITY HYPOTHESIS")
+            if _yield_indicator.get("Status") in _flagged_macro_statuses:
+                _reasons.append(
+                    "The cached 10-year yield proxy has an elevated/high signal; "
+                    "review valuation and financing sensitivity."
+                )
+
+        if _sector.upper() in _credit_sensitive_sectors:
+            _sensitivities.append("CREDIT / FINANCING SENSITIVITY HYPOTHESIS")
+            if _credit_indicator.get("Status") in _flagged_macro_statuses:
+                _reasons.append(
+                    "The HYG-versus-LQD credit-risk-appetite proxy has an "
+                    "elevated/high signal; review financing and demand sensitivity."
+                )
+
+        if _sector.upper() in _oil_cost_sensitive_sectors:
+            _sensitivities.append("ENERGY-COST SENSITIVITY HYPOTHESIS")
+            if _oil_indicator.get("Status") in _flagged_macro_statuses:
+                _reasons.append(
+                    "The crude-oil proxy has an elevated/high rising-price signal; "
+                    "review energy-input and transport-cost exposure."
+                )
+        elif _sector.upper() == "ENERGY":
+            _sensitivities.append("COMMODITY-PRICE SENSITIVITY; DIRECTION COMPANY-SPECIFIC")
+            if _oil_indicator.get("Status") in _flagged_macro_statuses:
+                _reasons.append(
+                    "The crude-oil proxy has an elevated/high signal; assess whether "
+                    "the candidate benefits or is harmed based on its actual business model."
+                )
+
+        _candidate_status = (
+            "REVIEW" if _reasons
+            else "SENSITIVITY MAPPED" if _sensitivities
+            else "UNASSESSED"
+        )
+        assessment["candidate_macro_reviews"].append({
+            "Ticker": _ticker,
+            "Final Decision": _decision,
+            "Sector": _sector or None,
+            "Industry": _industry or None,
+            "Macro Sensitivity Hypotheses": "; ".join(_sensitivities) or None,
+            "Macro Signal Status": _candidate_status,
+            "Review Required": bool(_reasons),
+            "Reasons": "; ".join(_reasons) if _reasons else (
+                "Sector/industry mapping is a heuristic only; no mapped proxy threshold "
+                "breach was identified, or the required proxy was unassessed."
+                if _sensitivities else
+                "No supported sector/industry sensitivity mapping; candidate macro sensitivity remains unassessed."
+            ),
+            "Evidence Scope": "Sector/industry heuristic plus cache-only macro proxies; not a measured company beta or causal forecast.",
+            "Advisory Only": True,
+        })
+        if _reasons:
+            assessment["recommendations"].append({
+                "action": "REVIEW_CANDIDATE_MACRO_SENSITIVITY",
+                "subject": _ticker,
+                "reason": "; ".join(_reasons),
+                "confidence": "LOW — SECTOR/INDUSTRY HEURISTIC",
+                "evidence_type": "CACHE_ONLY_MACRO_PROXY_AND_SECTOR_MAPPING",
+                "advisory_only": True,
+                "governance": "NO AUTOMATIC DECISION OR ALLOCATION CHANGE",
+            })
+
+    portfolio_value = safe_float(portfolio_value)
+
+    def _is_present(value):
+        if value is None:
+            return False
+
+        try:
+            if pd.isna(value):
+                return False
+        except (TypeError, ValueError):
+            pass
+
+        if isinstance(value, (list, tuple, dict, set)):
+            return bool(value)
+
+        return bool(str(value).strip())
+
+    def _normalise_text(value):
+        if not _is_present(value):
+            return ""
+        return str(value).strip()
+
+    def _ticker_set(values):
+        return {
+            ticker
+            for value in values
+            if (ticker := clean_ticker(value))
+        }
+
+    # --------------------------------------------------------
+    # IDENTIFY PROPOSED TRANSACTION ROLES
+    # --------------------------------------------------------
+
+    source_tickers = _ticker_set(
+        transaction.get("Source Ticker", "")
+        for transaction in transaction_rows
+    )
+
+    destination_tickers = _ticker_set(
+        transaction.get("Destination Ticker", "")
+        for transaction in transaction_rows
+    )
+
+    # A positive current market value is required before a decision
+    # row is treated as evidence of an existing holding.
+    held_tickers = set()
+
+    for row in rows:
+        ticker = clean_ticker(row.get("Ticker", ""))
+
+        current_value = safe_float(
+            row.get(
+                "Current Value",
+                row.get("Market Value", 0),
+            )
+        )
+
+        if ticker and current_value > 0:
+            held_tickers.add(ticker)
+
+    # --------------------------------------------------------
+    # CURRENT AND PROPOSED PORTFOLIO EXPOSURE
+    # --------------------------------------------------------
+
+    # Keep one position record per ticker. Transactions are transfers of
+    # capital: reduce an existing source holding and increase a destination.
+    # Cash contributions are external capital, not existing security holdings.
+    current_positions = {}
+    sector_values = {}
+    country_values = {}
+    industry_values = {}
+    missing_industry_tickers = []
+    current_classified_sector_value = 0.0
+    current_classified_country_value = 0.0
+    current_holdings_value = 0.0
+    missing_sector_tickers = []
+    missing_country_tickers = []
+
+    duplicate_position_rows = []
+
+
+    for row in rows:
+        ticker = clean_ticker(row.get("Ticker", ""))
+        current_value = safe_float(
+            row.get("Current Value", row.get("Market Value", 0))
+        )
+        if not ticker or current_value <= 0 or ticker == "CASH":
+            continue
+
+        metadata = metadata_by_ticker.get(ticker, {})
+
+        sector = _normalise_economic_sector(
+            row.get("Sector") or metadata.get("sector", "")
+        )
+        if sector.upper() in {"ETF", "ETP", "EXCHANGE TRADED FUND", "EXCHANGE-TRADED FUND"}:
+            sector = ""
+
+        country = _normalise_text(row.get("Country", row.get("country")))
+        industry = _normalise_text(
+            row.get("Industry") or row.get("industry")
+            or metadata.get("industry", "")
+        )
+        if industry.upper() in {"", "N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"}:
+            industry = ""
+        asset_type = _normalise_text(
+            row.get("Asset Type", row.get("asset_type", ""))
+        ).upper()
+
+        if not asset_type:
+            asset_type = _normalise_text(metadata.get("asset_type", "")).upper()
+
+        if not asset_type:
+            cached_quote_type = fundamentals_by_ticker.get(ticker, "")
+            if cached_quote_type == "ETF":
+                asset_type = "ETF"
+            elif cached_quote_type == "EQUITY":
+                asset_type = "STOCK"
+
+        if ticker in current_positions:
+            existing = current_positions[ticker]
+            duplicate_position_rows.append({
+                "ticker": ticker,
+                "existing_value": round(safe_float(existing.get("value")), 2),
+                "duplicate_value": round(current_value, 2),
+                "values_match": abs(safe_float(existing.get("value")) - current_value) <= 0.01,
+            })
+            # Do not double-count a ticker in portfolio totals. If duplicate
+            # rows disagree, retain the first row and explicitly fail validation
+            # rather than silently choosing one value as authoritative.
+            if abs(safe_float(existing.get("value")) - current_value) > 0.01:
+                continue
+            # Keep the first row's classifications as the consistent baseline;
+            # duplicate metadata must be reconciled upstream rather than patched
+            # into the position map without rebuilding exposure totals.
+            continue
+
+        current_holdings_value += current_value
+        current_positions[ticker] = {
+            "value": current_value,
+            "sector": sector,
+            "country": country,
+            "industry": industry,
+            "asset_type": asset_type,
+        }
+
+        # Industry concentration is measured only for non-ETF holdings.
+        # ETF look-through remains unassessed; record the gap explicitly.
+        if asset_type == "ETF":
+            missing_industry_tickers.append(ticker)
+        elif industry:
+            industry_values[industry] = industry_values.get(industry, 0.0) + current_value
+        else:
+            missing_industry_tickers.append(ticker)
+
+        if asset_type == "ETF":
+            assessment["known_etf_holdings"].append({
+                "ticker": ticker,
+                "current_value": round(current_value, 2),
+                "sector_lookthrough_status": "NOT_ASSESSED",
+                "country_lookthrough_status": "NOT_ASSESSED",
+            })
+
+        if sector and asset_type != "ETF":
+            sector_values[sector] = sector_values.get(sector, 0.0) + current_value
+            current_classified_sector_value += current_value
+        else:
+            missing_sector_tickers.append(ticker)
+        if country and asset_type != "ETF":
+            country_values[country] = country_values.get(country, 0.0) + current_value
+            current_classified_country_value += current_value
+        else:
+            # ETF listing/domicile is not underlying geographic exposure.
+            # Keep ETF country look-through unclassified until assessed.
+            missing_country_tickers.append(ticker)
+
+    known_etf_holdings = assessment["known_etf_holdings"]
+    assessment["data_quality"]["instrument_type_classification_available"] = any(
+        position.get("asset_type") for position in current_positions.values()
+    )
+    assessment["data_quality"]["known_etf_holdings_count"] = len(
+        known_etf_holdings
+    )
+    assessment["data_quality"]["known_etf_holdings_value"] = round(
+        sum(item["current_value"] for item in known_etf_holdings), 2
+    )
+
+    # Use the reconciled value of unique, positive-value owned positions
+    # as the denominator for all current-portfolio coverage metrics.
+    _coverage_denominator = max(
+        float(current_holdings_value or 0.0),
+        0.0
+    )
+
+    _unclassified_sector_labels = {"", "unknown", "unclassified", "etf", "etp"}
+    _classified_sector_value = sum(
+        max(float(value or 0.0), 0.0)
+        for name, value in sector_values.items()
+        if str(name).strip().lower() not in _unclassified_sector_labels
+    )
+    _classified_country_value = sum(
+        max(float(value or 0.0), 0.0)
+        for name, value in country_values.items()
+        if str(name).strip().lower() not in _unclassified_sector_labels
+    )
+    _etf_value = float(
+        assessment["data_quality"].get("known_etf_holdings_value", 0.0) or 0.0
+    )
+
+    assessment["data_quality"]["current_sector_classification_coverage_percent"] = (
+        round(min(_classified_sector_value / current_holdings_value * 100.0, 100.0), 2)
+        if current_holdings_value > 0 else 0.0
+    )
+    assessment["data_quality"]["current_country_classification_coverage_percent"] = (
+        round(min(_classified_country_value / current_holdings_value * 100.0, 100.0), 2)
+        if current_holdings_value > 0 else 0.0
+    )
+    assessment["data_quality"]["etf_unassessed_portfolio_percent"] = (
+        round(min(_etf_value / _coverage_denominator * 100.0, 100.0), 2)
+        if _coverage_denominator > 0 else 0.0
+    )
+    assessment["data_quality"]["etf_lookthrough_status"] = (
+        "NOT_ASSESSED" if _etf_value > 0 else "NOT_APPLICABLE"
+    )
+
+    dq = assessment["data_quality"]
+
+    # Availability and completeness are separate:
+    # partial classifications remain usable, but must not imply full coverage.
+    dq["current_sector_classification_available"] = (
+        current_classified_sector_value > 0
+    )
+    dq["current_country_classification_available"] = (
+        current_classified_country_value > 0
+    )
+
+    dq["current_sector_classification_complete"] = (
+        current_holdings_value <= 0
+        or (
+            not missing_sector_tickers
+            and current_classified_sector_value >= current_holdings_value - 0.01
+        )
+    )
+    dq["current_country_classification_complete"] = (
+        current_holdings_value <= 0
+        or (
+            not missing_country_tickers
+            and current_classified_country_value >= current_holdings_value - 0.01
+        )
+    )
+
+    # Retain the legacy combined field for existing consumers.
+    # It means both dimensions have some usable classification, not full coverage.
+    dq["sector_country_classification_available"] = (
+        dq["current_sector_classification_available"]
+        and dq["current_country_classification_available"]
+    )
+
+    # Build a projected copy and apply each proposed transfer. Source amounts
+    # are subtracted only from known current holdings; cash/contribution sources
+    # are not treated as securities. Destination classifications come from the
+    # transaction, falling back to the existing holding where available.
+    proposed_positions = {
+        ticker: dict(position) for ticker, position in current_positions.items()
+    }
+    external_cash_allocated = 0.0
+    transaction_amounts_valid = bool(transaction_rows)
+
+    for transaction in transaction_rows:
+        amount = safe_float(
+            transaction.get(
+                "Reallocated Capital",
+                transaction.get("Released Capital", 0),
+            )
+        )
+        if amount <= 0:
+            continue
+
+        source_ticker = clean_ticker(transaction.get("Source Ticker", ""))
+        destination_ticker = clean_ticker(transaction.get("Destination Ticker", ""))
+        source_action = _normalise_text(transaction.get("Source Action", "" )).upper()
+        is_cash_source = (
+            "CASH" in source_action
+            or source_ticker in {"CASH", "ASSESSMENT CASH", "ASSESSMENT_CASH"}
+        )
+
+        if source_ticker and source_ticker in proposed_positions and not is_cash_source:
+            proposed_positions[source_ticker]["value"] = max(
+                0.0, proposed_positions[source_ticker]["value"] - amount
+            )
+
+        # Only the explicitly added assessment contribution is
+        # additional to the upstream portfolio-value denominator.
+        # Existing portfolio cash transfers must not inflate it.
+        if source_ticker in {"ASSESSMENT CASH", "ASSESSMENT_CASH"}:
+            external_cash_allocated += amount
+
+        if destination_ticker and destination_ticker not in {"CASH", "ASSESSMENT CASH", "ASSESSMENT_CASH"}:
+            destination = proposed_positions.setdefault(
+                destination_ticker,
+                {
+                    "value": 0.0,
+                    "sector": "",
+                    "country": "",
+                    "asset_type": "",
+                },
+            )
+
+            destination["value"] += amount
+            tx_sector = _normalise_economic_sector(transaction.get("Sector"))
+            tx_country = _normalise_text(
+                transaction.get("Country", transaction.get("country"))
+            )
+
+            if tx_sector:
+                destination["sector"] = tx_sector
+
+            if tx_country:
+                destination["country"] = tx_country
+
+            tx_industry = _normalise_text(
+                transaction.get("Industry") or transaction.get("industry", "")
+            )
+            if tx_industry.upper() in {"N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"}:
+                tx_industry = ""
+            if tx_industry:
+                destination["industry"] = tx_industry
+
+            tx_asset_type = _normalise_text(
+                transaction.get("Asset Type", transaction.get("asset_type", ""))
+            ).upper()
+
+            if tx_asset_type:
+                destination["asset_type"] = tx_asset_type
+
+    # --------------------------------------------------------
+    # SHADOW HOLDING MARKET SENSITIVITY AND CO-MOVEMENT
+    # --------------------------------------------------------
+    # Historical relationships only. These do not change trades,
+    # eligibility, allocation, or production portfolio decisions.
+
+    assessment["holding_market_sensitivity"] = []
+    assessment["correlated_holding_clusters"] = []
+    assessment["data_quality"]["holding_sensitivity_assessed"] = False
+    assessment["data_quality"]["holding_price_series_available"] = 0
+    assessment["data_quality"]["holding_price_series_unavailable"] = 0
+    assessment["data_quality"]["holding_correlations_insufficient_data"] = 0
+
+    from datetime import datetime as _sensitivity_datetime
+
+    _sensitivity_today = pd.Timestamp(_sensitivity_datetime.now().date())
+    _sensitivity_prices = {}
+    _sensitivity_unavailable = []
+
+    # Include both existing holdings and proposed destinations.
+    _sensitivity_tickers = sorted({
+        ticker
+        for positions in (current_positions, proposed_positions)
+        for ticker, position in positions.items()
+        if safe_float(position.get("value", 0)) > 0
+        and ticker not in {"CASH", "ASSESSMENT CASH", "ASSESSMENT_CASH"}
+    })
+
+    _sensitivity_proposed_holdings_value = sum(
+        safe_float(position.get("value", 0))
+        for position in proposed_positions.values()
+        if safe_float(position.get("value", 0)) > 0
+    )
+
+    _sensitivity_benchmarks = {
+        "^GSPC": "S&P 500",
+        "QQQ": "Nasdaq-100",
+    }
+
+    for _ticker in sorted(set(_sensitivity_tickers) | set(_sensitivity_benchmarks)):
+        try:
+            _prices = get_stock_data(_ticker, period="1y")
+            if (
+                _prices is None
+                or _prices.empty
+                or "Close" not in _prices.columns
+            ):
+                _sensitivity_unavailable.append((_ticker, "No usable price data"))
+                continue
+
+            _prices = _prices.copy()
+            _prices.index = pd.to_datetime(_prices.index)
+            if _prices.index.tz is not None:
+                _prices.index = _prices.index.tz_localize(None)
+            _prices = _prices.sort_index()
+
+            _price_column = (
+                "Adj Close"
+                if _ticker not in {"^GSPC", "^VIX"}
+                and "Adj Close" in _prices.columns
+                else "Close"
+            )
+            _closes = pd.to_numeric(
+                _prices[_price_column], errors="coerce"
+            ).dropna()
+
+            if len(_closes) < 61:
+                _sensitivity_unavailable.append(
+                    (_ticker, f"Insufficient history: {len(_closes)} prices")
+                )
+                continue
+
+            _latest_date = pd.Timestamp(_closes.index[-1])
+            if _latest_date.tzinfo is not None:
+                _latest_date = _latest_date.tz_localize(None)
+
+            if (_sensitivity_today - _latest_date.normalize()).days > 5:
+                _sensitivity_unavailable.append(
+                    (_ticker, f"Stale prices: latest {_latest_date.date()}")
+                )
+                continue
+
+            _returns = _closes.pct_change().replace(
+                [float("inf"), float("-inf")], float("nan")
+            ).dropna()
+
+            if len(_returns) < 60:
+                _sensitivity_unavailable.append(
+                    (_ticker, f"Insufficient daily returns: {len(_returns)}")
+                )
+                continue
+
+            _sensitivity_prices[_ticker] = _returns
+
+        except Exception as _exc:
+            _sensitivity_unavailable.append(
+                (_ticker, f"Price load failed: {type(_exc).__name__}")
+            )
+
+    _sensitivity_benchmark_returns = {
+        _ticker: _sensitivity_prices[_ticker]
+        for _ticker in _sensitivity_benchmarks
+        if _ticker in _sensitivity_prices
+    }
+
+    _sp500_returns = _sensitivity_benchmark_returns.get("^GSPC")
+    _down_market_dates = set()
+
+    if _sp500_returns is not None and len(_sp500_returns) >= 60:
+        _down_cutoff = _sp500_returns.quantile(0.20)
+        _down_market_dates = set(
+            _sp500_returns[_sp500_returns <= _down_cutoff].index
+        )
+
+    for _ticker in _sensitivity_tickers:
+        _current = current_positions.get(_ticker, {})
+        _proposed = proposed_positions.get(_ticker, {})
+        _current_value = safe_float(_current.get("value", 0))
+        _proposed_value = safe_float(_proposed.get("value", 0))
+
+        _row = {
+            "Ticker": _ticker,
+            "Current Value": round(_current_value, 2),
+            "Proposed Value": round(_proposed_value, 2),
+            "Current Weight %": round(
+                100 * _current_value / current_holdings_value, 2
+            ) if current_holdings_value > 0 else None,
+            "Proposed Weight %": round(
+                100 * _proposed_value / _sensitivity_proposed_holdings_value, 2
+            ) if _sensitivity_proposed_holdings_value > 0 else None,
+            "Latest Price Observation": None,
+            "S&P 500 Correlation": None,
+            "S&P 500 Overlap Sessions": 0,
+            "Nasdaq-100 Correlation": None,
+            "Nasdaq-100 Overlap Sessions": 0,
+            "Mean Return On Worst S&P 500 Days %": None,
+            "Negative Return Frequency On Worst S&P 500 Days %": None,
+            "Downside Overlap Sessions": 0,
+            "Status": "UNASSESSED",
+            "Evidence": "",
+            "Advisory Only": True,
+        }
+
+        _holding_returns = _sensitivity_prices.get(_ticker)
+
+        if _holding_returns is None:
+            _reason = next(
+                (
+                    _reason for _failed_ticker, _reason
+                    in _sensitivity_unavailable
+                    if _failed_ticker == _ticker
+                ),
+                "No usable price series",
+            )
+            _row["Evidence"] = _reason
+            assessment["holding_market_sensitivity"].append(_row)
+            continue
+
+        _row["Latest Price Observation"] = str(
+            _holding_returns.index[-1].date()
+        )
+        _valid_correlations = 0
+
+        for _benchmark_ticker, _benchmark_name in _sensitivity_benchmarks.items():
+            _benchmark_returns = _sensitivity_benchmark_returns.get(
+                _benchmark_ticker
+            )
+            if _benchmark_returns is None:
+                continue
+
+            _paired = pd.concat(
+                [_holding_returns, _benchmark_returns],
+                axis=1,
+                join="inner",
+            ).dropna()
+
+            _correlation_key = (
+                "S&P 500 Correlation"
+                if _benchmark_ticker == "^GSPC"
+                else "Nasdaq-100 Correlation"
+            )
+            _overlap_key = (
+                "S&P 500 Overlap Sessions"
+                if _benchmark_ticker == "^GSPC"
+                else "Nasdaq-100 Overlap Sessions"
+            )
+            _row[_overlap_key] = len(_paired)
+
+            if len(_paired) >= 60 and _paired.iloc[:, 0].std() > 0 and _paired.iloc[:, 1].std() > 0:
+                _row[_correlation_key] = round(
+                    float(_paired.iloc[:, 0].corr(_paired.iloc[:, 1])), 3
+                )
+                _valid_correlations += 1
+
+        if _sp500_returns is not None and _down_market_dates:
+            _down_holding_returns = _holding_returns[
+                _holding_returns.index.isin(_down_market_dates)
+            ].dropna()
+
+            _row["Downside Overlap Sessions"] = len(_down_holding_returns)
+
+            if len(_down_holding_returns) >= 30:
+                _row["Mean Return On Worst S&P 500 Days %"] = round(
+                    float(_down_holding_returns.mean() * 100), 3
+                )
+                _row["Negative Return Frequency On Worst S&P 500 Days %"] = round(
+                    float((_down_holding_returns < 0).mean() * 100), 1
+                )
+
+        _row["Status"] = (
+            "ASSESSED" if _valid_correlations > 0 else "INSUFFICIENT OVERLAP"
+        )
+        _row["Evidence"] = (
+            "Historical daily returns; correlations use overlapping sessions. "
+            "Worst-market-day statistics use the S&P 500 bottom 20% of observed "
+            "daily returns and require at least 30 overlapping sessions."
+        )
+        assessment["holding_market_sensitivity"].append(_row)
+
+    # Pairwise correlations use pair-specific overlapping dates. They do not
+    # require every portfolio holding to have data on the same dates.
+    _pairwise_count = 0
+
+    for _i, _ticker_a in enumerate(_sensitivity_tickers):
+        _returns_a = _sensitivity_prices.get(_ticker_a)
+        if _returns_a is None:
+            continue
+
+        for _ticker_b in _sensitivity_tickers[_i + 1:]:
+            _returns_b = _sensitivity_prices.get(_ticker_b)
+            if _returns_b is None:
+                continue
+
+            _paired = pd.concat(
+                [_returns_a, _returns_b], axis=1, join="inner"
+            ).dropna()
+
+            if len(_paired) < 60:
+                assessment["data_quality"][
+                    "holding_correlations_insufficient_data"
+                ] += 1
+                continue
+
+            if _paired.iloc[:, 0].std() <= 0 or _paired.iloc[:, 1].std() <= 0:
+                continue
+
+            _correlation = float(
+                _paired.iloc[:, 0].corr(_paired.iloc[:, 1])
+            )
+
+            # Build the pair first so downside correlation can also determine inclusion.
+            _pair_row = {
+                "Ticker A": _ticker_a,
+                "Ticker B": _ticker_b,
+                "Correlation": round(_correlation, 3),
+                "Overlap Sessions": len(_paired),
+                "Downside Correlation": None,
+                "Downside Overlap Sessions": 0,
+                "Current Combined Value": round(
+                    safe_float(current_positions.get(_ticker_a, {}).get("value", 0))
+                    + safe_float(current_positions.get(_ticker_b, {}).get("value", 0)),
+                    2,
+                ),
+                "Proposed Combined Value": round(
+                    safe_float(proposed_positions.get(_ticker_a, {}).get("value", 0))
+                    + safe_float(proposed_positions.get(_ticker_b, {}).get("value", 0)),
+                    2,
+                ),
+                "Evidence": "Historical daily-return correlation; not proof of common causation.",
+                "Advisory Only": True,
+            }
+
+            if _sp500_returns is not None and _down_market_dates:
+                _down_dates = _paired.index.intersection(
+                    pd.Index(_down_market_dates)
+                )
+                _down_pair = _paired.loc[_down_dates]
+
+                _pair_row["Downside Overlap Sessions"] = len(_down_pair)
+                if (
+                    len(_down_pair) >= 30
+                    and _down_pair.iloc[:, 0].std() > 0
+                    and _down_pair.iloc[:, 1].std() > 0
+                ):
+                    _pair_row["Downside Correlation"] = round(
+                        float(
+                            _down_pair.iloc[:, 0].corr(_down_pair.iloc[:, 1])
+                        ),
+                        3,
+                    )
+
+            # Include pairs with either strong overall correlation or strong
+            # downside correlation. Missing downside data does not qualify a pair.
+            if (
+                _correlation < 0.65
+                and (
+                    _pair_row["Downside Correlation"] is None
+                    or _pair_row["Downside Correlation"] < 0.65
+                )
+            ):
+                continue
+
+            assessment["correlated_holding_clusters"].append(_pair_row)
+            _pairwise_count += 1
+
+    assessment["correlated_holding_clusters"].sort(
+        key=lambda item: item["Correlation"], reverse=True
+    )
+
+    assessment["data_quality"]["holding_price_series_available"] = len(
+        _sensitivity_prices
+    ) - len(_sensitivity_benchmark_returns)
+    assessment["data_quality"]["holding_price_series_unavailable"] = len(
+        _sensitivity_unavailable
+    )
+    assessment["data_quality"]["holding_sensitivity_assessed"] = bool(
+        assessment["holding_market_sensitivity"]
+        and _sensitivity_benchmark_returns
+    )
+    # Price correlation identifies co-movement, not shared investment themes.
+    # Theme assessment remains unavailable until explicit theme mappings exist.
+    assessment["data_quality"]["correlated_theme_assessed"] = False
+    assessment["holding_market_sensitivity_unavailable"] = [
+        {"Ticker": ticker, "Reason": reason, "Advisory Only": True}
+        for ticker, reason in _sensitivity_unavailable
+    ]
+
+    if not assessment["data_quality"]["holding_sensitivity_assessed"]:
+        assessment["limitations"].append(
+            "Holding market sensitivity could not be fully assessed because "
+            "usable benchmark or holding price history was unavailable."
+        )
+
+    assessment["limitations"].append(
+        "Historical correlations and downside co-movement are descriptive, "
+        "not forecasts; relationships can change during market stress."
+    )
+    assessment["limitations"].append(
+        "ETF correlations do not replace underlying ETF holdings look-through."
+    )
+
+    proposed_sector_values = {}
+    proposed_country_values = {}
+    proposed_industry_values = {}
+    proposed_missing_industry_tickers = []
+    proposed_holdings_value = 0.0
+    proposed_classified_sector_value = 0.0
+    proposed_classified_country_value = 0.0
+    proposed_missing_sector_tickers = []
+    proposed_missing_country_tickers = []
+
+    for ticker, position in proposed_positions.items():
+        value = safe_float(position.get("value", 0))
+        if value <= 0:
+            continue
+        proposed_holdings_value += value
+        sector = _normalise_economic_sector(position.get("sector"))
+        country = _normalise_text(position.get("country"))
+        industry = _normalise_text(position.get("industry"))
+        if industry.upper() in {"", "N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"}:
+            industry = ""
+
+        if position.get("asset_type") == "ETF":
+            proposed_missing_industry_tickers.append(ticker)
+        elif industry:
+            proposed_industry_values[industry] = (
+                proposed_industry_values.get(industry, 0.0) + value
+            )
+        else:
+            proposed_missing_industry_tickers.append(ticker)
+
+        known_etf_tickers = {
+            str(item.get("ticker", "")).strip().upper()
+            for item in assessment.get("known_etf_holdings", [])
+        }
+
+        is_known_etf = str(ticker).strip().upper() in known_etf_tickers
+
+        if (
+            sector
+            and str(position.get("asset_type", "")).strip().upper() != "ETF"
+            and not is_known_etf
+        ):
+            proposed_sector_values[sector] = (
+                proposed_sector_values.get(sector, 0.0) + value
+            )
+            proposed_classified_sector_value += value
+        else:
+            proposed_missing_sector_tickers.append(ticker)
+        if country and position.get("asset_type", "").strip().upper() != "ETF" and not is_known_etf:
+            proposed_country_values[country] = proposed_country_values.get(country, 0.0) + value
+            proposed_classified_country_value += value
+        else:
+            # Keep known ETFs unclassified for country exposure until
+            # underlying geographic look-through is available.
+            proposed_missing_country_tickers.append(ticker)
+
+    # Denominator includes the current portfolio value plus the external cash
+    # actually represented in proposed transactions. Internal transfers net to
+    # zero. If the upstream portfolio value includes some cash balance, that
+    # balance remains in the denominator but is not assigned to a security sector.
+    proposed_portfolio_value = max(0.0, portfolio_value) + external_cash_allocated
+
+    assessment["data_quality"]["proposed_exposure_calculated"] = (
+        portfolio_value > 0 and bool(transaction_rows)
+    )
+
+    assessment["classification_coverage"] = [
+        {
+            "portfolio_state": "CURRENT",
+            "classification": "SECTOR",
+            "classified_value": round(current_classified_sector_value, 2),
+            "classified_percent_of_holdings": round(
+                current_classified_sector_value / current_holdings_value * 100.0, 2
+            ) if current_holdings_value > 0 else None,
+            "unclassified_value": round(max(0.0, current_holdings_value - current_classified_sector_value), 2),
+            "unclassified_tickers": sorted(missing_sector_tickers),
+        },
+        {
+            "portfolio_state": "CURRENT",
+            "classification": "COUNTRY",
+            "classified_value": round(current_classified_country_value, 2),
+            "classified_percent_of_holdings": round(
+                current_classified_country_value / current_holdings_value * 100.0, 2
+            ) if current_holdings_value > 0 else None,
+            "unclassified_value": round(max(0.0, current_holdings_value - current_classified_country_value), 2),
+            "unclassified_tickers": sorted(missing_country_tickers),
+        },
+        {
+            "portfolio_state": "CURRENT",
+            "classification": "INDUSTRY",
+            "classified_value": round(sum(industry_values.values()), 2),
+            "classified_percent_of_holdings": round(
+                sum(industry_values.values()) / current_holdings_value * 100.0, 2
+            ) if current_holdings_value > 0 else None,
+            "unclassified_value": round(max(0.0, current_holdings_value - sum(industry_values.values())), 2),
+            "unclassified_tickers": sorted(missing_industry_tickers),
+        },
+        {
+            "portfolio_state": "PROPOSED",
+            "classification": "SECTOR",
+            "classified_value": round(proposed_classified_sector_value, 2),
+            "classified_percent_of_holdings": round(
+                proposed_classified_sector_value / proposed_holdings_value * 100.0, 2
+            ) if proposed_holdings_value > 0 else None,
+            "unclassified_value": round(max(0.0, proposed_holdings_value - proposed_classified_sector_value), 2),
+            "unclassified_tickers": sorted(proposed_missing_sector_tickers),
+        },
+        {
+            "portfolio_state": "PROPOSED",
+            "classification": "COUNTRY",
+            "classified_value": round(proposed_classified_country_value, 2),
+            "classified_percent_of_holdings": round(
+                proposed_classified_country_value / proposed_holdings_value * 100.0, 2
+            ) if proposed_holdings_value > 0 else None,
+            "unclassified_value": round(max(0.0, proposed_holdings_value - proposed_classified_country_value), 2),
+            "unclassified_tickers": sorted(proposed_missing_country_tickers),
+        },
+        {
+            "portfolio_state": "PROPOSED",
+            "classification": "INDUSTRY",
+            "classified_value": round(sum(proposed_industry_values.values()), 2),
+            "classified_percent_of_holdings": round(
+                sum(proposed_industry_values.values()) / proposed_holdings_value * 100.0, 2
+            ) if proposed_holdings_value > 0 else None,
+            "unclassified_value": round(max(0.0, proposed_holdings_value - sum(proposed_industry_values.values())), 2),
+            "unclassified_tickers": sorted(proposed_missing_industry_tickers),
+        },
+    ]
+
+    known_etf_tickers = {
+        item["ticker"] for item in assessment["known_etf_holdings"]
+    }
+    for coverage in assessment["classification_coverage"]:
+        unclassified = set(coverage.get("unclassified_tickers", []))
+        etf_gaps = sorted(unclassified & known_etf_tickers)
+        coverage["unclassified_etf_tickers"] = etf_gaps
+        coverage["unclassified_other_tickers"] = sorted(unclassified - known_etf_tickers)
+        coverage["look_through_required"] = bool(etf_gaps)
+
+    if portfolio_value > 0:
+        for exposure_type, current_exposures, proposed_exposures in (
+            ("SECTOR", sector_values, proposed_sector_values),
+            ("COUNTRY", country_values, proposed_country_values),
+            ("INDUSTRY", industry_values, proposed_industry_values),
+        ):
+            all_names = set(current_exposures) | set(proposed_exposures)
+            for name in sorted(all_names):
+                current_amount = current_exposures.get(name, 0.0)
+                proposed_amount = proposed_exposures.get(name, 0.0)
+                current_pct = current_amount / portfolio_value * 100.0
+                proposed_pct = (
+                    proposed_amount / proposed_portfolio_value * 100.0
+                    if proposed_portfolio_value > 0 else 0.0
+                )
+                comparison = {
+                    "type": exposure_type,
+                    "name": name,
+                    "current_value": round(current_amount, 2),
+                    "current_percent": round(current_pct, 2),
+                    "proposed_value": round(proposed_amount, 2),
+                    "proposed_percent": round(proposed_pct, 2),
+                    "change_percentage_points": round(proposed_pct - current_pct, 2),
+                    "measurement": "ESTIMATED_PROPOSED_EXPOSURE",
+                    "advisory_only": True,
+                }
+                assessment["portfolio_exposure_comparison"].append(comparison)
+                if current_pct >= 30.0:
+                    assessment["portfolio_concentration"].append({
+                        "type": exposure_type,
+                        "name": name,
+                        "exposure_value": round(current_amount, 2),
+                        "exposure_percent": round(current_pct, 2),
+                        "measurement": "CURRENT_OBSERVED_EXPOSURE",
+                        "trigger": "REVIEW_AT_30_PERCENT",
+                    })
+                if proposed_pct >= 30.0:
+                    proposed_record = {
+                        "type": exposure_type,
+                        "name": name,
+                        "exposure_value": round(proposed_amount, 2),
+                        "exposure_percent": round(proposed_pct, 2),
+                        "change_percentage_points": round(proposed_pct - current_pct, 2),
+                        "measurement": "ESTIMATED_PROPOSED_EXPOSURE",
+                        "trigger": "REVIEW_AT_30_PERCENT",
+                    }
+                    assessment["proposed_portfolio_concentration"].append(proposed_record)
+                if proposed_pct >= 30.0 and proposed_pct > current_pct + 0.01:
+                    assessment["recommendations"].append({
+                        "action": "REVIEW_PROPOSED_CONCENTRATION_INCREASE",
+                        "subject": name,
+                        "reason": (
+                            f"Estimated {exposure_type.lower()} exposure increases from "
+                            f"{current_pct:.1f}% to {proposed_pct:.1f}% and reaches or exceeds "
+                            "the 30% review threshold. Validate before acting."
+                        ),
+                        "confidence": "MEDIUM",
+                        "evidence_type": "ESTIMATED_POST_REALLOCATION_EXPOSURE",
+                        "advisory_only": True,
+                    })
+                elif current_pct >= 30.0:
+                    assessment["recommendations"].append({
+                        "action": "REVIEW_CONCENTRATION",
+                        "subject": name,
+                        "reason": (
+                            f"Current {exposure_type.lower()} exposure is {current_pct:.1f}% "
+                            "of portfolio value. Review the exposure before increasing it further."
+                        ),
+                        "confidence": "HIGH",
+                        "evidence_type": "OBSERVED_PORTFOLIO_EXPOSURE",
+                        "advisory_only": True,
+                    })
+    else:
+        assessment["limitations"].append(
+            "Portfolio value is missing or non-positive; concentration percentages cannot be calculated."
+        )
+
+    # --------------------------------------------------------
+    # EXPOSURE CONSISTENCY VALIDATION (ADVISORY ONLY)
+    # --------------------------------------------------------
+
+    def _add_exposure_check(check, status, observed, expected, detail):
+        assessment["exposure_validation"].append({
+            "check": check,
+            "status": status,
+            "observed": observed,
+            "expected": expected,
+            "detail": detail,
+            "advisory_only": True,
+        })
+
+    if duplicate_position_rows:
+        conflicts = [item for item in duplicate_position_rows if not item["values_match"]]
+        _add_exposure_check(
+            "DUPLICATE_CURRENT_POSITION_TICKERS",
+            "FAIL" if conflicts else "WARN",
+            len(duplicate_position_rows),
+            0,
+            "Duplicate ticker rows were found. Matching-value duplicates were counted once; conflicting values were not summed and require authoritative-source reconciliation. "
+            + str(duplicate_position_rows),
+        )
+    else:
+        _add_exposure_check(
+            "DUPLICATE_CURRENT_POSITION_TICKERS", "PASS", 0, 0,
+            "No duplicate positive-value current-position tickers were found.",
+        )
+
+    baseline_unallocated = portfolio_value - current_holdings_value
+    _add_exposure_check(
+        "CURRENT_PORTFOLIO_VALUE_RECONCILIATION",
+        "FAIL" if baseline_unallocated < -0.01 else "PASS",
+        round(portfolio_value, 2),
+        round(current_holdings_value + max(0.0, baseline_unallocated), 2),
+        "Portfolio value is compared with classified and unclassified current holdings. Positive residual is retained as unallocated value/cash; a negative residual means holdings exceed the supplied portfolio denominator.",
+    )
+
+    source_totals = {}
+    invalid_transactions = []
+    for index, transaction in enumerate(transaction_rows, start=1):
+        amount = safe_float(transaction.get("Reallocated Capital", transaction.get("Released Capital", 0)))
+        source_ticker = clean_ticker(transaction.get("Source Ticker", ""))
+        destination_ticker = clean_ticker(transaction.get("Destination Ticker", ""))
+        source_action = _normalise_text(transaction.get("Source Action", "")).upper()
+        is_cash_source = "CASH" in source_action or source_ticker in {"CASH", "ASSESSMENT CASH", "ASSESSMENT_CASH"}
+        if amount <= 0 or (not source_ticker and not destination_ticker):
+            invalid_transactions.append({"row": index, "amount": round(amount, 2), "source": source_ticker, "destination": destination_ticker})
+        if source_ticker and not is_cash_source:
+            source_totals[source_ticker] = source_totals.get(source_ticker, 0.0) + max(0.0, amount)
+
+    _add_exposure_check(
+        "TRANSACTION_ROW_VALIDITY",
+        "FAIL" if invalid_transactions else "PASS",
+        len(invalid_transactions), 0,
+        "Each transaction must have a positive amount and at least one source/destination ticker. Invalid rows: " + str(invalid_transactions),
+    )
+
+    missing_sources = [ticker for ticker in sorted(source_totals) if ticker not in current_positions]
+    _add_exposure_check(
+        "FUNDING_SOURCE_POSITION_MATCH",
+        "FAIL" if missing_sources else "PASS",
+        len(missing_sources), 0,
+        "Non-cash funding sources must match a current position. Unmatched source tickers: " + str(missing_sources),
+    )
+
+    overdrawn_sources = []
+    for ticker, amount in sorted(source_totals.items()):
+        position_value = safe_float(current_positions.get(ticker, {}).get("value", 0))
+        if ticker in current_positions and amount > position_value + 0.01:
+            overdrawn_sources.append({
+                "ticker": ticker,
+                "proposed_funding": round(amount, 2),
+                "current_value": round(position_value, 2),
+            })
+    _add_exposure_check(
+        "FUNDING_DOES_NOT_EXCEED_POSITION_VALUE",
+        "FAIL" if overdrawn_sources else "PASS",
+        len(overdrawn_sources), 0,
+        "Total proposed funding from any holding must not exceed its current value. Exceptions: " + str(overdrawn_sources),
+    )
+
+    expected_proposed_holdings = current_holdings_value + external_cash_allocated
+    holdings_residual = proposed_holdings_value - expected_proposed_holdings
+    _add_exposure_check(
+        "PROPOSED_HOLDINGS_RECONCILIATION",
+        "FAIL" if abs(holdings_residual) > 0.02 else "PASS",
+        round(proposed_holdings_value, 2),
+        round(expected_proposed_holdings, 2),
+        f"Proposed security holdings should equal current security holdings plus cash allocated from the assessment cash pool, after internal source-to-destination transfers net to zero. Residual: {holdings_residual:.2f}.",
+    )
+
+    expected_unallocated = baseline_unallocated
+    proposed_unallocated = proposed_portfolio_value - proposed_holdings_value
+    unallocated_residual = proposed_unallocated - expected_unallocated
+    _add_exposure_check(
+        "PROPOSED_PORTFOLIO_DENOMINATOR_RECONCILIATION",
+        "FAIL" if abs(unallocated_residual) > 0.02 else "PASS",
+        round(proposed_unallocated, 2),
+        round(expected_unallocated, 2),
+        f"The current unallocated portfolio value/cash should remain constant after internal transfers and explicit assessment-cash additions. Residual: {unallocated_residual:.2f}.",
+    )
+
+    _add_exposure_check(
+        "CURRENT_SECTOR_CLASSIFICATION_COVERAGE",
+        "PASS" if not missing_sector_tickers else "WARN",
+        round(current_classified_sector_value, 2),
+        round(current_holdings_value, 2),
+        "Unclassified tickers: " + str(sorted(set(missing_sector_tickers))),
+    )
+    _add_exposure_check(
+        "CURRENT_COUNTRY_CLASSIFICATION_COVERAGE",
+        "PASS" if not missing_country_tickers else "WARN",
+        round(current_classified_country_value, 2),
+        round(current_holdings_value, 2),
+        "Unclassified tickers include ETFs or other instruments whose underlying geographic exposure may require look-through; do not infer exposure from listing country. Tickers: " + str(sorted(set(missing_country_tickers))),
+    )
+    _add_exposure_check(
+        "PROPOSED_SECTOR_CLASSIFICATION_COVERAGE",
+        "PASS" if not proposed_missing_sector_tickers else "WARN",
+        round(proposed_classified_sector_value, 2),
+        round(proposed_holdings_value, 2),
+        "Unclassified tickers: " + str(sorted(set(proposed_missing_sector_tickers))),
+    )
+    _add_exposure_check(
+        "PROPOSED_COUNTRY_CLASSIFICATION_COVERAGE",
+        "PASS" if not proposed_missing_country_tickers else "WARN",
+        round(proposed_classified_country_value, 2),
+        round(proposed_holdings_value, 2),
+        "Country exposure remains incomplete where domicile/underlying-asset data is unavailable. Unclassified tickers: " + str(sorted(set(proposed_missing_country_tickers))),
+    )
+
+    # --------------------------------------------------------
+    # COMPANY-LEVEL INTELLIGENCE
+    # --------------------------------------------------------
+
+    intelligence_by_ticker = {}
+
+    for row in intelligence_rows:
+        ticker = clean_ticker(row.get("Ticker", ""))
+
+        if ticker:
+            intelligence_by_ticker[ticker] = row
+
+    # --------------------------------------------------------
+    # MACRO-RELATED NEWS SCREEN (SHADOW / ADVISORY ONLY)
+    # --------------------------------------------------------
+    # Reuse existing Market Intelligence headlines. A keyword match
+    # identifies a topic for human review; it does not imply adverse
+    # sentiment, materiality, causality, or a forecast.
+
+    from datetime import date
+
+    macro_keyword_groups = {
+        "INFLATION": (
+            "inflation", "cpi", "pce", "consumer prices",
+            "producer prices", "price pressures", "disinflation",
+            "deflation",
+        ),
+        "CENTRAL_BANK_AND_RATES": (
+            "central bank", "federal reserve", "the fed",
+            "bank of england", "boe", "ecb", "interest rate",
+            "rate hike", "rate cut", "monetary policy",
+            "hawkish", "dovish", "quantitative tightening",
+            "quantitative easing", "treasury yield",
+        ),
+        "GROWTH_AND_EMPLOYMENT": (
+            "recession", "gross domestic product", "gdp",
+            "pmi", "unemployment", "payrolls", "jobless",
+            "economic slowdown", "economic contraction",
+            "growth forecast", "manufacturing activity",
+        ),
+        "TRADE_AND_GEOPOLITICS": (
+            "tariff", "sanctions", "trade war", "export controls",
+            "geopolitical", "geopolitics", "invasion", "blockade",
+            "shipping disruption", "supply chain disruption",
+            "supply-chain disruption", "military conflict",
+        ),
+        "ENERGY_AND_COMMODITIES": (
+            "crude oil", "oil supply", "oil prices", "opec",
+            "natural gas prices", "energy shock", "energy supply",
+            "commodity prices",
+        ),
+        "CREDIT_AND_FINANCIAL_STABILITY": (
+            "credit spread", "credit crunch", "banking stress",
+            "liquidity crisis", "sovereign debt", "bond selloff",
+            "financial stability", "credit default",
+            "bank failure", "debt crisis",
+        ),
+    }
+
+    macro_news_by_key = {}
+    headlines_field_seen = False
+
+    for ticker, intelligence_row in intelligence_by_ticker.items():
+        raw_headlines = intelligence_row.get("News Headlines")
+
+        if raw_headlines is None:
+            continue
+
+        headlines_field_seen = True
+
+        if isinstance(raw_headlines, str):
+            headline_records = [
+                {"headline": part.strip()}
+                for part in raw_headlines.replace("\r", "\n").split("\n")
+                for part in part.split(";")
+                if part.strip()
+            ]
+        elif isinstance(raw_headlines, dict):
+            headline_records = [raw_headlines]
+        elif isinstance(raw_headlines, (list, tuple)):
+            headline_records = []
+            for entry in raw_headlines:
+                if isinstance(entry, dict):
+                    headline_records.append(entry)
+                elif isinstance(entry, str) and entry.strip():
+                    headline_records.append({"headline": entry.strip()})
+        else:
+            headline_records = []
+
+        for headline_record in headline_records:
+            if isinstance(headline_record, str):
+                headline_record = {"headline": headline_record}
+
+            headline = (
+                headline_record.get("headline")
+                or headline_record.get("title")
+                or headline_record.get("Headline")
+                or headline_record.get("Title")
+            )
+
+            if not isinstance(headline, str) or not headline.strip():
+                continue
+
+            headline = " ".join(headline.split())
+            headline_lower = headline.casefold()
+
+            matched_categories = [
+                category
+                for category, keywords in macro_keyword_groups.items()
+                if any(keyword in headline_lower for keyword in keywords)
+            ]
+
+            if not matched_categories:
+                continue
+
+            # Deduplicate identical headlines across ticker records.
+            dedupe_key = headline_lower
+            item = macro_news_by_key.get(dedupe_key)
+
+            if item is None:
+                item = {
+                    "Category": "; ".join(matched_categories),
+                    "Headline": headline,
+                    "Related Tickers": [],
+                    "Published Date": (
+                        headline_record.get("published")
+                        or headline_record.get("published_at")
+                        or headline_record.get("date")
+                        or headline_record.get("Published Date")
+                    ),
+                    "Source": (
+                        headline_record.get("publisher")
+                        or headline_record.get("source")
+                        or headline_record.get("Source")
+                    ),
+                    "Screening Basis": "MACRO KEYWORD MATCH",
+                    "Interpretation": (
+                        "Potential macro topic; verify recency, source, "
+                        "direction and portfolio relevance manually."
+                    ),
+                    "Advisory Only": True,
+                }
+                macro_news_by_key[dedupe_key] = item
+
+            if ticker not in item["Related Tickers"]:
+                item["Related Tickers"].append(ticker)
+
+            # Do not infer missing source/date metadata.
+            if not item["Published Date"]:
+                item["Published Date"] = None
+            if not item["Source"]:
+                item["Source"] = None
+
+    macro_news_items = list(macro_news_by_key.values())
+
+    if macro_news_items:
+        macro_news_status = "REVIEW SIGNALS IDENTIFIED"
+        macro_news_summary = (
+            f"{len(macro_news_items)} distinct headline(s) matched macro "
+            "keywords. Matches are review prompts, not confirmed adverse events."
+        )
+    elif headlines_field_seen:
+        macro_news_status = "NO MACRO KEYWORD MATCH"
+        macro_news_summary = (
+            "No supplied headlines matched the configured macro keywords. "
+            "This does not establish that macro risk is absent."
+        )
+    else:
+        macro_news_status = "UNASSESSED"
+        macro_news_summary = (
+            "No usable News Headlines field was found in the supplied "
+            "Market Intelligence rows."
+        )
+
+
+    # ------------------------------------------------------------
+    # MACRO NEWS FRESHNESS AND PORTFOLIO RELEVANCE
+    #
+    # Enrich existing keyword matches only. This is advisory
+    # metadata; it does not change portfolio decisions or sizing.
+    # ------------------------------------------------------------
+    from datetime import datetime, date, timezone
+    from email.utils import parsedate_to_datetime
+    import ast
+
+    _macro_now = datetime.now(timezone.utc)
+
+    _macro_sector_terms = {
+        "INFLATION": (
+            "consumer discretionary", "consumer cyclical",
+            "consumer staples", "consumer defensive",
+            "utilities", "real estate", "industrials",
+            "materials", "financial",
+        ),
+        "CENTRAL_BANK_AND_RATES": (
+            "financial", "real estate", "utilities",
+            "technology", "consumer discretionary",
+            "consumer cyclical",
+        ),
+        "GROWTH_AND_EMPLOYMENT": (
+            "consumer discretionary", "consumer cyclical",
+            "industrials", "financial", "technology",
+            "materials",
+        ),
+        "TRADE_AND_GEOPOLITICS": (
+            "energy", "industrials", "materials",
+            "technology", "consumer staples",
+            "consumer defensive", "communication services",
+        ),
+        "ENERGY_AND_COMMODITIES": (
+            "energy", "materials", "industrials", "utilities",
+        ),
+        "CREDIT_AND_FINANCIAL_STABILITY": (
+            "financial", "real estate", "technology",
+            "consumer discretionary", "consumer cyclical",
+        ),
+    }
+
+    _macro_industry_terms = {
+        "TRADE_AND_GEOPOLITICS": (
+            "shipping", "tanker", "marine", "defence",
+            "defense", "airline", "semiconductor",
+            "freight", "logistics",
+        ),
+        "ENERGY_AND_COMMODITIES": (
+            "oil", "gas", "energy", "mining", "metals",
+            "commodit", "shipping", "tanker", "marine",
+        ),
+        "CENTRAL_BANK_AND_RATES": (
+            "bank", "mortgage", "reit", "lending",
+        ),
+        "CREDIT_AND_FINANCIAL_STABILITY": (
+            "bank", "credit", "lending", "mortgage",
+            "insurance", "reit", "real estate",
+        ),
+    }
+
+    def _macro_parse_date(value):
+        if value is None or value == "":
+            return None
+
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, date):
+            parsed = datetime(
+                value.year, value.month, value.day,
+                tzinfo=timezone.utc,
+            )
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            timestamp = float(value)
+            if timestamp > 100_000_000_000:
+                timestamp /= 1000.0
+            try:
+                parsed = datetime.fromtimestamp(
+                    timestamp, tz=timezone.utc
+                )
+            except (OverflowError, OSError, ValueError):
+                return None
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+
+            try:
+                parsed = datetime.fromisoformat(
+                    text.replace("Z", "+00:00")
+                )
+            except (TypeError, ValueError):
+                try:
+                    parsed = parsedate_to_datetime(text)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed.astimezone(timezone.utc)
+
+
+    cash_tickers = {"CASH", "ASSESSMENT CASH", "ASSESSMENT_CASH"}
+
+    buy_new_tickers = set()
+
+    for decision_row in rows:
+        ticker = clean_ticker(decision_row.get("Ticker", ""))
+        decision = _normalise_text(
+            decision_row.get(
+                "Final Decision",
+                decision_row.get(
+                    "Action",
+                    decision_row.get("Recommendation", decision_row.get("Decision", "")),
+                ),
+            ),
+        ).upper()
+
+        if ticker and ticker not in cash_tickers and decision == "BUY NEW":
+            buy_new_tickers.add(ticker)
+
+    _macro_roles_by_ticker = {}
+
+    for _ticker in held_tickers:
+        _macro_roles_by_ticker.setdefault(
+            clean_ticker(_ticker), []
+        ).append("CURRENT_HOLDING")
+
+    for _ticker in source_tickers:
+        _macro_roles_by_ticker.setdefault(
+            clean_ticker(_ticker), []
+        ).append("PROPOSED_FUNDING_SOURCE")
+
+    for _ticker in destination_tickers:
+        _macro_roles_by_ticker.setdefault(
+            clean_ticker(_ticker), []
+        ).append("PROPOSED_DESTINATION")
+
+    for _ticker in buy_new_tickers:
+        _macro_roles_by_ticker.setdefault(
+            clean_ticker(_ticker), []
+        ).append("BUY_NEW_CANDIDATE")
+
+    _macro_sector_by_ticker = {}
+
+    for _ticker, _row in intelligence_by_ticker.items():
+        _macro_sector_by_ticker[clean_ticker(_ticker)] = {
+            "sector": str(
+                _row.get("Sector", _row.get("sector", "")) or ""
+            ).strip().lower(),
+            "industry": str(
+                _row.get("Industry", _row.get("industry", "")) or ""
+            ).strip().lower(),
+        }
+
+    for _item in macro_news_items:
+        _raw_date = _item.get("Published Date")
+        _published = _macro_parse_date(_raw_date)
+
+        if _raw_date is None or not str(_raw_date).strip():
+            _item["Freshness Status"] = "MISSING DATE"
+            _item["Age Days"] = None
+            _item["Freshness Interpretation"] = (
+                "Recency cannot be established because the publication "
+                "date was not supplied."
+            )
+        elif _published is None:
+            _item["Freshness Status"] = "INVALID DATE"
+            _item["Age Days"] = None
+            _item["Freshness Interpretation"] = (
+                "A publication date was supplied but could not be parsed."
+            )
+        else:
+            _age_days = (_macro_now - _published).days
+            _item["Age Days"] = _age_days
+
+            if _age_days < -1:
+                _item["Freshness Status"] = "FUTURE DATE"
+                _item["Freshness Interpretation"] = (
+                    "The supplied publication date is in the future; "
+                    "verify the source metadata."
+                )
+            elif _age_days <= 7:
+                _item["Freshness Status"] = "FRESH"
+                _item["Freshness Interpretation"] = (
+                    "Published within the last 7 days; verify the source "
+                    "and whether the event remains relevant."
+                )
+            elif _age_days <= 30:
+                _item["Freshness Status"] = "AGEING"
+                _item["Freshness Interpretation"] = (
+                    "Published 8–30 days ago; verify whether the event "
+                    "or its consequences remain current."
+                )
+            else:
+                _item["Freshness Status"] = "STALE"
+                _item["Freshness Interpretation"] = (
+                    "Published more than 30 days ago; do not treat as "
+                    "a current risk signal without fresh corroboration."
+                )
+
+        _related = _item.get("Related Tickers", [])
+        if isinstance(_related, str):
+            try:
+                _parsed_related = ast.literal_eval(_related)
+                _related = (
+                    _parsed_related
+                    if isinstance(_parsed_related, (list, tuple, set))
+                    else [_related]
+                )
+            except (SyntaxError, ValueError):
+                _related = [_related]
+
+        if not isinstance(_related, (list, tuple, set)):
+            _related = []
+
+        _related_tickers = {
+            clean_ticker(value)
+            for value in _related
+            if clean_ticker(value)
+        }
+
+        _category = str(_item.get("Category", "") or "").strip().upper()
+        _direct = sorted(
+            ticker for ticker in _related_tickers
+            if _macro_roles_by_ticker.get(ticker)
+        )
+
+        _potential = {}
+
+        _sector_terms = _macro_sector_terms.get(_category, ())
+        _industry_terms = _macro_industry_terms.get(_category, ())
+
+        for _ticker, _details in _macro_sector_by_ticker.items():
+            if not _macro_roles_by_ticker.get(_ticker):
+                continue
+
+            _sector = _details["sector"]
+            _industry = _details["industry"]
+
+            _sector_match = any(
+                term in _sector for term in _sector_terms
+            )
+            _industry_match = any(
+                term in _industry for term in _industry_terms
+            )
+
+            if _sector_match or _industry_match:
+                _basis = []
+                if _sector_match:
+                    _basis.append("sector")
+                if _industry_match:
+                    _basis.append("industry")
+
+                _potential[_ticker] = (
+                    ", ".join(_basis)
+                    + " heuristic; verify manually"
+                )
+
+        for _ticker in _direct:
+            _potential.setdefault(
+                _ticker,
+                "direct headline ticker linked to portfolio role",
+            )
+
+        _item["Direct Portfolio Tickers"] = [
+            {
+                "Ticker": ticker,
+                "Roles": sorted(set(_macro_roles_by_ticker[ticker])),
+            }
+            for ticker in _direct
+        ]
+
+        _item["Potentially Relevant Tickers"] = [
+            {
+                "Ticker": ticker,
+                "Roles": sorted(set(_macro_roles_by_ticker[ticker])),
+                "Relevance Basis": _potential[ticker],
+            }
+            for ticker in sorted(_potential)
+        ]
+
+        if _direct and len(_potential) > len(_direct):
+            _item["Portfolio Relevance"] = (
+                "DIRECT LINK AND POTENTIAL SECTOR/INDUSTRY OVERLAP"
+            )
+        elif _direct:
+            _item["Portfolio Relevance"] = "DIRECT PORTFOLIO LINK"
+        elif _potential:
+            _item["Portfolio Relevance"] = (
+                "POTENTIAL SECTOR/INDUSTRY OVERLAP"
+            )
+        else:
+            _item["Portfolio Relevance"] = (
+                "NO MATCH FOUND IN AVAILABLE SECTOR/INDUSTRY DATA"
+            )
+
+        _item["Relevance Limitation"] = (
+            "Sector and industry matches are heuristic, not measured "
+            "sensitivity or evidence of a positive or negative price impact."
+        )
+        _item["Advisory Only"] = True
+
+
+    assessment["macro_news_assessment"] = {
+        "status": macro_news_status,
+        "summary": macro_news_summary,
+        "as_of": date.today().isoformat(),
+        "items": macro_news_items,
+        "limitations": [
+            "This is a keyword screen, not sentiment analysis or an event-impact model.",
+            "Headline availability, freshness and coverage depend on existing Market Intelligence.",
+            "Published dates and publishers are shown only when supplied by the source.",
+            "A keyword match does not establish whether an event is adverse or material to a holding.",
+            "No historical point-in-time news archive is used for pre-trade stress testing.",
+            "This assessment is SHADOW-only and does not change decisions, eligibility, sizing or trades.",
+        ],
+        "advisory_only": True,
+    }
+
+    assessment["data_quality"]["macro_news_assessed"] = headlines_field_seen
+    assessment["data_quality"]["macro_news_matches"] = len(macro_news_items)
+
+    if macro_news_items:
+        assessment["recommendations"].append({
+            "action": "REVIEW_MACRO_NEWS_WARNINGS",
+            "subject": "PORTFOLIO",
+            "reason": (
+                f"{len(macro_news_items)} distinct headline(s) matched "
+                "macro keywords; review the headlines and their relevance "
+                "to portfolio exposures."
+            ),
+            "confidence": "LOW — KEYWORD SCREEN",
+            "evidence_type": "EXISTING_MARKET_INTELLIGENCE_HEADLINES",
+            "advisory_only": True,
+            "governance": "NO AUTOMATIC DECISION OR ALLOCATION CHANGE",
+        })
+
+
+    relevant_tickers = (
+        held_tickers | source_tickers | destination_tickers | buy_new_tickers
+    ) - cash_tickers
+
+    for ticker in sorted(relevant_tickers):
+        row = intelligence_by_ticker.get(ticker)
+
+        roles = []
+
+        if ticker in held_tickers:
+            roles.append("CURRENT_HOLDING")
+
+        if ticker in source_tickers:
+            roles.append("PROPOSED_FUNDING_SOURCE")
+
+        if ticker in destination_tickers:
+            roles.append("PROPOSED_DESTINATION")
+
+        price_risk = _build_price_deterioration_assessment(ticker)
+
+        if price_risk["status"] != "ASSESSED":
+            assessment["recommendations"].append({
+                "action": "REVIEW_DATA_GAP",
+                "subject": ticker,
+                "reason": "Price risk unassessed: " + "; ".join(price_risk["reasons"]),
+                "confidence": "LOW",
+                "evidence_type": "PRICE_HISTORY_UNAVAILABLE",
+                "portfolio_roles": roles,
+                "advisory_only": True,
+            })
+        elif price_risk["severity"] in {"REVIEW", "HIGH"}:
+            assessment["recommendations"].append({
+                "action": "PRICE_DETERIORATION_REVIEW",
+                "subject": ticker,
+                "reason": "; ".join(price_risk["reasons"]),
+                "confidence": "MEDIUM",
+                "evidence_type": "HISTORICAL_PRICE_DETERIORATION",
+                "portfolio_roles": roles,
+                "advisory_only": True,
+            })
+
+        if row is None:
+            is_etf = (
+                fundamentals_by_ticker.get(ticker, "").upper() == "ETF"
+                or str(
+                    metadata_by_ticker.get(ticker, {}).get("asset_type", "")
+                ).strip().upper() == "ETF"
+                or any(
+                    item.get("ticker") == ticker
+                    for item in assessment.get("known_etf_holdings", [])
+                )
+            )
+
+            if is_etf:
+                assessment["recommendations"].append({
+                    "action": "REVIEW_DATA_GAP",
+                    "subject": ticker,
+                    "reason": (
+                        "ETF market intelligence is unavailable. "
+                        "Underlying holdings, sector exposure and country "
+                        "exposure have not been assessed."
+                    ),
+                    "confidence": "LOW",
+                    "evidence_type": "ETF_LOOKTHROUGH_UNASSESSED",
+                    "portfolio_roles": roles,
+                    "advisory_only": True,
+                })
+                continue
+
+            flag = {
+                "ticker": ticker,
+                "portfolio_roles": roles,
+                "price_risk": price_risk,
+                "intelligence_available": False,
+                "news_headlines_available": False,
+                "earnings_status": None,
+                "analyst_target_upside_percent": None,
+                "review_required": True,
+                "severity": "UNKNOWN",
+                "reasons": [
+                    "No matching market-intelligence record is available."
+                ],
+            }
+
+            assessment["company_risk_flags"].append(flag)
+
+            assessment["recommendations"].append({
+                "action": "REVIEW_DATA_GAP",
+                "subject": ticker,
+                "reason": (
+                    "Company-level risk could not be assessed because "
+                    "matching market intelligence is unavailable."
+                ),
+                "confidence": "LOW",
+                "evidence_type": "MISSING_INTELLIGENCE",
+                "portfolio_roles": roles,
+                "advisory_only": True,
+            })
+
+            continue
+
+        source = _normalise_text(row.get("Source")).upper()
+        headlines = row.get("News Headlines")
+        earnings_status = _normalise_text(
+            row.get("Earnings Status")
+        ).upper()
+        target_upside = row.get("Analyst Target Upside %")
+
+        unavailable = source == "UNAVAILABLE"
+
+        flag = {
+            "ticker": ticker,
+            "portfolio_roles": roles,
+            "price_risk": price_risk,
+            "intelligence_available": not unavailable,
+            "news_headlines_available": _is_present(headlines),
+            "earnings_status": earnings_status or None,
+            "analyst_target_upside_percent": None,
+            "review_required": unavailable,
+            "severity": "UNKNOWN" if unavailable else "NOT_ASSESSED",
+            "reasons": [],
+            "verification_reasons": [],
+        }
+
+        if unavailable:
+            flag["reasons"].append(
+                "Market-intelligence collection failed or was unavailable."
+            )
+
+        if _is_present(target_upside) and not unavailable:
+            try:
+                upside = float(
+                    str(target_upside)
+                    .replace("%", "")
+                    .replace(",", "")
+                )
+
+                flag["analyst_target_upside_percent"] = round(upside, 2)
+
+                if upside < 0:
+                    flag["review_required"] = True
+                    flag["severity"] = "REVIEW"
+                    flag["reasons"].append(
+                        "Analyst mean target is below the current price. "
+                        "This is a review signal, not a reliable forecast."
+                    )
+
+            except (TypeError, ValueError):
+                flag["reasons"].append(
+                    "Analyst target upside is present but cannot be parsed."
+                )
+
+        if earnings_status and earnings_status != "UNKNOWN" and not unavailable:
+            flag["verification_reasons"].append(
+                f"Earnings status reported as {earnings_status}; "
+                "event timing and potential impact require verification."
+            )
+
+        if _is_present(headlines) and not unavailable:
+            flag["verification_reasons"].append(
+                "Company news is available but has not been sentiment-scored."
+            )
+
+        if flag["review_required"] and not unavailable:
+            assessment["recommendations"].append({
+                "action": "INVESTIGATE_COMPANY_RISK",
+                "subject": ticker,
+                "reason": "; ".join(flag["reasons"]),
+                "confidence": "MEDIUM",
+                "evidence_type": "ANALYST_TARGET_SIGNAL",
+                "portfolio_roles": roles,
+                "advisory_only": True,
+            })
+
+        if unavailable:
+            assessment["recommendations"].append({
+                "action": "REVIEW_DATA_GAP",
+                "subject": ticker,
+                "reason": (
+                    "Risk information is unavailable. Do not interpret "
+                    "missing signals as evidence of low risk."
+                ),
+                "confidence": "LOW",
+                "evidence_type": "INTELLIGENCE_SOURCE_UNAVAILABLE",
+                "portfolio_roles": roles,
+                "advisory_only": True,
+            })
+
+        if (
+            flag["news_headlines_available"]
+            or flag["earnings_status"]
+            or flag["analyst_target_upside_percent"] is not None
+            or unavailable
+            or price_risk["status"] != "ASSESSED"
+            or price_risk["severity"] in {"REVIEW", "HIGH"}
+        ):
+            assessment["company_risk_flags"].append(flag)
+
+    # --------------------------------------------------------
+    # TRANSACTION-AWARE RISK REVIEWS
+    # --------------------------------------------------------
+
+    flags_by_ticker = {
+        flag["ticker"]: flag
+        for flag in assessment["company_risk_flags"]
+    }
+
+    decision_by_ticker = {}
+    for decision_row in rows:
+        ticker = clean_ticker(decision_row.get("Ticker", ""))
+        if ticker:
+            decision_by_ticker[ticker] = decision_row
+
+    for ticker in sorted(relevant_tickers):
+        if not ticker or ticker in cash_tickers:
+            continue
+        roles = []
+        if ticker in held_tickers:
+            roles.append("CURRENT_HOLDING")
+        if ticker in buy_new_tickers:
+            roles.append("BUY_NEW_CANDIDATE")
+        if ticker in source_tickers:
+            roles.append("PROPOSED_FUNDING_SOURCE")
+        if ticker in destination_tickers:
+            roles.append("PROPOSED_DESTINATION")
+
+        intelligence = intelligence_by_ticker.get(ticker)
+        flag = flags_by_ticker.get(ticker)
+        decision_row = decision_by_ticker.get(ticker, {})
+        source_status = (
+            _normalise_text(intelligence.get("Source")).upper()
+            if intelligence is not None else ""
+        )
+        evidence_available = intelligence is not None and source_status != "UNAVAILABLE"
+
+        is_etf = (
+            fundamentals_by_ticker.get(ticker, "").upper() == "ETF"
+            or str(
+                metadata_by_ticker.get(ticker, {}).get("asset_type", "")
+            ).strip().upper() == "ETF"
+            or any(
+                item.get("ticker") == ticker
+                for item in assessment.get("known_etf_holdings", [])
+            )
+        )
+
+        risk_reasons = list((flag or {}).get("reasons") or [])
+        verification_reasons = list(
+            (flag or {}).get("verification_reasons") or []
+        )
+        reasons = risk_reasons + [
+            reason for reason in verification_reasons
+            if reason not in risk_reasons
+        ]
+
+        price_risk = (flag or {}).get("price_risk") or {}
+        price_status = price_risk.get("status", "UNASSESSED")
+        price_severity = price_risk.get("severity", "UNKNOWN")
+        price_review = (
+            price_status == "ASSESSED"
+            and price_severity in {"REVIEW", "HIGH"}
+        )
+
+        if price_review:
+            # Price deterioration is a review signal, not an automatic trade instruction.
+            status = "REVIEW_REQUIRED"
+            severity = price_severity
+            confidence = "MEDIUM"
+            action = (
+                "INVESTIGATE_BEFORE_ENTRY"
+                if ticker in buy_new_tickers
+                else "REVIEW_EXISTING_HOLDING"
+            )
+            reasons.extend(
+                reason for reason in (price_risk.get("reasons") or [])
+                if reason not in reasons
+            )
+            if not evidence_available:
+                reasons.append(
+                    "Company-level risk remains incomplete because usable "
+                    "market-intelligence evidence is unavailable."
+                )
+        elif not evidence_available:
+            status = "ASSESSMENT_INCOMPLETE"
+            severity = "UNKNOWN"
+            confidence = "LOW"
+
+            if is_etf:
+                action = "REVIEW_ETF_LOOKTHROUGH"
+                reasons.append(
+                    "ETF underlying holdings and look-through sector/country "
+                    "exposures have not been assessed. This is not a company-level "
+                    "risk assessment."
+                )
+            else:
+                action = (
+                    "COMPLETE_RISK_REVIEW_BEFORE_ENTRY"
+                    if ticker in buy_new_tickers
+                    else "REVIEW_MISSING_RISK_DATA"
+                )
+                if not reasons:
+                    reasons = [
+                        "No usable market-intelligence record is available; "
+                        "risk is unassessed."
+                    ]
+        elif flag and flag.get("review_required"):
+            status = "REVIEW_REQUIRED"
+            severity = flag.get("severity", "REVIEW")
+            confidence = "MEDIUM"
+            action = (
+                "INVESTIGATE_BEFORE_ENTRY"
+                if ticker in buy_new_tickers
+                else "REVIEW_EXISTING_HOLDING"
+            )
+        elif risk_reasons:
+            status = "MONITOR_AND_VERIFY"
+            severity = (
+                flag.get("severity", "NOT_FULLY_ASSESSED")
+                if flag else "NOT_FULLY_ASSESSED"
+            )
+            confidence = "LOW"
+            action = "VERIFY_EVIDENCE_AND_MONITOR"
+        else:
+            status = "NO_ADVERSE_FLAG_IN_CHECKED_FIELDS"
+            severity = "NOT_FULLY_ASSESSED"
+            confidence = "LOW"
+            action = "CONTINUE_STANDARD_MONITORING"
+
+            if not risk_reasons:
+                reasons.insert(
+                    0,
+                    "No adverse flag in the limited fields checked; "
+                    "this is not a comprehensive risk clearance."
+                )
+
+        position = current_positions.get(ticker, {})
+        decision = _normalise_text(
+            decision_row.get("Final Decision", decision_row.get("Action", decision_row.get("Recommendation", decision_row.get("Decision", ""))))
+        )
+        assessment["individual_stock_assessments"].append({
+            "ticker": ticker,
+            "portfolio_roles": ", ".join(roles),
+            "final_decision": decision,
+            "current_value": round(safe_float(position.get("value", 0)), 2),
+            "risk_status": status,
+            "risk_severity": severity,
+            "recommended_action": action,
+            "reason": "; ".join(str(reason) for reason in reasons),
+            "evidence_available": evidence_available,
+            "evidence_scope": "Existing market-intelligence fields only; macro, correlated-theme and comprehensive company risk are not assessed here.",
+            "confidence": confidence,
+            "advisory_only": True,
+        })
+
+    for transaction in transaction_rows:
+        source_ticker = clean_ticker(
+            transaction.get("Source Ticker", "")
+        )
+        destination_ticker = clean_ticker(
+            transaction.get("Destination Ticker", "")
+        )
+
+        amount = safe_float(
+            transaction.get(
+                "Reallocated Capital",
+                transaction.get("Released Capital", 0),
+            )
+        )
+
+        if source_ticker in cash_tickers:
+            source_ticker = ""
+        if destination_ticker in cash_tickers:
+            destination_ticker = ""
+
+        if not source_ticker and not destination_ticker:
+            continue
+
+        source_flag = flags_by_ticker.get(source_ticker)
+        destination_flag = flags_by_ticker.get(destination_ticker)
+
+        review_reasons = []
+        assessment_required_reasons = []
+
+        for role, ticker, flag in (
+            ("Funding source", source_ticker, source_flag),
+            ("Destination", destination_ticker, destination_flag),
+        ):
+            if not ticker:
+                continue
+
+            if flag is None:
+                assessment_required_reasons.append(
+                    f"{role} {ticker} has no company-risk assessment record."
+                )
+                continue
+
+            price_risk = flag.get("price_risk") or {}
+            price_severity = price_risk.get("severity")
+            if (
+                price_risk.get("status") == "ASSESSED"
+                and price_severity in {"REVIEW", "HIGH"}
+            ):
+                price_reasons = price_risk.get("reasons") or []
+                detail = "; ".join(str(reason) for reason in price_reasons)
+                review_reasons.append(
+                    f"{role} {ticker} has {price_severity} historical "
+                    f"price-deterioration risk"
+                    + (f": {detail}" if detail else ".")
+                )
+
+            if flag.get("review_required"):
+                review_reasons.append(
+                    f"{role} {ticker} has a company-risk review flag."
+                )
+            elif flag.get("severity") == "UNKNOWN":
+                assessment_required_reasons.append(
+                    f"{role} {ticker} company-risk severity is UNKNOWN; "
+                    "further company-risk assessment is required."
+                )
+
+        review = {
+            "source_ticker": source_ticker or None,
+            "destination_ticker": destination_ticker or None,
+            "reallocated_capital": round(amount, 2),
+            "review_required": bool(
+                review_reasons or assessment_required_reasons
+            ),
+            "assessment_status": (
+                "REVIEW"
+                if review_reasons
+                else "ASSESSMENT_REQUIRED"
+                if assessment_required_reasons
+                else "NO_FLAGGED_ISSUE"
+            ),
+            "reasons": review_reasons + assessment_required_reasons,
+            "advisory_only": True,
+        }
+
+        assessment["transaction_risk_reviews"].append(review)
+
+        if review_reasons or assessment_required_reasons:
+            is_review = bool(review_reasons)
+
+            assessment["recommendations"].append({
+                "action": (
+                    "REVIEW_PROPOSED_TRANSACTION"
+                    if is_review
+                    else "ASSESS_TRANSACTION_RISK"
+                ),
+                "subject": (
+                    f"{source_ticker or 'CASH'} -> "
+                    f"{destination_ticker or 'CASH'}"
+                ),
+                "reason": "; ".join(
+                    review_reasons + assessment_required_reasons
+                ),
+                "confidence": "MEDIUM",
+                "evidence_type": (
+                    "TRANSACTION_LINKED_COMPANY_RISK"
+                    if is_review
+                    else "TRANSACTION_RISK_ASSESSMENT_GAP"
+                ),
+                "reallocated_capital": round(amount, 2),
+                "advisory_only": True,
+            })
+
+    # --------------------------------------------------------
+    # EXPLICIT UNASSESSED RISKS
+    # --------------------------------------------------------
+
+    if not assessment["data_quality"]["sector_country_classification_available"]:
+        assessment["limitations"].append(
+            "Sector and country classifications are incomplete or unavailable; "
+            "concentration coverage is limited."
+        )
+
+    if not transaction_rows:
+        assessment["limitations"].append(
+            "No proposed transactions were supplied; transaction-specific "
+            "risk reviews could not be performed."
+        )
+
+    assessment["limitations"].append(
+        "Proposed sector and country exposures are estimates derived from the "
+        "current holdings and proposed transaction amounts. They are not live-price "
+        "post-trade valuations and must be validated against the final trade plan."
+    )
+    assessment["limitations"].append(
+        "The portfolio-value denominator is supplied by the upstream portfolio summary. "
+        "Any cash balance embedded in that summary is not assigned to a security sector; "
+        "external cash allocated in proposed transactions is added to the proposed denominator."
+    )
+
+    assessment["limitations"].append(
+        "Correlated investment themes, including AI infrastructure and "
+        "semiconductors, remain unassessed without explicit theme mappings."
+    )
+
+    assessment["limitations"].append(
+        "Macro risk is assessed only through the cache-only proxy screen when "
+        "enough current observations are available; this is not a full macro model. "
+        "Historical pre-purchase macro warnings remain unassessed without purchase "
+        "dates and point-in-time macro snapshots."
+    )
+
+    return assessment
 
 # ============================================================
 # HOLD CHALLENGE / FUNDING HELPERS
@@ -1374,7 +4482,8 @@ def evaluate_hold_replacement(
 def generate_portfolio_reallocation(
     final_portfolio_decisions,
     portfolio_value,
-    min_reallocation_trade_value=1.0
+    min_reallocation_trade_value=1.0,
+    market_intelligence=None,
 ):
     """
     Generate governed portfolio capital reallocation.
@@ -1433,9 +4542,17 @@ def generate_portfolio_reallocation(
                 "Total Released": 0.0,
                 "Total Reallocated": 0.0,
                 "Unallocated Capital": 0.0,
+                "Reconciliation Variance": 0.0,
+                "Reconciliation Status": "NOT_RUN",
+                "Exposure Denominator": 0.0,
                 "Funding Sources": 0,
                 "Destinations": 0
-            }
+            },
+            "market_risk_assessment": _build_market_risk_assessment(
+                final_portfolio_decisions=final_portfolio_decisions,
+                portfolio_value=portfolio_value,
+                market_intelligence=market_intelligence,
+            ),
         }
 
     if isinstance(
@@ -1461,9 +4578,17 @@ def generate_portfolio_reallocation(
                 "Total Released": 0.0,
                 "Total Reallocated": 0.0,
                 "Unallocated Capital": 0.0,
+                "Reconciliation Variance": 0.0,
+                "Reconciliation Status": "NOT_RUN",
+                "Exposure Denominator": 0.0,
                 "Funding Sources": 0,
                 "Destinations": 0
-            }
+            },
+            "market_risk_assessment": _build_market_risk_assessment(
+                final_portfolio_decisions=final_portfolio_decisions,
+                portfolio_value=portfolio_value,
+                market_intelligence=market_intelligence,
+            ),
         }
 
     portfolio_value = safe_float(
@@ -1493,10 +4618,65 @@ def generate_portfolio_reallocation(
                 "Total Released": 0.0,
                 "Total Reallocated": 0.0,
                 "Unallocated Capital": 0.0,
+                "Reconciliation Variance": 0.0,
+                "Reconciliation Status": "NOT_RUN",
+                "Exposure Denominator": 0.0,
                 "Funding Sources": 0,
                 "Destinations": 0
-            }
+            },
+            "market_risk_assessment": _build_market_risk_assessment(
+                final_portfolio_decisions=final_portfolio_decisions,
+                portfolio_value=portfolio_value,
+                market_intelligence=market_intelligence,
+            ),
         }
+    # ========================================================
+    # VALIDATE OWNED-POSITION UNIQUENESS
+    # ========================================================
+
+    # The reallocation engine uses one row per security for exposure,
+    # funding and position-capacity calculations. Duplicate owned rows
+    # make those calculations ambiguous, so fail closed rather than
+    # silently double-counting or choosing one row.
+    owned_rows_by_ticker = {}
+    for row in decisions:
+        ticker = clean_ticker(row.get("Ticker", ""))
+        current_value = safe_float(
+            row.get("Current Value", row.get("Market Value", 0))
+        )
+        owned = bool(row.get("Owned", current_value > 0))
+        if ticker and ticker != "CASH" and owned and current_value > 0:
+            owned_rows_by_ticker.setdefault(ticker, []).append(row)
+
+    duplicate_owned_tickers = sorted(
+        ticker
+        for ticker, ticker_rows in owned_rows_by_ticker.items()
+        if len(ticker_rows) > 1
+    )
+
+    if duplicate_owned_tickers:
+        validation_summary = {
+            "Assessment Cash": 0.0,
+            "Released From Holdings": 0.0,
+            "Total Released": 0.0,
+            "Total Reallocated": 0.0,
+            "Unallocated Capital": 0.0,
+            "Reconciliation Variance": 0.0,
+            "Reconciliation Status": "BLOCKED_DUPLICATE_OWNED_TICKERS",
+            "Duplicate Owned Tickers": duplicate_owned_tickers,
+            "Funding Sources": 0,
+            "Destinations": 0,
+        }
+        return {
+            "reallocation": pd.DataFrame(),
+            "summary": validation_summary,
+            "market_risk_assessment": _build_market_risk_assessment(
+                final_portfolio_decisions=final_portfolio_decisions,
+                portfolio_value=portfolio_value,
+                market_intelligence=market_intelligence,
+            ),
+        }
+
     # ========================================================
     # BUILD CURRENT POSITIONS
     # ========================================================
@@ -1623,16 +4803,22 @@ def generate_portfolio_reallocation(
 
     # ========================================================
     # CALCULATE SECTOR EXPOSURE
+    #
+    # Sector/country percentages use the same owned-position population
+    # as their numerators. portfolio_value remains the denominator for
+    # position sizing and portfolio-level capacity limits.
     # ========================================================
 
     sector_values = {}
 
     for position in current_positions:
 
-        sector = position.get(
-            "Sector",
-            ""
-        )
+        sector = str(
+            position.get(
+                "Sector",
+                ""
+            ) or ""
+        ).strip()
 
         current_value = safe_float(
             position.get(
@@ -1649,15 +4835,26 @@ def generate_portfolio_reallocation(
             + current_value
         )
 
+    # Use the same owned-position population for the exposure denominator
+    # and numerator. Keep portfolio_value for overall position-sizing rules.
+    exposure_portfolio_value = round(
+        sum(
+            safe_float(position.get("Current Value", 0))
+            for position in current_positions
+            if safe_float(position.get("Current Value", 0)) > 0
+        ),
+        2,
+    )
+
     sector_exposure_percent = {}
 
-    if portfolio_value > 0:
+    if exposure_portfolio_value > 0:
 
         for sector, value in sector_values.items():
 
             sector_exposure_percent[sector] = round(
                 value
-                / portfolio_value
+                / exposure_portfolio_value
                 * 100.0,
                 2
             )
@@ -1700,13 +4897,13 @@ def generate_portfolio_reallocation(
 
     country_exposure_percent = {}
 
-    if portfolio_value > 0:
+    if exposure_portfolio_value > 0:
 
         for country, value in country_values.items():
 
             country_exposure_percent[country] = round(
                 value
-                / portfolio_value
+                / exposure_portfolio_value
                 * 100.0,
                 2
             )
@@ -1744,11 +4941,8 @@ def generate_portfolio_reallocation(
         # ----------------------------------------------------
 
         if final_decision not in (
-            "BUY",
             "BUY MORE",
-            "BUY NEW",
-            "STRONG BUY",
-            "ADD"
+            "BUY NEW"
         ):
 
             continue
@@ -1919,11 +5113,16 @@ def generate_portfolio_reallocation(
             ""
         )
 
-        sector_exposure = safe_float(
-            sector_exposure_percent.get(
-                sector,
-                0
-            )
+        sector_key = str(sector or "").strip()
+
+        sector_exposure_raw = sector_exposure_percent.get(
+            sector_key
+        )
+
+        sector_exposure = (
+            safe_float(sector_exposure_raw)
+            if sector_exposure_raw is not None
+            else None
         )
 
         country = str(
@@ -2013,7 +5212,10 @@ def generate_portfolio_reallocation(
         # constraint, not a destination-ranking penalty.
         # ----------------------------------------------------
 
-        if sector_exposure >= 40.0:
+        if (
+            sector_exposure is not None
+            and sector_exposure >= 40.0
+        ):
             sector_multiplier = 0.65
 
         allocation_weight = (
@@ -2059,11 +5261,10 @@ def generate_portfolio_reallocation(
             2
         )
 
-        destination_copy[
-            "Sector Exposure %"
-        ] = round(
-            sector_exposure,
-            2
+        destination_copy["Sector Exposure %"] = (
+            round(sector_exposure, 2)
+            if sector_exposure is not None
+            else None
         )
 
         destination_copy[
@@ -2485,8 +5686,6 @@ def generate_portfolio_reallocation(
 
             permitted_release = source_value
 
-            assessment_cash += permitted_release
-
         else:
 
             permitted_release = (
@@ -2495,10 +5694,10 @@ def generate_portfolio_reallocation(
                 / 100.0
             )
 
-            released_from_holdings += (
-                permitted_release
-            )
-
+        # Reconcile on the same rounded source amounts that are
+        # stored in remaining_funding and shown in the funding audit.
+        # Accumulating before rounding can create a false penny of
+        # unallocated capital in the summary.
         permitted_release = round(
             permitted_release,
             2
@@ -2507,6 +5706,14 @@ def generate_portfolio_reallocation(
         if permitted_release <= 0:
 
             continue
+
+        if source_decision == "CASH":
+
+            assessment_cash += permitted_release
+
+        else:
+
+            released_from_holdings += permitted_release
 
         remaining_funding[ticker] = (
             permitted_release
@@ -2988,6 +6195,10 @@ def generate_portfolio_reallocation(
                     "Sector",
                     ""
                 ),
+                "Country": destination.get(
+                    "Country",
+                    destination.get("country", "")
+                ),
                 "Asset Type": destination.get(
                     "Asset Type",
                     ""
@@ -3171,6 +6382,10 @@ def generate_portfolio_reallocation(
                         "Sector",
                         ""
                     ),
+                    "Country": destination.get(
+                        "Country",
+                        destination.get("country", "")
+                    ),
                     "Asset Type": destination.get(
                         "Asset Type",
                         ""
@@ -3246,14 +6461,23 @@ def generate_portfolio_reallocation(
         2
     )
 
-    unallocated_capital = round(
-        max(
-            0.0,
-            total_released
-            - total_reallocated
-        ),
-        2
+    reconciliation_variance = round(
+        total_released - total_reallocated,
+        2,
     )
+
+    unallocated_capital = round(
+        max(0.0, reconciliation_variance),
+        2,
+    )
+
+    reconciliation_tolerance = 0.01
+    if reconciliation_variance < -reconciliation_tolerance:
+        reconciliation_status = "OVERALLOCATED"
+    elif reconciliation_variance > reconciliation_tolerance:
+        reconciliation_status = "UNDERALLOCATED"
+    else:
+        reconciliation_status = "PASS"
 
     funding_sources = len(
         {
@@ -3297,6 +6521,9 @@ def generate_portfolio_reallocation(
         "Total Released": total_released,
         "Total Reallocated": total_reallocated,
         "Unallocated Capital": unallocated_capital,
+        "Reconciliation Variance": reconciliation_variance,
+        "Reconciliation Status": reconciliation_status,
+        "Exposure Denominator": exposure_portfolio_value,
         "Funding Sources": funding_sources,
         "Destinations": destination_count
     }
@@ -3344,6 +6571,325 @@ def generate_portfolio_reallocation(
     )
 
     # ========================================================
+    # SHADOW MARKET AND PORTFOLIO RISK ASSESSMENT
+    # ========================================================
+
+    market_risk_assessment = _build_market_risk_assessment(
+        final_portfolio_decisions,
+        portfolio_value,
+        market_intelligence=market_intelligence,
+        reallocation=reallocation_df,
+    )
+
+    # --------------------------------------------------------
+    # SHADOW MACRO-ALLOCATION SENSITIVITY
+    # Diagnostic only: never changes weights or transactions.
+    # --------------------------------------------------------
+    macro_assessment = market_risk_assessment.get(
+        "macro_risk_assessment", {}
+    )
+    macro_news = market_risk_assessment.get(
+        "macro_news_assessment", {}
+    )
+
+    macro_theme_names = (
+        "INTEREST_RATES",
+        "INFLATION",
+        "AI_BORROWING_AND_CREDIT",
+        "MARKET_DOWNTURN",
+        "TRADE_AND_GEOPOLITICS",
+    )
+
+    structured_theme_evidence = (
+        market_risk_assessment.get("macro_theme_evidence", [])
+    )
+    # Headline matches are review signals, not validated risk evidence.
+    macro_category_by_theme = {
+        "INTEREST_RATES": {"CENTRAL_BANK_AND_RATES"},
+        "INFLATION": {"INFLATION"},
+        "AI_BORROWING_AND_CREDIT": {"CREDIT_AND_FINANCIAL_STABILITY"},
+        "MARKET_DOWNTURN": {"GROWTH_AND_EMPLOYMENT"},
+        "TRADE_AND_GEOPOLITICS": {"TRADE_AND_GEOPOLITICS"},
+    }
+
+    other_macro_categories = {
+        "TRADE_AND_GEOPOLITICS",
+        "ENERGY_AND_COMMODITIES",
+    }
+    available_themes = {
+        str(item.get("theme", "")).strip().upper()
+        for item in structured_theme_evidence
+        if isinstance(item, dict)
+        and item.get("theme")
+        and item.get("source")
+        and item.get("observed_at")
+    }
+
+    macro_items = macro_news.get("items", [])
+    headline_signals = {}
+
+    for theme, categories in macro_category_by_theme.items():
+        matches = []
+        for item in macro_items:
+            if not isinstance(item, dict):
+                continue
+
+            # Match against the current item's headline, never a prior item.
+            headline = str(item.get("Headline", ""))
+            headline_lower = headline.casefold()
+
+            found_categories = {
+                part.strip().upper()
+                for part in str(item.get("Category", "")).split(";")
+            }
+
+            category_match = bool(
+                categories.intersection(found_categories)
+            )
+
+            # Trade/geopolitics headlines can be recognised directly
+            # from their text even if the source category is inconsistent.
+            headline_match = (
+                theme == "TRADE_AND_GEOPOLITICS"
+                and any(
+                    term in headline_lower
+                    for term in (
+                        "sanction", "tariff", "trade war",
+                        "export control", "geopolitic",
+                        "invasion", "blockade",
+                        "shipping disruption",
+                        "supply chain disruption",
+                        "supply-chain disruption",
+                        "military conflict",
+                    )
+                )
+            )
+
+            if not category_match and not headline_match:
+                continue
+
+            # Require explicit AI/data-centre financing language for
+            # the AI borrowing theme; generic credit headlines do not count.
+            if theme == "AI_BORROWING_AND_CREDIT" and not any(
+                term in headline_lower
+                for term in (
+                    "artificial intelligence", " ai ", "data center",
+                    "data centre", "gpu", "borrowing", "debt financing",
+                    "capex", "capital expenditure",
+                )
+            ):
+                continue
+
+            # Require explicit downturn language rather than general
+            # growth or employment news.
+            if theme == "MARKET_DOWNTURN" and not any(
+                term in headline_lower
+                for term in (
+                    "recession", "economic contraction", "market downturn",
+                    "market selloff", "market sell-off", "bear market",
+                    "economic slowdown",
+                )
+            ):
+                continue
+
+            matches.append({
+                "Headline": headline,
+                "Published Date": item.get("Published Date"),
+                "Source": item.get("Source"),
+                "Related Tickers": item.get("Related Tickers", []),
+            })
+
+        headline_signals[theme] = {
+            "status": (
+                "HEADLINE SIGNAL FOUND"
+                if matches else "NO HEADLINE SIGNAL FOUND"
+            ),
+            "matched_headlines": matches,
+            "validated_evidence_available": theme in available_themes,
+            "advisory_only": True,
+        }
+
+    other_macro_headline_signals = [
+        {
+            "Category": item.get("Category"),
+            "Headline": item.get("Headline"),
+            "Related Tickers": item.get("Related Tickers", []),
+            "Published Date": item.get("Published Date"),
+            "Source": item.get("Source"),
+            "Status": "UNVALIDATED REVIEW SIGNAL",
+            "Advisory Only": True,
+        }
+        for item in macro_items
+        if isinstance(item, dict)
+        and other_macro_categories.intersection(
+            part.strip().upper()
+            for part in str(item.get("Category", "")).split(";")
+        )
+        and not any(
+            categories.intersection(
+                part.strip().upper()
+                for part in str(item.get("Category", "")).split(";")
+            )
+            for categories in macro_category_by_theme.values()
+        )
+    ]
+
+    baseline_by_ticker = {}
+    if not reallocation_df.empty:
+        for _, transaction in reallocation_df.iterrows():
+            ticker = clean_ticker(
+                transaction.get("Destination Ticker", "")
+            )
+            if ticker:
+                baseline_by_ticker[ticker] = round(
+                    baseline_by_ticker.get(ticker, 0.0)
+                    + safe_float(
+                        transaction.get("Reallocated Capital", 0)
+                    ),
+                    2,
+                )
+
+    shadow_sensitivity_rows = []
+    for destination in deployment_destinations:
+        ticker = clean_ticker(destination.get("Ticker", ""))
+        if not ticker:
+            continue
+
+        shadow_sensitivity_rows.append({
+            "Ticker": ticker,
+            "Sector": destination.get("Sector", ""),
+            "Industry": destination.get("Industry", ""),
+            "Baseline Allocation": baseline_by_ticker.get(ticker, 0.0),
+            "Macro Themes Assessed": ", ".join(
+                theme for theme in macro_theme_names
+                if theme in available_themes
+            ) or "NONE",
+            "Evidence Status": (
+                "STRUCTURED THEME EVIDENCE AVAILABLE"
+                if available_themes
+                else "INSUFFICIENT STRUCTURED THEME EVIDENCE"
+            ),
+            "Counterfactual Allocation": None,
+            "Allocation Difference": None,
+            "Adjustment Applied": False,
+            "Reason": (
+                "No calibrated, evidence-backed macro adjustment is "
+                "authorised; baseline allocation retained."
+            ),
+            "Advisory Only": True,
+        })
+
+    market_risk_assessment["shadow_allocation_sensitivity"] = {
+        "mode": "SHADOW",
+        "advisory_only": True,
+        "production_allocation_changed": False,
+        "macro_theme_evidence_available": sorted(available_themes),
+        "headline_signals_by_theme": headline_signals,
+        "other_macro_headline_signals": other_macro_headline_signals,
+        "required_themes": list(macro_theme_names),
+        "unassessed_themes": [
+            theme for theme in macro_theme_names
+            if theme not in available_themes
+        ],
+        "destinations": shadow_sensitivity_rows,
+        "limitations": [
+            "Counterfactual allocations remain unset until theme evidence, "
+            "exposure mapping and adjustment magnitudes are validated.",
+            "A headline keyword match alone is not sufficient evidence "
+            "to reduce a destination allocation.",
+        ],
+    }
+
+    print("\\nSHADOW MACRO-ALLOCATION SENSITIVITY")
+    print(
+        pd.DataFrame(shadow_sensitivity_rows).to_string(index=False)
+        if shadow_sensitivity_rows
+        else "No proposed destinations available for sensitivity review."
+    )
+
+    print("\nSHADOW MARKET AND PORTFOLIO RISK ASSESSMENT")
+    print("\nCURRENT PORTFOLIO EXPOSURE COVERAGE")
+    coverage_rows = [
+        item
+        for item in market_risk_assessment.get("classification_coverage", [])
+        if item.get("portfolio_state") == "CURRENT"
+    ]
+    if coverage_rows:
+        print(pd.DataFrame(coverage_rows).to_string(index=False))
+    else:
+        print("No current exposure coverage records returned.")
+
+    print("\nKNOWN ETF HOLDINGS — LOOK-THROUGH STATUS")
+    etf_rows = market_risk_assessment.get("known_etf_holdings", [])
+    if etf_rows:
+        print(pd.DataFrame(etf_rows).to_string(index=False))
+    else:
+        print("No ETF holdings identified.")
+    print("Mode:", market_risk_assessment["mode"])
+    print("Macro Risk Status:", market_risk_assessment["macro_risk_status"])
+    print(
+        "Market Stress Status:",
+        market_risk_assessment.get("market_stress_status", "UNASSESSED"),
+    )
+
+    macro_assessment = market_risk_assessment.get("macro_risk_assessment", {})
+    macro_news = market_risk_assessment.get("macro_news_assessment", {})
+    print("\nMACRO NEWS RISK WARNINGS")
+    print("Status:", macro_news.get("status", "UNASSESSED"))
+    print("As of:", macro_news.get("as_of"))
+    print("Summary:", macro_news.get("summary", "No macro news assessment returned."))
+    macro_news_items = macro_news.get("items", [])
+    if macro_news_items:
+        print(pd.DataFrame(macro_news_items).to_string(index=False))
+    else:
+        print("No macro-news warning rows available.")
+    for limitation in macro_news.get("limitations", []):
+        print("Limitation:", limitation)
+
+    print("\nMACRO RISK PROXY ASSESSMENT")
+    print("Status:", macro_assessment.get("status", "UNASSESSED"))
+    print("As of:", macro_assessment.get("as_of"))
+    print("Summary:", macro_assessment.get("summary", "No macro assessment returned."))
+    macro_rows = macro_assessment.get("indicators", [])
+    if macro_rows:
+        print(pd.DataFrame(macro_rows).to_string(index=False))
+    print("Historical pre-trade status:", macro_assessment.get("historical_pre_trade_status", "NOT_ASSESSED"))
+    print("Historical pre-trade limitation:", macro_assessment.get("historical_pre_trade_reason", "Not available."))
+
+    for section, title in (
+        ("market_stress_indicators", "BROAD-MARKET STRESS INDICATORS"),
+        ("candidate_macro_reviews", "CANDIDATE MACRO SENSITIVITY REVIEWS"),
+        ("holding_market_sensitivity", "HOLDING MARKET SENSITIVITY"),
+        ("correlated_holding_clusters", "CORRELATED HOLDING PAIRS"),
+        ("holding_market_sensitivity_unavailable", "HOLDING PRICE DATA GAPS"),
+        ("portfolio_concentration", "PORTFOLIO CONCENTRATION"),
+        ("company_risk_flags", "COMPANY RISK FLAGS"),
+        ("transaction_risk_reviews", "TRANSACTION RISK REVIEWS"),
+        ("recommendations", "RISK RECOMMENDATIONS"),
+        ("limitations", "RISK ASSESSMENT LIMITATIONS"),
+    ):
+        print(f"\n{title}")
+
+        items = market_risk_assessment.get(section, [])
+
+        if items:
+            print(pd.DataFrame(items).to_string(index=False))
+        else:
+            print("None reported.")
+
+    print("\nRISK ASSESSMENT DATA QUALITY")
+    print(
+        pd.DataFrame([
+            {
+                "Check": check,
+                "Available": available,
+            }
+            for check, available
+            in market_risk_assessment["data_quality"].items()
+        ]).to_string(index=False)
+    )
+
+    # ========================================================
     # RETURN
     # ========================================================
 
@@ -3351,4 +6897,5 @@ def generate_portfolio_reallocation(
         "reallocation": reallocation_df,
         "summary": summary,
         "audit": reallocation_audit,
+        "market_risk_assessment": market_risk_assessment,
     }

@@ -5757,6 +5757,8 @@ def create_report(
         # Extract reallocation detail and summary safely.
         # -----------------------------------------------------
 
+        market_risk_assessment = {}
+
         if isinstance(
 
             portfolio_reallocation,
@@ -5787,6 +5789,10 @@ def create_report(
 
                 )
 
+            )
+
+            market_risk_assessment = portfolio_reallocation.get(
+                "market_risk_assessment", {}
             )
 
             reallocation_audit = (
@@ -6227,6 +6233,276 @@ def create_report(
             )
 
         # =====================================================
+        # =====================================================
+        # =====================================================
+        # CONSOLIDATED PORTFOLIO RISK ASSESSMENT
+        # Advisory only: does not change allocation decisions.
+        # =====================================================
+
+        print("Creating Portfolio Risk Assessment")
+
+        risk_sheet = "Portfolio Risk Assessment"
+        risk_row = 0
+
+        if not isinstance(market_risk_assessment, dict):
+            market_risk_assessment = {}
+
+        def risk_frame(data, empty_message):
+            """Convert assessment content into a worksheet-ready DataFrame."""
+            if isinstance(data, pd.DataFrame):
+                frame = data.copy()
+            elif isinstance(data, dict):
+                frame = pd.DataFrame([
+                    {"Item": key, "Value": value}
+                    for key, value in data.items()
+                ])
+            elif isinstance(data, list):
+                frame = pd.DataFrame(data)
+            elif isinstance(data, str):
+                frame = pd.DataFrame({"Detail": [data]})
+            else:
+                frame = pd.DataFrame()
+
+            if frame.empty:
+                return pd.DataFrame({"Status": [empty_message]})
+
+            return frame
+
+        def write_risk_section(title, data, empty_message):
+            """Append a titled section to the consolidated worksheet."""
+            nonlocal risk_row
+
+            pd.DataFrame({"Section": [title]}).to_excel(
+                writer,
+                sheet_name=risk_sheet,
+                startrow=risk_row,
+                index=False,
+            )
+            risk_row += 2
+
+            frame = risk_frame(data, empty_message)
+            frame.to_excel(
+                writer,
+                sheet_name=risk_sheet,
+                startrow=risk_row,
+                index=False,
+            )
+            risk_row += len(frame) + 3
+
+        print("  Assessment keys:", list(market_risk_assessment.keys()))
+
+        overview = pd.DataFrame([{
+            "Mode": market_risk_assessment.get("mode", "NOT ASSESSED"),
+            "Macro Risk Status": market_risk_assessment.get(
+                "macro_risk_status", "NOT ASSESSED"
+            ),
+            "Assessment Scope": "Advisory only",
+            "Production Decisions Changed": False,
+            "Assessment Object Available": bool(market_risk_assessment),
+        }])
+
+        write_risk_section(
+            "RISK OVERVIEW AND GOVERNANCE",
+            overview,
+            "Risk overview unavailable — NOT ASSESSED",
+        )
+
+        # Present actionable recommendations before detailed diagnostics.
+        recommendations = market_risk_assessment.get("recommendations", [])
+        priority_actions = []
+
+        priority_by_action = {
+            "REVIEW_PROPOSED_TRANSACTION": "HIGH",
+            "INVESTIGATE_COMPANY_RISK": "MEDIUM",
+            "REVIEW_DATA_GAP": "MEDIUM",
+            "ASSESS_TRANSACTION_RISK": "MEDIUM",
+        }
+
+        for recommendation in recommendations:
+            if not isinstance(recommendation, dict):
+                continue
+
+            action = recommendation.get("action", "REVIEW_RISK")
+
+            priority_actions.append({
+                "Priority": priority_by_action.get(action, "MEDIUM"),
+                "Action Required": action.replace("_", " "),
+                "Holding / Transaction": recommendation.get("subject", ""),
+                "Amount": recommendation.get("reallocated_capital"),
+                "Reason": recommendation.get("reason", ""),
+                "Evidence Status": (
+                    "REVIEW REQUIRED"
+                    if action in {
+                        "REVIEW_PROPOSED_TRANSACTION",
+                        "INVESTIGATE_COMPANY_RISK",
+                    }
+                    else "ASSESSMENT REQUIRED"
+                ),
+                "Evidence Type": recommendation.get("evidence_type", ""),
+                "Confidence": recommendation.get("confidence", "NOT ASSESSED"),
+                "Advisory Only": recommendation.get("advisory_only", True),
+            })
+
+        priority_actions.sort(
+            key=lambda item: (
+                {"HIGH": 0, "MEDIUM": 1}.get(item["Priority"], 2),
+                item["Holding / Transaction"],
+            )
+        )
+
+        write_risk_section(
+            "INDIVIDUAL STOCK RISK ASSESSMENT",
+            market_risk_assessment.get("individual_stock_assessments", []),
+            "No individual-stock assessment rows are available",
+        )
+
+        write_risk_section(
+            "EXPOSURE CONSISTENCY VALIDATION",
+            market_risk_assessment.get("exposure_validation", []),
+            "No exposure validation results are available",
+        )
+
+        write_risk_section(
+            "EXPOSURE COVERAGE — CLASSIFIED VS UNCLASSIFIED",
+            market_risk_assessment.get("classification_coverage", []),
+            "No exposure classification coverage data available",
+        )
+
+        write_risk_section(
+            "EXPOSURE COMPARISON — CURRENT VS PROPOSED ESTIMATE",
+            market_risk_assessment.get("portfolio_exposure_comparison", []),
+            "No current/proposed exposure comparison available",
+        )
+
+        write_risk_section(
+            "CURRENT CONCENTRATION WARNINGS — OBSERVED",
+            market_risk_assessment.get("portfolio_concentration", []),
+            "No current concentration warnings recorded",
+        )
+
+        write_risk_section(
+            "PROPOSED CONCENTRATION WARNINGS — ESTIMATED",
+            market_risk_assessment.get("proposed_portfolio_concentration", []),
+            "No proposed concentration warnings recorded",
+        )
+
+        write_risk_section(
+            "ETF LOOK-THROUGH GAPS — NOT ASSESSED",
+            market_risk_assessment.get("known_etf_holdings", []),
+            "No ETF look-through status data available",
+        )
+
+        write_risk_section(
+            "DATA GAPS — MISSING INTELLIGENCE",
+            [
+                item for item in market_risk_assessment.get("recommendations", [])
+                if item.get("action") == "REVIEW_DATA_GAP"
+            ],
+            "No missing-intelligence warnings recorded",
+        )
+
+        write_risk_section(
+            "MACRO NEWS RISK WARNINGS",
+            market_risk_assessment.get("macro_news_assessment", {}).get("items", []),
+            "No macro-related headlines matched, or Market Intelligence news was unavailable",
+        )
+
+        write_risk_section(
+            "PRIORITY ACTIONS — REVIEW BEFORE REALLOCATION",
+            priority_actions,
+            "No risk recommendations generated — check assessment coverage.",
+        )
+
+
+        write_risk_section(
+            "COMPANY RISK FLAGS",
+            market_risk_assessment.get("company_risk_flags", []),
+            "No company risk records available — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "PROPOSED TRANSACTION RISK",
+            market_risk_assessment.get("transaction_risk_reviews", []),
+            "No transaction risk records available — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "RISK RECOMMENDATIONS",
+            market_risk_assessment.get("recommendations", []),
+            "No risk recommendations supplied — absence of recommendations does not indicate low risk",
+        )
+
+        write_risk_section(
+            "DATA QUALITY AND EVIDENCE AVAILABILITY",
+            market_risk_assessment.get("data_quality", {}),
+            "No data-quality checks available — NOT ASSESSED",
+        )
+
+        limitations = market_risk_assessment.get("limitations", [])
+
+        if isinstance(limitations, str):
+            limitations = [{"Limitation": limitations}]
+        elif isinstance(limitations, dict):
+            limitations = [
+                {"Limitation": key, "Detail": value}
+                for key, value in limitations.items()
+            ]
+        elif isinstance(limitations, list):
+            limitations = [
+                item if isinstance(item, dict) else {"Limitation": str(item)}
+                for item in limitations
+            ]
+
+        write_risk_section(
+            "LIMITATIONS AND UNASSESSED RISKS",
+            limitations,
+            "No limitations supplied; this does not confirm "
+            "that all material risks were assessed",
+        )
+
+        try:
+            from openpyxl.styles import Font, PatternFill, Alignment
+
+            worksheet = writer.sheets[risk_sheet]
+            worksheet.freeze_panes = "A2"
+
+            for column_cells in worksheet.columns:
+                column_letter = column_cells[0].column_letter
+                max_length = max(
+                    (
+                        len(str(cell.value))
+                        for cell in column_cells
+                        if cell.value is not None
+                    ),
+                    default=10,
+                )
+                worksheet.column_dimensions[column_letter].width = min(
+                    max(max_length + 2, 14), 45
+                )
+
+            for row_cells in worksheet.iter_rows():
+                first_value = row_cells[0].value
+
+                if first_value == "Section":
+                    for cell in row_cells:
+                        cell.font = Font(bold=True, color="FFFFFF")
+                        cell.fill = PatternFill(
+                            fill_type="solid",
+                            fgColor="1F4E78",
+                        )
+
+                elif any(cell.value is not None for cell in row_cells):
+                    for cell in row_cells:
+                        cell.alignment = Alignment(
+                            vertical="top",
+                            wrap_text=True,
+                        )
+
+        except Exception as exc:
+            print("Portfolio Risk Assessment formatting warning:", exc)
+
+        print("Portfolio Risk Assessment sheet created")
+
         # STOCK RANKINGS
         # =====================================================
 

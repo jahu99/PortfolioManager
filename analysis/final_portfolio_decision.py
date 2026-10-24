@@ -1184,14 +1184,32 @@ def build_eligible_population(
                     continue
 
                 # ------------------------------------------------
-                # All other allocator fields retain existing
-                # behaviour.
+                # Preserve authoritative existing-holding data.
+                #
+                # Portfolio holdings remain the source of truth
+                # for position identity, value and classification.
+                # Capital Allocation must not overwrite them.
                 # ------------------------------------------------
 
-                if key not in base or is_missing(base.get(key)):
-                    base[key] = value
-                else:
-                    base[key] = value
+                authoritative_holding_fields = {
+                    "Ticker",
+                    "Name",
+                    "Shares",
+                    "Quantity",
+                    "Current Value",
+                    "Market Value",
+                    "Allocation %",
+                    "Sector",
+                    "Industry",
+                    "Country",
+                    "Type",
+                    "Asset Type",
+                }
+
+                if key in authoritative_holding_fields:
+                    continue
+
+                base[key] = value
 
         # --------------------------------------------------------
         # FINAL REPAIR FOR EXISTING STOCKS
@@ -5993,8 +6011,10 @@ def generate_final_portfolio_decisions(
         )
     }
 
-    for result in buy_new_results:
-
+    for slot_position, result in enumerate(
+        buy_new_results,
+        start=1,
+    ):
         ticker = safe_text(
             result.get(
                 "Ticker",
@@ -6003,8 +6023,32 @@ def generate_final_portfolio_decisions(
             "",
         ).upper()
 
+        # Preserve evidence behind the portfolio-level decision.
+        result["BUY NEW Slot Limit"] = (
+            MAX_FINAL_BUY_NEW_DECISIONS
+        )
+        result["BUY NEW Slot Selection Position"] = (
+            slot_position
+        )
+        result["Investment Score Threshold"] = 75.0
+
         if ticker in selected_buy_new_tickers:
+            result["BUY NEW Selection Outcome"] = "SELECTED"
+            result["BUY NEW Selection Reason"] = (
+                "Selected within the maximum portfolio BUY NEW "
+                "allocation slots."
+            )
             continue
+
+        result["BUY NEW Selection Outcome"] = "NOT SELECTED"
+        result["BUY NEW Selection Reason"] = (
+            f"Governed BUY NEW was not selected: portfolio "
+            f"selection position {slot_position} exceeded the "
+            f"maximum of {MAX_FINAL_BUY_NEW_DECISIONS} slots. "
+            f"Investment Score was "
+            f"{result.get('Investment Score', 'UNKNOWN')}; "
+            f"the minimum Investment Score threshold remains 75."
+        )
 
         # The governed AI chain independently reached BUY NEW,
         # but this candidate did not receive one of the available
@@ -6208,6 +6252,18 @@ def generate_final_portfolio_decisions(
                 )
             ),
         )
+
+        # Preserve portfolio-level BUY NEW selection evidence.
+        for field in (
+            "BUY NEW Priority Rank",
+            "BUY NEW Slot Limit",
+            "BUY NEW Slot Selection Position",
+            "BUY NEW Selection Outcome",
+            "BUY NEW Selection Reason",
+            "Investment Score Threshold",
+        ):
+            if field in result:
+                final_result[field] = result[field]
 
         # ----------------------------------------------------
         # Portfolio-level BUY NEW slot selection is authoritative
@@ -6455,6 +6511,12 @@ def generate_final_portfolio_decisions(
         "Released Capital",
         "Funding Source",
         "Investment Rank",
+        "BUY NEW Priority Rank",
+        "BUY NEW Slot Selection Position",
+        "BUY NEW Slot Limit",
+        "Investment Score Threshold",
+        "BUY NEW Selection Outcome",
+        "BUY NEW Selection Reason",
         "Reduction Rank",
         "Evidence Score",
         "Evidence Strength",

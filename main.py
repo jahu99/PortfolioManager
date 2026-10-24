@@ -2256,7 +2256,8 @@ def main():
 
         portfolio_reallocation = generate_portfolio_reallocation(
             final_portfolio_decisions=final_portfolio_decisions,
-            portfolio_value=portfolio_summary["Current Value"].sum()
+            portfolio_value=portfolio_summary["Current Value"].sum(),
+            market_intelligence=market_intelligence,
         )
 
         print(

@@ -226,22 +226,40 @@ def build_reallocation_audit(
             )
         )
 
-        sector_exposure = _safe_float(
+        sector_exposure_raw = audit_destination.get(
+            "Sector Exposure %",
             destination.get(
                 "Sector Exposure %",
-                0
+                None
             )
         )
 
-        structural_risk = destination.get(
+        sector_exposure = None
+
+        if sector_exposure_raw is not None:
+            try:
+                if not pd.isna(sector_exposure_raw):
+                    sector_exposure = float(
+                        sector_exposure_raw
+                    )
+            except (TypeError, ValueError):
+                sector_exposure = None
+
+        structural_risk = audit_destination.get(
             "Structural Risk",
-            "LOW"
+            destination.get(
+                "Structural Risk",
+                "LOW"
+            )
         )
 
         structural_risk_multiplier = _safe_float(
-            destination.get(
+            audit_destination.get(
                 "Structural Risk Multiplier",
-                1.0
+                destination.get(
+                    "Structural Risk Multiplier",
+                    1.0
+                )
             ),
             1.0
         )
@@ -382,9 +400,10 @@ def build_reallocation_audit(
                     "Sector",
                     ""
                 ),
-                "Sector Exposure %": round(
-                    sector_exposure,
-                    2
+                "Sector Exposure %": (
+                    round(sector_exposure, 2)
+                    if sector_exposure is not None
+                    else None
                 ),
                 "Position Capacity": round(
                     position_capacity,
@@ -615,6 +634,30 @@ def build_reallocation_audit(
             _safe_float(
                 summary.get(
                     "Unallocated Capital",
+                    0
+                )
+            ),
+            2
+        ),
+        "Reconciliation Variance": round(
+            _safe_float(
+                summary.get(
+                    "Reconciliation Variance",
+                    0
+                )
+            ),
+            2
+        ),
+        "Reconciliation Status": str(
+            summary.get(
+                "Reconciliation Status",
+                "UNAVAILABLE"
+            ) or "UNAVAILABLE"
+        ),
+        "Exposure Denominator": round(
+            _safe_float(
+                summary.get(
+                    "Exposure Denominator",
                     0
                 )
             ),
