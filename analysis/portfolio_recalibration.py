@@ -966,10 +966,12 @@ def _build_price_deterioration_assessment(ticker):
         return result
 
 def _build_macro_regime_assessment():
-    """Assess a small set of cache-only macro-risk proxies for SHADOW review.
+    """Assess cache-only macro-risk proxies for SHADOW review.
 
-    These proxies are not a complete macroeconomic model. Missing or stale
-    inputs remain UNASSESSED; this function never refreshes market data.
+    The three original indicators determine the composite regime.
+    Additional yield and yield-curve indicators are diagnostic only.
+    Missing or stale inputs remain UNASSESSED; this function never
+    refreshes market data.
     """
     from data import market_data
 
@@ -993,34 +995,69 @@ def _build_macro_regime_assessment():
     def load_closes(ticker):
         if ticker in cache:
             return cache[ticker]
+
         path = market_data._cache_file(ticker, "1y")
         if not os.path.exists(path):
-            cache[ticker] = (None, "No cached history; network refresh skipped.")
+            cache[ticker] = (
+                None,
+                "No cached history; network refresh skipped.",
+            )
             return cache[ticker]
+
         try:
             frame = pd.read_parquet(path)
+
             if frame is None or frame.empty or "Close" not in frame.columns:
-                cache[ticker] = (None, "Cached history has no usable Close column.")
+                cache[ticker] = (
+                    None,
+                    "Cached history has no usable Close column.",
+                )
                 return cache[ticker]
+
             frame = frame.copy()
             frame.index = pd.to_datetime(frame.index, errors="coerce")
             frame = frame.loc[~frame.index.isna()].sort_index()
             frame = frame.loc[~frame.index.duplicated(keep="last")]
-            price_column = "Adj Close" if ticker not in {"^TNX", "CL=F"} and "Adj Close" in frame.columns else "Close"
-            closes = pd.to_numeric(frame[price_column], errors="coerce").dropna()
+
+            price_column = (
+                "Adj Close"
+                if ticker not in {"^TNX", "^IRX", "^FVX", "CL=F"}
+                and "Adj Close" in frame.columns
+                else "Close"
+            )
+
+            closes = pd.to_numeric(
+                frame[price_column],
+                errors="coerce",
+            ).dropna()
+
             if closes.empty:
-                cache[ticker] = (None, "No valid cached closing observations.")
+                cache[ticker] = (
+                    None,
+                    "No valid cached closing observations.",
+                )
                 return cache[ticker]
+
             latest_date = pd.Timestamp(closes.index[-1])
             if latest_date.tzinfo is not None:
                 latest_date = latest_date.tz_localize(None)
+
             if (today - latest_date.normalize()).days > 5:
-                cache[ticker] = (None, f"Cached data stale; latest observation {latest_date:%Y-%m-%d}.")
+                cache[ticker] = (
+                    None,
+                    f"Cached data stale; latest observation "
+                    f"{latest_date:%Y-%m-%d}.",
+                )
                 return cache[ticker]
+
             cache[ticker] = (closes, None)
             return cache[ticker]
+
         except Exception as exc:
-            cache[ticker] = (None, f"Cache read failed: {type(exc).__name__}.")
+            cache[ticker] = (
+                None,
+                f"Cache read failed: {type(exc).__name__}.",
+            )
             return cache[ticker]
 
     def base_indicator(name, proxy, ticker_list, metric):
@@ -1035,154 +1072,404 @@ def _build_macro_regime_assessment():
             "Threshold Basis": "PROVISIONAL SHADOW REVIEW THRESHOLDS",
             "Evidence": "",
             "Advisory Only": True,
+            "Regime Contribution": True,
         }
 
-    # 10-year Treasury yield: ^TNX is quoted in yield percentage points.
+    # ------------------------------------------------------------
+    # COMPOSITE INDICATOR 1: US 10-YEAR TREASURY YIELD CHANGE
+    # ------------------------------------------------------------
+
     row = base_indicator(
         "US 10-year Treasury yield change",
         "^TNX cached close; yield-change proxy, not a complete rate outlook",
         "^TNX",
         "20-session change (basis points)",
     )
+
     closes, error = load_closes("^TNX")
+
     if closes is None:
         row["Evidence"] = error
+
     elif len(closes) < 21 or float(closes.iloc[-21]) <= 0:
-        row["Evidence"] = f"Insufficient cached history: {len(closes)} observations; need 21."
+        row["Evidence"] = (
+            f"Insufficient cached history: {len(closes)} observations; "
+            "need 21."
+        )
+
     else:
         latest = float(closes.iloc[-1])
         change_bps = (latest - float(closes.iloc[-21])) * 100.0
-        row["Observation Date"] = pd.Timestamp(closes.index[-1]).strftime("%Y-%m-%d")
+
+        row["Observation Date"] = pd.Timestamp(
+            closes.index[-1]
+        ).strftime("%Y-%m-%d")
         row["Value"] = round(change_bps, 1)
+
         if change_bps >= 60:
             row["Status"] = "HIGH RISK SIGNAL"
         elif change_bps >= 35:
             row["Status"] = "ELEVATED RISK SIGNAL"
         else:
             row["Status"] = "NO CONFIGURED THRESHOLD BREACH"
+
         row["Evidence"] = (
-            f"20-session yield change {change_bps:+.1f} bps; provisional review "
-            "threshold +35 bps and high-risk threshold +60 bps."
+            f"20-session yield change {change_bps:+.1f} bps; provisional "
+            "review threshold +35 bps and high-risk threshold +60 bps."
         )
+
     result["indicators"].append(row)
 
-    # Oil: a sharp increase can add inflation/cost pressure, but is not
-    # interpreted as universally negative for every company or sector.
+    # ------------------------------------------------------------
+    # COMPOSITE INDICATOR 2: CRUDE OIL PRICE CHANGE
+    # ------------------------------------------------------------
+
     row = base_indicator(
         "Crude oil price change",
         "CL=F cached close; energy-price/inflation-pressure proxy",
         "CL=F",
         "20-session return (%)",
     )
+
     closes, error = load_closes("CL=F")
+
     if closes is None:
         row["Evidence"] = error
+
     elif len(closes) < 21 or float(closes.iloc[-21]) <= 0:
-        row["Evidence"] = f"Insufficient cached history: {len(closes)} observations; need 21."
+        row["Evidence"] = (
+            f"Insufficient cached history: {len(closes)} observations; "
+            "need 21."
+        )
+
     else:
         latest = float(closes.iloc[-1])
-        change_pct = (latest / float(closes.iloc[-21]) - 1.0) * 100.0
-        row["Observation Date"] = pd.Timestamp(closes.index[-1]).strftime("%Y-%m-%d")
+        change_pct = (
+            latest / float(closes.iloc[-21]) - 1.0
+        ) * 100.0
+
+        row["Observation Date"] = pd.Timestamp(
+            closes.index[-1]
+        ).strftime("%Y-%m-%d")
         row["Value"] = round(change_pct, 2)
+
         if change_pct >= 20:
             row["Status"] = "HIGH RISK SIGNAL"
         elif change_pct >= 10:
             row["Status"] = "ELEVATED RISK SIGNAL"
         else:
             row["Status"] = "NO CONFIGURED THRESHOLD BREACH"
+
         row["Evidence"] = (
-            f"20-session crude-oil return {change_pct:+.2f}%; provisional review "
-            "threshold +10% and high-risk threshold +20%. An oil-price rise can "
-            "affect sectors differently."
+            f"20-session crude-oil return {change_pct:+.2f}%; provisional "
+            "review threshold +10% and high-risk threshold +20%. An "
+            "oil-price rise can affect sectors differently."
         )
+
     result["indicators"].append(row)
 
-    # High-yield versus investment-grade bond ETF relative performance is only
-    # a credit-risk-appetite proxy; it is not a measured credit spread.
+    # ------------------------------------------------------------
+    # COMPOSITE INDICATOR 3: CREDIT-RISK APPETITE PROXY
+    # HYG/LQD is not a direct credit-spread measurement.
+    # ------------------------------------------------------------
+
     row = base_indicator(
         "Credit-risk appetite proxy",
         "HYG relative to LQD cached 20-session returns; not a measured credit spread",
         "HYG; LQD",
         "HYG return minus LQD return (percentage points)",
     )
+
     hyg, hyg_error = load_closes("HYG")
     lqd, lqd_error = load_closes("LQD")
+
     if hyg is None or lqd is None:
-        row["Evidence"] = "; ".join(error for error in (hyg_error, lqd_error) if error)
-    elif len(hyg) < 21 or len(lqd) < 21 or float(hyg.iloc[-21]) <= 0 or float(lqd.iloc[-21]) <= 0:
-        row["Evidence"] = "Insufficient cached history for both HYG and LQD; need 21 observations each."
+        row["Evidence"] = "; ".join(
+            error for error in (hyg_error, lqd_error) if error
+        )
     else:
-        hyg_return = (float(hyg.iloc[-1]) / float(hyg.iloc[-21]) - 1.0) * 100.0
-        lqd_return = (float(lqd.iloc[-1]) / float(lqd.iloc[-21]) - 1.0) * 100.0
-        relative = hyg_return - lqd_return
-        hyg_date = pd.Timestamp(hyg.index[-1])
-        lqd_date = pd.Timestamp(lqd.index[-1])
-        if hyg_date.tzinfo is not None:
-            hyg_date = hyg_date.tz_localize(None)
-        if lqd_date.tzinfo is not None:
-            lqd_date = lqd_date.tz_localize(None)
-        if abs((hyg_date.normalize() - lqd_date.normalize()).days) > 3:
+        # Align both series on identical observation dates.
+        hyg_series = hyg.copy()
+        lqd_series = lqd.copy()
+
+        hyg_index = pd.DatetimeIndex(
+            pd.to_datetime(hyg_series.index, errors="coerce")
+        )
+        lqd_index = pd.DatetimeIndex(
+            pd.to_datetime(lqd_series.index, errors="coerce")
+        )
+
+        if hyg_index.tz is not None:
+            hyg_index = hyg_index.tz_localize(None)
+        if lqd_index.tz is not None:
+            lqd_index = lqd_index.tz_localize(None)
+
+        hyg_series.index = hyg_index
+        lqd_series.index = lqd_index
+
+        hyg_series = hyg_series.loc[~hyg_series.index.isna()]
+        lqd_series = lqd_series.loc[~lqd_series.index.isna()]
+
+        # Recheck uniqueness after timezone normalisation.
+        hyg_series = hyg_series.loc[
+            ~hyg_series.index.duplicated(keep="last")
+        ].sort_index()
+        lqd_series = lqd_series.loc[
+            ~lqd_series.index.duplicated(keep="last")
+        ].sort_index()
+
+        common = pd.concat(
+            [
+                hyg_series.rename("HYG"),
+                lqd_series.rename("LQD"),
+            ],
+            axis=1,
+            join="inner",
+        ).dropna().sort_index()
+
+        if len(common) < 21:
             row["Evidence"] = (
-                f"HYG and LQD observations are not date-aligned ({hyg_date:%Y-%m-%d} vs "
-                f"{lqd_date:%Y-%m-%d}); relative performance not assessed."
+                "Insufficient common-date history for HYG and LQD; "
+                "need at least 21 shared observations."
+            )
+        elif (
+            float(common["HYG"].iloc[-21]) <= 0
+            or float(common["LQD"].iloc[-21]) <= 0
+            or float(common["HYG"].iloc[-1]) <= 0
+            or float(common["LQD"].iloc[-1]) <= 0
+        ):
+            row["Evidence"] = (
+                "Invalid starting or ending price in the aligned HYG/LQD "
+                "history; relative performance not assessed."
             )
         else:
-            row["Observation Date"] = min(hyg_date, lqd_date).strftime("%Y-%m-%d")
+            hyg_return = (
+                float(common["HYG"].iloc[-1])
+                / float(common["HYG"].iloc[-21]) - 1.0
+            ) * 100.0
+
+            lqd_return = (
+                float(common["LQD"].iloc[-1])
+                / float(common["LQD"].iloc[-21]) - 1.0
+            ) * 100.0
+
+            relative = hyg_return - lqd_return
+            observation_date = pd.Timestamp(common.index[-1])
+
+            row["Observation Date"] = observation_date.strftime("%Y-%m-%d")
             row["Value"] = round(relative, 2)
+
             if relative <= -6:
                 row["Status"] = "HIGH RISK SIGNAL"
             elif relative <= -3:
                 row["Status"] = "ELEVATED RISK SIGNAL"
             else:
                 row["Status"] = "NO CONFIGURED THRESHOLD BREACH"
+
             row["Evidence"] = (
-                f"HYG 20-session return {hyg_return:+.2f}%; LQD {lqd_return:+.2f}%; "
-                f"relative performance {relative:+.2f} percentage points. Provisional "
-                "review threshold -3 pp and high-risk threshold -6 pp; this is not a "
-                "direct credit-spread measurement."
+                f"HYG 20-session return {hyg_return:+.2f}%; "
+                f"LQD {lqd_return:+.2f}%; relative performance "
+                f"{relative:+.2f} percentage points over common dates "
+                f"({pd.Timestamp(common.index[-21]):%Y-%m-%d} to "
+                f"{observation_date:%Y-%m-%d}). Provisional review "
+                "threshold -3 pp and high-risk threshold -6 pp; this "
+                "is not a direct credit-spread measurement."
             )
+
+    result["indicators"].append(row)
+
+    # ------------------------------------------------------------
+    # COMPOSITE REGIME: ONLY THE THREE ORIGINAL INDICATORS
+    # ------------------------------------------------------------
+
+    regime_indicators = [
+        item
+        for item in result["indicators"]
+        if item.get("Regime Contribution", True)
+    ]
+
+    # --------------------------------------------------------
+    # DIAGNOSTIC-ONLY TREASURY INDICATORS
+    # --------------------------------------------------------
+    # These indicators are advisory-only and do not contribute
+    # to the composite regime classification.
+
+    def append_yield_change_diagnostic(name, ticker):
+        row = base_indicator(
+            name,
+            f"{ticker} cached close; diagnostic-only Treasury yield change",
+            ticker,
+            "20-session change (basis points)",
+        )
+        row["Regime Contribution"] = False
+        row["Threshold Basis"] = "DIAGNOSTIC ONLY — NO REGIME THRESHOLD"
+
+        closes, error = load_closes(ticker)
+
+        if closes is None:
+            row["Evidence"] = error
+        elif len(closes) < 21 or float(closes.iloc[-21]) <= 0:
+            row["Evidence"] = (
+                f"Insufficient cached history: {len(closes)} observations; "
+                "need 21."
+            )
+        else:
+            latest = float(closes.iloc[-1])
+            previous = float(closes.iloc[-21])
+            change_bps = (latest - previous) * 100.0
+
+            row["Observation Date"] = pd.Timestamp(
+                closes.index[-1]
+            ).strftime("%Y-%m-%d")
+            row["Value"] = round(change_bps, 1)
+            row["Status"] = "DIAGNOSTIC ONLY"
+            row["Evidence"] = (
+                f"20-session yield change {change_bps:+.1f} bps. "
+                "Informational only; excluded from regime classification."
+            )
+
+        result["indicators"].append(row)
+
+    append_yield_change_diagnostic(
+        "US 3-month Treasury yield change",
+        "^IRX",
+    )
+    append_yield_change_diagnostic(
+        "US 5-year Treasury yield change",
+        "^FVX",
+    )
+
+    # US 10-year minus 3-month Treasury yield spread.
+    # Yahoo yield tickers are quoted in tenths of a percentage point.
+    row = base_indicator(
+        "US 10-year minus 3-month Treasury yield curve",
+        "^TNX minus ^IRX cached closes; diagnostic-only yield-curve proxy",
+        "^TNX; ^IRX",
+        "Yield spread (percentage points)",
+    )
+    row["Regime Contribution"] = False
+    row["Threshold Basis"] = "DIAGNOSTIC ONLY — NO REGIME THRESHOLD"
+
+    ten_year, ten_year_error = load_closes("^TNX")
+    three_month, three_month_error = load_closes("^IRX")
+
+    if ten_year is None or three_month is None:
+        row["Evidence"] = "; ".join(
+            error
+            for error in (ten_year_error, three_month_error)
+            if error
+        )
+    elif ten_year.empty or three_month.empty:
+        row["Evidence"] = "No usable aligned Treasury yield observations."
+    else:
+        ten_date = pd.Timestamp(ten_year.index[-1])
+        three_date = pd.Timestamp(three_month.index[-1])
+
+        if ten_date.tzinfo is not None:
+            ten_date = ten_date.tz_localize(None)
+        if three_date.tzinfo is not None:
+            three_date = three_date.tz_localize(None)
+
+        if abs(
+            (ten_date.normalize() - three_date.normalize()).days
+        ) > 3:
+            row["Evidence"] = (
+                "Treasury yield observations are not date-aligned "
+                f"({ten_date:%Y-%m-%d} vs {three_date:%Y-%m-%d}); "
+                "yield spread not assessed."
+            )
+        else:
+            spread = (
+                float(ten_year.iloc[-1])
+                - float(three_month.iloc[-1])
+            ) / 10.0
+
+            row["Observation Date"] = min(
+                ten_date, three_date
+            ).strftime("%Y-%m-%d")
+            row["Value"] = round(spread, 3)
+            row["Status"] = "DIAGNOSTIC ONLY"
+            row["Evidence"] = (
+                f"10-year minus 3-month yield spread {spread:+.3f} "
+                "percentage points. Informational only; excluded from "
+                "regime classification."
+            )
+
     result["indicators"].append(row)
 
     assessed = [
-        item for item in result["indicators"]
+        item
+        for item in result["indicators"]
         if item["Status"] != "UNASSESSED"
     ]
-    high_count = sum(item["Status"] == "HIGH RISK SIGNAL" for item in assessed)
-    elevated_count = sum(item["Status"] == "ELEVATED RISK SIGNAL" for item in assessed)
+
+    regime_assessed = [
+        item
+        for item in regime_indicators
+        if item["Status"] != "UNASSESSED"
+    ]
+
+    high_count = sum(
+        item["Status"] == "HIGH RISK SIGNAL"
+        for item in regime_assessed
+    )
+    elevated_count = sum(
+        item["Status"] == "ELEVATED RISK SIGNAL"
+        for item in regime_assessed
+    )
+
     result["assessed_indicator_count"] = len(assessed)
     result["indicator_count"] = len(result["indicators"])
+    result["regime_indicator_count"] = len(regime_indicators)
+    result["regime_assessed_indicator_count"] = len(regime_assessed)
     result["high_risk_signal_count"] = high_count
     result["elevated_risk_signal_count"] = elevated_count
-    dates = [item["Observation Date"] for item in assessed if item["Observation Date"]]
+
+    dates = [
+        item["Observation Date"]
+        for item in regime_assessed
+        if item["Observation Date"]
+    ]
     result["as_of"] = min(dates) if dates else None
 
     if high_count or elevated_count >= 2:
         result["status"] = "ADVERSE"
         result["regime"] = "ADVERSE"
         result["summary"] = (
-            f"Macro-risk proxy review signals detected: {high_count} high and "
-            f"{elevated_count} elevated. Review candidate sensitivity and sizing."
+            f"Macro-risk proxy review signals detected: {high_count} high "
+            f"and {elevated_count} elevated among the three composite "
+            "proxies. Review candidate sensitivity and sizing."
         )
-    elif elevated_count == 1 and len(assessed) == 3:
+
+    elif (
+        elevated_count == 1
+        and len(regime_assessed) == len(regime_indicators) == 3
+    ):
         result["status"] = "CAUTION"
         result["regime"] = "CAUTION"
         result["summary"] = (
-            "One configured macro proxy has an elevated-risk signal. Review "
-            "sensitive candidates even though the proxy set is not classified as adverse."
+            "One configured macro proxy has an elevated-risk signal. "
+            "Review sensitive candidates even though the proxy set is "
+            "not classified as adverse."
         )
-    elif len(assessed) == 3:
+
+    elif len(regime_assessed) == len(regime_indicators) == 3:
         result["status"] = "NEUTRAL"
         result["regime"] = "NEUTRAL"
         result["summary"] = (
-            "All three configured macro proxies were assessed without a configured "
-            "risk threshold breach. This is not a forecast or proof that macro risk is low."
+            "All three configured composite macro proxies were assessed "
+            "without a configured risk threshold breach. This is not a "
+            "forecast or proof that macro risk is low."
         )
+
     else:
         result["status"] = "UNASSESSED"
         result["regime"] = "UNASSESSED"
         result["summary"] = (
-            f"Only {len(assessed)} of 3 macro proxies were assessed. A complete "
-            "macro regime cannot be assigned; missing inputs are not treated as low risk."
+            f"Only {len(regime_assessed)} of {len(regime_indicators)} "
+            "composite macro proxies were assessed. A complete macro "
+            "regime cannot be assigned; missing inputs are not treated "
+            "as low risk."
         )
 
     result["limitations"] = [
@@ -1190,10 +1477,11 @@ def _build_macro_regime_assessment():
         "The configured thresholds are provisional and require validation before use beyond SHADOW review.",
         "No CPI/inflation-release surprises, central-bank expectations, real yields, FX, or economic-growth surprises are directly assessed.",
         "HYG/LQD relative performance is a credit-risk-appetite proxy, not a measured credit spread.",
+        "The 3-month and 5-year yield changes and 10-year-minus-3-month curve are diagnostic only and do not affect the composite regime until calibrated.",
         "No purchase-date or point-in-time macro snapshots were supplied; historical pre-purchase warnings remain unassessed.",
     ]
-    return result
 
+    return result
 
 def _build_market_risk_assessment(
     final_portfolio_decisions,
@@ -1232,6 +1520,7 @@ def _build_market_risk_assessment(
         "individual_stock_assessments": [],
         "transaction_risk_reviews": [],
         "recommendations": [],
+        "macro_stress_scenarios": [],
         "data_quality": {
             "portfolio_data_available": False,
             "market_intelligence_available": False,
@@ -1270,6 +1559,7 @@ def _build_market_risk_assessment(
     from data.market_data import get_stock_data
 
     assessment["market_stress_indicators"] = []
+    assessment["market_breadth_indicators"] = []
 
     assessment["data_quality"]["market_stress_assessed"] = False
     assessment["data_quality"]["market_benchmarks_available"] = 0
@@ -1552,6 +1842,137 @@ def _build_market_risk_assessment(
         assessment["market_stress_status"] = "UNASSESSED"
 
     # --------------------------------------------------------
+    # SHADOW MARKET BREADTH / RELATIVE STRENGTH
+    # --------------------------------------------------------
+    # RSP/SPY compares the S&P 500 equal-weight ETF with the
+    # capitalisation-weighted S&P 500 ETF. It is diagnostic only:
+    # no stress thresholds or production allocation rules are applied.
+
+    breadth = {
+        "Indicator": "RSP/SPY Relative Strength",
+        "Status": "UNASSESSED",
+        "Latest Observation": None,
+        "Relative Change 20 Sessions %": None,
+        "Relative Change 60 Sessions %": None,
+        "Evidence": "",
+        "Interpretation": (
+            "Positive change indicates improving equal-weight relative "
+            "strength; negative change indicates weakening relative strength."
+        ),
+        "Advisory Only": True,
+    }
+
+    try:
+        rsp_data = get_stock_data("RSP", period="1y")
+        spy_data = get_stock_data("SPY", period="1y")
+
+        def _relative_strength_closes(data):
+            if data is None or data.empty:
+                return None
+
+            frame = data.copy()
+            frame.index = pd.to_datetime(frame.index)
+            if getattr(frame.index, "tz", None) is not None:
+                frame.index = frame.index.tz_localize(None)
+            frame = frame.sort_index()
+
+            column = (
+                "Adj Close"
+                if "Adj Close" in frame.columns
+                else "Close"
+            )
+            if column not in frame.columns:
+                return None
+
+            values = pd.to_numeric(
+                frame[column], errors="coerce"
+            ).dropna()
+            values = values[~values.index.duplicated(keep="last")]
+            return values[values > 0]
+
+        rsp_closes = _relative_strength_closes(rsp_data)
+        spy_closes = _relative_strength_closes(spy_data)
+
+        if rsp_closes is None or spy_closes is None:
+            breadth["Evidence"] = (
+                "RSP or SPY cached price data is missing or has no "
+                "usable closing-price column."
+            )
+        else:
+            aligned = pd.concat(
+                [rsp_closes.rename("RSP"), spy_closes.rename("SPY")],
+                axis=1,
+                join="inner",
+            ).dropna()
+
+            if aligned.empty:
+                breadth["Evidence"] = (
+                    "RSP and SPY have no common valid observation dates."
+                )
+            else:
+                ratio = aligned["RSP"] / aligned["SPY"]
+                latest_date = pd.Timestamp(ratio.index[-1])
+                today_date = pd.Timestamp(datetime.now().date())
+
+                breadth["Latest Observation"] = latest_date.strftime(
+                    "%Y-%m-%d"
+                )
+
+                age_days = (
+                    today_date - latest_date.normalize()
+                ).days
+
+                if age_days < 0 or age_days > 5:
+                    breadth["Evidence"] = (
+                        f"Latest common observation is {age_days} calendar "
+                        "days old; data is treated as stale or invalid."
+                    )
+                else:
+                    if len(ratio) >= 21:
+                        change_20 = (
+                            float(ratio.iloc[-1] / ratio.iloc[-21]) - 1
+                        ) * 100
+                        breadth["Relative Change 20 Sessions %"] = round(
+                            change_20, 2
+                        )
+
+                    if len(ratio) >= 61:
+                        change_60 = (
+                            float(ratio.iloc[-1] / ratio.iloc[-61]) - 1
+                        ) * 100
+                        breadth["Relative Change 60 Sessions %"] = round(
+                            change_60, 2
+                        )
+
+                    if (
+                        breadth["Relative Change 20 Sessions %"] is None
+                        and breadth["Relative Change 60 Sessions %"] is None
+                    ):
+                        breadth["Evidence"] = (
+                            "Insufficient common observations: at least 21 "
+                            "are required for 20 sessions and 61 for 60."
+                        )
+                    else:
+                        breadth["Status"] = "ASSESSED — NO THRESHOLDS"
+                        breadth["Evidence"] = (
+                            f"Calculated from {len(aligned)} common RSP/SPY "
+                            "observation dates using adjusted closes where "
+                            "available. No arbitrary signal thresholds applied."
+                        )
+
+    except Exception as exc:
+        breadth["Status"] = "UNASSESSED"
+        breadth["Evidence"] = (
+            f"Relative-strength assessment failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    assessment["market_breadth_indicators"].append(breadth)
+    assessment["data_quality"]["market_breadth_assessed"] = (
+        breadth["Status"] == "ASSESSED — NO THRESHOLDS"
+    )
+
+    # --------------------------------------------------------
     # CACHE-ONLY MACRO PROXY ASSESSMENT (SHADOW)
     # --------------------------------------------------------
     macro_assessment = _build_macro_regime_assessment()
@@ -1561,11 +1982,217 @@ def _build_market_risk_assessment(
         macro_assessment["status"] != "UNASSESSED"
     )
     assessment["data_quality"]["macro_proxy_indicators_assessed"] = (
-        macro_assessment.get("assessed_indicator_count", 0)
+        macro_assessment.get("regime_assessed_indicator_count", 0)
     )
+
     assessment["data_quality"]["macro_proxy_indicators_total"] = (
-        macro_assessment.get("indicator_count", 0)
+        macro_assessment.get("regime_indicator_count", 0)
     )
+
+
+    # ------------------------------------------------------------
+    # STRUCTURED MACRO-THEME EVIDENCE (SHADOW / ADVISORY ONLY)
+    # ------------------------------------------------------------
+
+    _macro_indicators_by_name = {
+        item.get("Indicator"): item
+        for item in macro_assessment.get("indicators", [])
+        if isinstance(item, dict)
+    }
+
+    def _theme_observation(
+        indicator,
+        date_field,
+        value_fields,
+    ):
+        """Return a traceable observation only when date and values exist."""
+        if not isinstance(indicator, dict):
+            return None
+
+        observed_at = indicator.get(date_field)
+        if not observed_at:
+            return None
+
+        values = {}
+        for field in value_fields:
+            value = indicator.get(field)
+            try:
+                present = value is not None and bool(pd.notna(value))
+            except (TypeError, ValueError):
+                present = False
+
+            if present:
+                values[field] = value
+
+        if not values:
+            return None
+
+        return {
+            "indicator": (
+                indicator.get("Indicator")
+                or indicator.get("Benchmark")
+            ),
+            "ticker": (
+                indicator.get("Tickers")
+                or indicator.get("Ticker")
+            ),
+            "observed_at": str(observed_at),
+            "values": values,
+            "status": indicator.get("Status", "UNASSESSED"),
+            "evidence": indicator.get("Evidence"),
+        }
+
+
+    def _theme_evidence_record(theme, observations, limitation):
+        usable_observations = []
+
+        for item in observations:
+            if not isinstance(item, dict):
+                continue
+
+            status = str(
+                item.get("status") or "UNASSESSED"
+            ).strip().upper()
+
+            if status in {
+                "DIAGNOSTIC ONLY",
+                "UNASSESSED",
+            }:
+                continue
+
+            if not item.get("observed_at"):
+                continue
+
+            if not item.get("values"):
+                continue
+
+            usable_observations.append(item)
+
+        observation_dates = [
+            item["observed_at"]
+            for item in usable_observations
+        ]
+
+        available = bool(usable_observations and observation_dates)
+
+        return {
+            "theme": theme,
+            "source": (
+                "Cached market-price history via data.market_data"
+                if available else None
+            ),
+            "observed_at": (
+                max(observation_dates) if available else None
+            ),
+            "observation": (
+                usable_observations if available else None
+            ),
+            "value": None,
+            "status": (
+                "MEASURED_PROXY_AVAILABLE"
+                if available else "UNASSESSED"
+            ),
+            "limitations": [limitation],
+            "advisory_only": True,
+        }
+
+
+    _interest_rate_observations = [
+        _theme_observation(
+            _macro_indicators_by_name.get(name),
+            "Observation Date",
+            ["Value"],
+        )
+        for name in (
+            "US 10-year Treasury yield change",
+            "US 3-month Treasury yield change",
+            "US 5-year Treasury yield change",
+            "US 10-year minus 3-month Treasury yield curve",
+        )
+    ]
+
+    _oil_observation = _theme_observation(
+        _macro_indicators_by_name.get("Crude oil price change"),
+        "Observation Date",
+        ["Value"],
+    )
+
+    _market_stress_observations = []
+    for _benchmark in assessment.get("market_stress_indicators", []):
+        if not isinstance(_benchmark, dict):
+            continue
+
+        if _benchmark.get("Benchmark") not in {
+            "S&P 500",
+            "Nasdaq-100 ETF",
+            "VIX",
+        }:
+            continue
+
+        _market_stress_observations.append(
+            _theme_observation(
+                _benchmark,
+                "Latest Observation",
+                [
+                    "Return 20 Sessions %",
+                    "Return 60 Sessions %",
+                    "Realised Volatility 20 Sessions % Annualised",
+                    "Drawdown From 52 Week High %",
+                    "VIX Level",
+                ],
+            )
+        )
+
+    assessment["macro_theme_evidence"] = [
+        _theme_evidence_record(
+            "INTEREST_RATES",
+            _interest_rate_observations,
+            (
+                "Treasury yields are market proxies, not a forecast of "
+                "central-bank policy or company-specific financing costs. "
+                "The 3-month, 5-year and yield-curve indicators remain "
+                "diagnostic-only."
+            ),
+        ),
+        _theme_evidence_record(
+            "INFLATION",
+            [_oil_observation],
+            (
+                "Crude oil price change is an energy-cost and inflation-"
+                "pressure proxy, not a direct CPI or broad inflation measure. "
+                "Sector impacts can differ."
+            ),
+        ),
+        _theme_evidence_record(
+            "AI_BORROWING_AND_CREDIT",
+            [],
+            (
+                "No AI-specific borrowing, debt-maturity or financing-cost "
+                "measure is available here. The broad HYG/LQD credit-risk-"
+                "appetite proxy does not establish AI-sector borrowing risk."
+            ),
+        ),
+        _theme_evidence_record(
+            "MARKET_DOWNTURN",
+            _market_stress_observations,
+            (
+                "Broad-market returns, drawdown, volatility and VIX are "
+                "market-stress proxies; they do not independently establish "
+                "a recession or predict a future downturn. Thresholds remain "
+                "provisional."
+            ),
+        ),
+        _theme_evidence_record(
+            "TRADE_AND_GEOPOLITICS",
+            [],
+            (
+                "No structured quantitative trade or geopolitical risk "
+                "measure is available in this assessment. News matches "
+                "remain unvalidated review signals."
+            ),
+        ),
+    ]
+
 
     if macro_assessment["status"] in {"ADVERSE", "CAUTION"}:
         assessment["recommendations"].append({
@@ -1935,7 +2562,6 @@ def _build_market_risk_assessment(
             continue
 
         metadata = metadata_by_ticker.get(ticker, {})
-
         sector = _normalise_economic_sector(
             row.get("Sector") or metadata.get("sector", "")
         )
@@ -2165,8 +2791,13 @@ def _build_market_risk_assessment(
                 destination["country"] = tx_country
 
             tx_industry = _normalise_text(
-                transaction.get("Industry") or transaction.get("industry", "")
+                transaction.get("Industry")
+                or transaction.get("industry", "")
+                or metadata_by_ticker.get(destination_ticker, {}).get(
+                    "industry", ""
+                )
             )
+
             if tx_industry.upper() in {"N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"}:
                 tx_industry = ""
             if tx_industry:
@@ -2580,7 +3211,42 @@ def _build_market_risk_assessment(
     # actually represented in proposed transactions. Internal transfers net to
     # zero. If the upstream portfolio value includes some cash balance, that
     # balance remains in the denominator but is not assigned to a security sector.
+
     proposed_portfolio_value = max(0.0, portfolio_value) + external_cash_allocated
+
+    # Explicit denominator definitions for SHADOW reporting.
+    # These are descriptive only: do not change the exposure calculations.
+    assessment["exposure_denominators"] = {
+        "current_portfolio_concentration": {
+            "value": round(max(0.0, portfolio_value), 2),
+            "basis": "UPSTREAM_PORTFOLIO_VALUE",
+            "description": (
+                "Portfolio-level value supplied by the upstream portfolio summary."
+            ),
+        },
+        "proposed_portfolio_concentration": {
+            "value": round(proposed_portfolio_value, 2),
+            "basis": "UPSTREAM_PORTFOLIO_VALUE_PLUS_EXTERNAL_ASSESSMENT_CASH",
+            "description": (
+                "Current upstream portfolio value plus external assessment cash "
+                "represented in proposed transactions."
+            ),
+        },
+        "current_classification_coverage": {
+            "value": round(current_holdings_value, 2),
+            "basis": "UNIQUE_POSITIVE_VALUE_SECURITY_HOLDINGS",
+            "description": (
+                "Reconciled current security holdings; excludes cash and duplicate rows."
+            ),
+        },
+        "proposed_classification_coverage": {
+            "value": round(proposed_holdings_value, 2),
+            "basis": "PROJECTED_POSITIVE_VALUE_SECURITY_HOLDINGS",
+            "description": (
+                "Projected security holdings after the proposed transactions."
+            ),
+        },
+    }
 
     assessment["data_quality"]["proposed_exposure_calculated"] = (
         portfolio_value > 0 and bool(transaction_rows)
@@ -2682,6 +3348,16 @@ def _build_market_risk_assessment(
                     "proposed_value": round(proposed_amount, 2),
                     "proposed_percent": round(proposed_pct, 2),
                     "change_percentage_points": round(proposed_pct - current_pct, 2),
+                    "current_denominator_value": round(
+                        max(0.0, portfolio_value), 2
+                    ),
+                    "current_denominator_basis": "UPSTREAM_PORTFOLIO_VALUE",
+                    "proposed_denominator_value": round(
+                        proposed_portfolio_value, 2
+                    ),
+                    "proposed_denominator_basis": (
+                        "UPSTREAM_PORTFOLIO_VALUE_PLUS_EXTERNAL_ASSESSMENT_CASH"
+                    ),
                     "measurement": "ESTIMATED_PROPOSED_EXPOSURE",
                     "advisory_only": True,
                 }
@@ -2692,6 +3368,8 @@ def _build_market_risk_assessment(
                         "name": name,
                         "exposure_value": round(current_amount, 2),
                         "exposure_percent": round(current_pct, 2),
+                        "denominator_value": round(max(0.0, portfolio_value), 2),
+                        "denominator_basis": "UPSTREAM_PORTFOLIO_VALUE",
                         "measurement": "CURRENT_OBSERVED_EXPOSURE",
                         "trigger": "REVIEW_AT_30_PERCENT",
                     })
@@ -2704,6 +3382,10 @@ def _build_market_risk_assessment(
                         "change_percentage_points": round(proposed_pct - current_pct, 2),
                         "measurement": "ESTIMATED_PROPOSED_EXPOSURE",
                         "trigger": "REVIEW_AT_30_PERCENT",
+                        "denominator_value": round(proposed_portfolio_value, 2),
+                        "denominator_basis": (
+                            "UPSTREAM_PORTFOLIO_VALUE_PLUS_EXTERNAL_ASSESSMENT_CASH"
+                        )
                     }
                     assessment["proposed_portfolio_concentration"].append(proposed_record)
                 if proposed_pct >= 30.0 and proposed_pct > current_pct + 0.01:
@@ -3852,6 +4534,146 @@ def _build_market_risk_assessment(
             })
 
     # --------------------------------------------------------
+    # MACRO STRESS SCENARIOS — PORTFOLIO TRANSMISSION (SHADOW)
+    # --------------------------------------------------------
+    # Sector exposure is a review proxy, not a measured beta or loss forecast.
+    _scenario_definitions = {
+        "GROWTH_SLOWDOWN": {
+            "scenario": "Growth slowdown / recession",
+            "channels": "Weaker demand, earnings pressure and lower risk appetite",
+            "sectors": {"FINANCIAL SERVICES", "CONSUMER CYCLICAL", "CONSUMER DISCRETIONARY", "INDUSTRIALS", "MATERIALS", "ENERGY", "REAL ESTATE"},
+            "indicators": {"S&P 500", "Nasdaq-100 ETF", "Credit-risk appetite proxy"},
+        },
+        "INFLATION_ENERGY_SHOCK": {
+            "scenario": "Renewed inflation / energy shock",
+            "channels": "Higher energy/input costs and potential margin pressure",
+            "sectors": {"ENERGY", "MATERIALS", "INDUSTRIALS", "CONSUMER CYCLICAL", "CONSUMER DISCRETIONARY", "CONSUMER DEFENSIVE", "UTILITIES"},
+            "indicators": {"Crude oil price change"},
+        },
+        "INTEREST_RATE_SHOCK": {
+            "scenario": "Interest-rate shock",
+            "channels": "Higher discount rates, financing costs and valuation pressure",
+            "sectors": {"TECHNOLOGY", "COMMUNICATION SERVICES", "CONSUMER CYCLICAL", "CONSUMER DISCRETIONARY", "REAL ESTATE", "UTILITIES"},
+            "indicators": {"US 10-year Treasury yield change"},
+        },
+        "CREDIT_LIQUIDITY_STRESS": {
+            "scenario": "Credit and liquidity stress",
+            "channels": "Tighter financing, refinancing risk and correlated drawdowns",
+            "sectors": {"FINANCIAL SERVICES", "REAL ESTATE", "CONSUMER CYCLICAL", "CONSUMER DISCRETIONARY", "INDUSTRIALS"},
+            "indicators": {"Credit-risk appetite proxy", "VIX"},
+        },
+        "GEOPOLITICAL_TRADE_SHOCK": {
+            "scenario": "Geopolitical / trade shock",
+            "channels": "Trade restrictions, supply disruption and country/industry-specific costs",
+            "sectors": {"ENERGY", "MATERIALS", "INDUSTRIALS", "TECHNOLOGY", "CONSUMER DEFENSIVE"},
+            "indicators": set(),
+        },
+    }
+    _macro_by_name = {
+        item.get("Indicator"): item
+        for item in assessment.get("macro_risk_assessment", {}).get("indicators", [])
+    }
+    _market_by_name = {
+        item.get("Benchmark"): item
+        for item in assessment.get("market_stress_indicators", [])
+    }
+    _risk_statuses = {"HIGH RISK SIGNAL", "ELEVATED RISK SIGNAL", "HIGH STRESS", "ELEVATED STRESS"}
+    _clear_statuses = {"NO CONFIGURED THRESHOLD BREACH", "NO PROVISIONAL THRESHOLD BREACH", "NO VIX THRESHOLD BREACH"}
+
+    for _scenario_id, _definition in _scenario_definitions.items():
+        _evidence = []
+        for _name in sorted(_definition["indicators"]):
+            _indicator = _macro_by_name.get(_name) or _market_by_name.get(_name)
+            if _indicator:
+                _evidence.append({
+                    "indicator": _name,
+                    "status": _indicator.get("Status", "UNASSESSED"),
+                    "observation_date": _indicator.get("Observation Date", _indicator.get("Latest Observation")),
+                    "value": _indicator.get("Value", _indicator.get("VIX Level")),
+                    "evidence": _indicator.get("Evidence", ""),
+                })
+        _statuses = [str(item.get("status", "UNASSESSED")).upper() for item in _evidence]
+        if _scenario_id == "GEOPOLITICAL_TRADE_SHOCK":
+            _status = "UNASSESSED"
+            _status_reason = "No validated geopolitical/trade trigger is integrated; headlines alone are not treated as confirmed risk evidence."
+        elif any(value in _risk_statuses for value in _statuses):
+            _status = "SIGNAL_DETECTED"
+            _status_reason = "At least one linked market/macro proxy breached a provisional review threshold."
+        elif _statuses and all(value in _risk_statuses | _clear_statuses for value in _statuses):
+            _status = "NO_CONFIGURED_TRIGGER"
+            _status_reason = "Linked proxies were assessed without a configured threshold breach; this does not rule out the scenario."
+        else:
+            _status = "UNASSESSED"
+            _status_reason = "Linked indicators are missing, stale or not assessed; missing data is not low risk."
+
+        _current_rows, _proposed_rows = [], []
+        _current_value = _proposed_value = 0.0
+        _current_unmapped = _proposed_unmapped = 0.0
+        for _ticker, _position in current_positions.items():
+            _value = max(0.0, safe_float(_position.get("value", 0)))
+            _sector = _normalise_economic_sector(_position.get("sector")).upper()
+            _mapped = _sector in _definition["sectors"] and str(_position.get("asset_type", "")).upper() != "ETF"
+            if _mapped:
+                _current_value += _value
+                _current_rows.append({"ticker": _ticker, "sector": _position.get("sector"), "value": round(_value, 2)})
+            elif not _sector or str(_position.get("asset_type", "")).upper() == "ETF":
+                _current_unmapped += _value
+        for _ticker, _position in proposed_positions.items():
+            _value = max(0.0, safe_float(_position.get("value", 0)))
+            _sector = _normalise_economic_sector(_position.get("sector")).upper()
+            _mapped = _sector in _definition["sectors"] and str(_position.get("asset_type", "")).upper() != "ETF"
+            if _mapped:
+                _proposed_value += _value
+                _proposed_rows.append({"ticker": _ticker, "sector": _position.get("sector"), "value": round(_value, 2)})
+            elif not _sector or str(_position.get("asset_type", "")).upper() == "ETF":
+                _proposed_unmapped += _value
+        _current_pct = 100 * _current_value / current_holdings_value if current_holdings_value > 0 else None
+        _proposed_pct = 100 * _proposed_value / proposed_holdings_value if proposed_holdings_value > 0 else None
+        _current_rows.sort(key=lambda item: item["value"], reverse=True)
+        _proposed_rows.sort(key=lambda item: item["value"], reverse=True)
+        assessment["macro_stress_scenarios"].append({
+            "scenario_id": _scenario_id,
+            "scenario": _definition["scenario"],
+            "status": _status,
+            "transmission_channels": _definition["channels"],
+            "current_exposure_value": round(_current_value, 2),
+            "current_exposure_percent_of_holdings": round(_current_pct, 2) if _current_pct is not None else None,
+            "proposed_exposure_value": round(_proposed_value, 2),
+            "proposed_exposure_percent_of_holdings": round(_proposed_pct, 2) if _proposed_pct is not None else None,
+            "change_in_exposure_value": round(_proposed_value - _current_value, 2),
+            "change_in_exposure_percentage_points": round(_proposed_pct - _current_pct, 2) if _proposed_pct is not None and _current_pct is not None else None,
+            "current_unmapped_or_etf_value": round(_current_unmapped, 2),
+            "proposed_unmapped_or_etf_value": round(_proposed_unmapped, 2),
+            "current_exposed_holdings": _current_rows,
+            "proposed_exposed_holdings": _proposed_rows,
+            "trigger_evidence": _evidence,
+            "status_reason": _status_reason,
+            "confidence": "LOW — SECTOR-BASED EXPOSURE PROXY; NOT A LOSS FORECAST",
+            "advisory_only": True,
+        })
+        if _status == "SIGNAL_DETECTED" and (_current_value > 0 or _proposed_value > 0):
+            assessment["recommendations"].append({
+                "Priority": "REVIEW",
+                "Recommendation": (
+                    f"Review portfolio and proposed-transaction exposure to "
+                    f"the {_definition['scenario'].lower()} scenario."
+                ),
+                "Evidence": _status_reason + " " + "; ".join(
+                    item.get("evidence", "") for item in _evidence if item.get("evidence")
+                ),
+                "Scenario": _scenario_id,
+                "Current Exposure Value": round(_current_value, 2),
+                "Proposed Exposure Value": round(_proposed_value, 2),
+                "Exposure Change Value": round(_proposed_value - _current_value, 2),
+                "Governance": "ADVISORY ONLY — NO AUTOMATIC DECISION CHANGE",
+            })
+    assessment["data_quality"]["macro_stress_scenarios_built"] = bool(assessment["macro_stress_scenarios"])
+    assessment["data_quality"]["macro_stress_scenarios_with_exposure"] = sum(
+        bool(item.get("current_exposure_value") or item.get("proposed_exposure_value"))
+        for item in assessment["macro_stress_scenarios"]
+    )
+
+    # --------------------------------------------------------
     # EXPLICIT UNASSESSED RISKS
     # --------------------------------------------------------
 
@@ -4544,6 +5366,10 @@ def generate_portfolio_reallocation(
                 "Unallocated Capital": 0.0,
                 "Reconciliation Variance": 0.0,
                 "Reconciliation Status": "NOT_RUN",
+"Planned Destination Allocation": 0.0,
+                "Actual Destination Allocation": 0.0,
+                "Destination Allocation Variance": 0.0,
+                "Destination Allocation Reconciliation": "NOT_RUN",
                 "Exposure Denominator": 0.0,
                 "Funding Sources": 0,
                 "Destinations": 0
@@ -4580,6 +5406,10 @@ def generate_portfolio_reallocation(
                 "Unallocated Capital": 0.0,
                 "Reconciliation Variance": 0.0,
                 "Reconciliation Status": "NOT_RUN",
+"Planned Destination Allocation": 0.0,
+                "Actual Destination Allocation": 0.0,
+                "Destination Allocation Variance": 0.0,
+                "Destination Allocation Reconciliation": "NOT_RUN",
                 "Exposure Denominator": 0.0,
                 "Funding Sources": 0,
                 "Destinations": 0
@@ -4620,6 +5450,10 @@ def generate_portfolio_reallocation(
                 "Unallocated Capital": 0.0,
                 "Reconciliation Variance": 0.0,
                 "Reconciliation Status": "NOT_RUN",
+"Planned Destination Allocation": 0.0,
+                "Actual Destination Allocation": 0.0,
+                "Destination Allocation Variance": 0.0,
+                "Destination Allocation Reconciliation": "NOT_RUN",
                 "Exposure Denominator": 0.0,
                 "Funding Sources": 0,
                 "Destinations": 0
@@ -5639,7 +6473,7 @@ def generate_portfolio_reallocation(
         ).to_string(
             index=False
         )
-        
+
         if eligible_destinations
         else "No eligible destinations."
     )
@@ -6441,6 +7275,41 @@ def generate_portfolio_reallocation(
     # CALCULATE SUMMARY
     # ========================================================
 
+    # Advisory check: compare planned destination allocations
+    # with the transactions actually generated. Differences
+    # require review; they do not change allocation behaviour.
+    planned_destination_allocation = round(
+        sum(
+            safe_float(amount)
+            for amount in destination_allocations.values()
+            if safe_float(amount) >= min_reallocation_trade_value
+        ),
+        2
+    )
+
+    actual_destination_allocation = round(
+        sum(
+            safe_float(
+                transaction.get("Reallocated Capital", 0)
+            )
+            for transaction in transactions
+            if transaction.get("Destination Ticker", "")
+        ),
+        2
+    )
+
+    destination_allocation_variance = round(
+        planned_destination_allocation
+        - actual_destination_allocation,
+        2
+    )
+
+    destination_allocation_status = (
+        "PASS"
+        if abs(destination_allocation_variance) <= 0.01
+        else "REVIEW"
+    )
+
     total_reallocated = round(
         sum(
             safe_float(
@@ -6520,6 +7389,18 @@ def generate_portfolio_reallocation(
         ),
         "Total Released": total_released,
         "Total Reallocated": total_reallocated,
+        "Actual Destination Allocation": (
+            actual_destination_allocation
+        ),
+        "Planned Destination Allocation": (
+            planned_destination_allocation
+        ),
+        "Destination Allocation Variance": (
+            destination_allocation_variance
+        ),
+        "Destination Allocation Reconciliation": (
+            destination_allocation_status
+        ),
         "Unallocated Capital": unallocated_capital,
         "Reconciliation Variance": reconciliation_variance,
         "Reconciliation Status": reconciliation_status,
@@ -6616,14 +7497,25 @@ def generate_portfolio_reallocation(
         "TRADE_AND_GEOPOLITICS",
         "ENERGY_AND_COMMODITIES",
     }
-    available_themes = {
-        str(item.get("theme", "")).strip().upper()
+
+    theme_evidence_by_name = {
+        str(item.get("theme", "")).strip().upper(): item
         for item in structured_theme_evidence
-        if isinstance(item, dict)
-        and item.get("theme")
+        if isinstance(item, dict) and item.get("theme")
+    }
+
+    available_themes = {
+        theme
+        for theme, item in theme_evidence_by_name.items()
+        if item.get("status") in {
+            "MEASURED_PROXY_AVAILABLE",
+            "MEASURED_DIRECT_AVAILABLE",
+        }
         and item.get("source")
         and item.get("observed_at")
+        and item.get("observation")
     }
+
 
     macro_items = macro_news.get("items", [])
     headline_signals = {}
@@ -6668,17 +7560,42 @@ def generate_portfolio_reallocation(
             if not category_match and not headline_match:
                 continue
 
-            # Require explicit AI/data-centre financing language for
-            # the AI borrowing theme; generic credit headlines do not count.
-            if theme == "AI_BORROWING_AND_CREDIT" and not any(
-                term in headline_lower
-                for term in (
-                    "artificial intelligence", " ai ", "data center",
-                    "data centre", "gpu", "borrowing", "debt financing",
-                    "capex", "capital expenditure",
+
+            # Require both an AI/data-centre reference and a financing
+            # reference. Generic capex or borrowing headlines do not count.
+            if theme == "AI_BORROWING_AND_CREDIT":
+                ai_or_datacentre_terms = (
+                    "artificial intelligence",
+                    " ai ",
+                    "data center",
+                    "data centre",
+                    "gpu",
                 )
-            ):
-                continue
+                financing_terms = (
+                    "borrowing",
+                    "debt financing",
+                    "capex",
+                    "capital expenditure",
+                    "financing",
+                    "debt",
+                    "credit",
+                )
+
+                has_ai_or_datacentre_reference = any(
+                    term in headline_lower
+                    for term in ai_or_datacentre_terms
+                )
+                has_financing_reference = any(
+                    term in headline_lower
+                    for term in financing_terms
+                )
+
+                if not (
+                    has_ai_or_datacentre_reference
+                    and has_financing_reference
+                ):
+                    continue
+
 
             # Require explicit downturn language rather than general
             # growth or employment news.
@@ -6801,6 +7718,7 @@ def generate_portfolio_reallocation(
     }
 
     print("\\nSHADOW MACRO-ALLOCATION SENSITIVITY")
+
     print(
         pd.DataFrame(shadow_sensitivity_rows).to_string(index=False)
         if shadow_sensitivity_rows
@@ -6808,6 +7726,27 @@ def generate_portfolio_reallocation(
     )
 
     print("\nSHADOW MARKET AND PORTFOLIO RISK ASSESSMENT")
+
+
+    print("\nEXPOSURE DENOMINATOR BASIS")
+
+    denominator_rows = []
+    for measure, details in market_risk_assessment.get(
+        "exposure_denominators", {}
+    ).items():
+        denominator_rows.append({
+            "Measure": measure,
+            "Denominator Value": details.get("value"),
+            "Basis": details.get("basis"),
+            "Description": details.get("description"),
+        })
+
+    if denominator_rows:
+        print(pd.DataFrame(denominator_rows).to_string(index=False))
+    else:
+        print("Exposure denominator definitions unavailable.")
+
+
     print("\nCURRENT PORTFOLIO EXPOSURE COVERAGE")
     coverage_rows = [
         item
@@ -6858,6 +7797,8 @@ def generate_portfolio_reallocation(
 
     for section, title in (
         ("market_stress_indicators", "BROAD-MARKET STRESS INDICATORS"),
+    ("market_breadth_indicators", "MARKET BREADTH AND RELATIVE STRENGTH"),
+        ("macro_stress_scenarios", "MACRO STRESS SCENARIO ASSESSMENT"),
         ("candidate_macro_reviews", "CANDIDATE MACRO SENSITIVITY REVIEWS"),
         ("holding_market_sensitivity", "HOLDING MARKET SENSITIVITY"),
         ("correlated_holding_clusters", "CORRELATED HOLDING PAIRS"),

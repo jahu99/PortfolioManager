@@ -5,6 +5,7 @@ from data.fundamentals import get_fundamentals
 
 from data.database import (
     initialise_database,
+    record_portfolio_snapshot,
     get_open_recommendations,
     save_recommendations,
     save_recommendation_evaluations,
@@ -338,6 +339,14 @@ def main():
     # ---------------------------------
 
     holdings = get_portfolio()
+
+    try:
+        record_portfolio_snapshot(holdings)
+    except Exception as exc:
+        print(
+            "WARNING: Portfolio snapshot recording failed; "
+            f"continuing agent workflow: {exc}"
+        )
 
     portfolio_tickers = (
         holdings["Ticker"].tolist()

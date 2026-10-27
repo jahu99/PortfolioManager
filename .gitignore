@@ -40,3 +40,4 @@ data/fundamentals/*.json
 *.csv
 *.json
 *.xlsx
+data/pit_prices/

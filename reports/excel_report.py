@@ -6387,6 +6387,12 @@ def create_report(
         )
 
         write_risk_section(
+            "MARKET BREADTH AND RELATIVE STRENGTH",
+            market_risk_assessment.get("market_breadth_indicators", []),
+            "RSP/SPY relative strength unavailable — NOT ASSESSED",
+        )
+
+        write_risk_section(
             "ETF LOOK-THROUGH GAPS — NOT ASSESSED",
             market_risk_assessment.get("known_etf_holdings", []),
             "No ETF look-through status data available",

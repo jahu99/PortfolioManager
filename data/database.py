@@ -19,7 +19,7 @@ import sqlite3
 import os
 import json
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 
 from data.market_calendar import get_last_trading_day
 
@@ -43,6 +43,158 @@ def get_connection():
     return sqlite3.connect(
         DATABASE_PATH
     )
+
+
+def record_portfolio_snapshot(holdings):
+    """
+    Record the observed holdings input once per UTC date and exact
+    holdings state. This does not imply that any proposed trade executed.
+    """
+    import hashlib
+    import json
+    import math
+    from datetime import timezone
+
+    required = {
+        "Ticker",
+        "Shares",
+        "Current Value",
+        "Allocation %",
+    }
+    missing = required.difference(holdings.columns)
+    if missing:
+        raise ValueError(
+            f"Cannot record portfolio snapshot; missing columns: {sorted(missing)}"
+        )
+
+    rows = []
+    for _, row in holdings.iterrows():
+        ticker = str(row["Ticker"]).strip().upper()
+        if not ticker or ticker == "TOTAL":
+            continue
+
+        shares = float(row["Shares"])
+        value = float(row["Current Value"])
+        allocation = float(row["Allocation %"])
+
+        if not all(math.isfinite(x) for x in (shares, value, allocation)):
+            raise ValueError(
+                f"Cannot record portfolio snapshot; non-finite values for {ticker}"
+            )
+
+        rows.append({
+            "ticker": ticker,
+            "shares": shares,
+            "market_value": round(value, 2),
+            "allocation_percent": round(allocation, 2),
+        })
+
+    if not rows:
+        raise ValueError("Cannot record an empty portfolio snapshot.")
+
+    rows.sort(key=lambda item: item["ticker"])
+
+    captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    snapshot_date = captured_at[:10]
+    source_file = "portfolio/holdings_raw.csv"
+    total_market_value = round(sum(item["market_value"] for item in rows), 2)
+
+    # Stable for identical holdings from the same source on the same UTC date.
+    fingerprint_payload = json.dumps(
+        {
+            "snapshot_date": snapshot_date,
+            "source_file": source_file,
+            "holdings": rows,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    snapshot_id = hashlib.sha256(
+        fingerprint_payload.encode("utf-8")
+    ).hexdigest()
+
+    conn = get_connection()
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                snapshot_date TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                source_file TEXT NOT NULL,
+                capture_basis TEXT NOT NULL
+                    DEFAULT 'OBSERVED_HOLDINGS_INPUT',
+                total_market_value REAL NOT NULL,
+                holding_count INTEGER NOT NULL,
+                UNIQUE(snapshot_date, snapshot_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS portfolio_snapshot_holdings (
+                snapshot_id TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                shares REAL NOT NULL,
+                market_value REAL NOT NULL,
+                allocation_percent REAL NOT NULL,
+                PRIMARY KEY(snapshot_id, ticker),
+                FOREIGN KEY(snapshot_id)
+                    REFERENCES portfolio_snapshots(snapshot_id)
+                    ON DELETE RESTRICT
+            );
+
+            CREATE INDEX IF NOT EXISTS
+                idx_portfolio_snapshots_date
+            ON portfolio_snapshots(snapshot_date);
+            """
+        )
+
+        # If this exact state was already captured today, retain the first
+        # capture and do not create duplicate holding rows.
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO portfolio_snapshots (
+                snapshot_id, snapshot_date, captured_at, source_file,
+                capture_basis, total_market_value, holding_count
+            )
+            VALUES (?, ?, ?, ?, 'OBSERVED_HOLDINGS_INPUT', ?, ?)
+            """,
+            (
+                snapshot_id,
+                snapshot_date,
+                captured_at,
+                source_file,
+                total_market_value,
+                len(rows),
+            ),
+        )
+
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO portfolio_snapshot_holdings (
+                snapshot_id, ticker, shares, market_value, allocation_percent
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    snapshot_id,
+                    item["ticker"],
+                    item["shares"],
+                    item["market_value"],
+                    item["allocation_percent"],
+                )
+                for item in rows
+            ],
+        )
+
+        conn.commit()
+        return snapshot_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # =====================================================

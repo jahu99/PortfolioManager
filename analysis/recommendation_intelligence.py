@@ -794,7 +794,6 @@ def _calculate_learning_adjustment(
 
         return _clamp_adjustment(
             raw_adjustment
-            * combined_confidence
         )
 
     if signal_confidence > 0:
