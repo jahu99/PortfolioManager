@@ -6392,10 +6392,93 @@ def create_report(
             "RSP/SPY relative strength unavailable — NOT ASSESSED",
         )
 
+        # -----------------------------------------------------
+        # STAGE 2 MARKET LEADERSHIP — EVIDENCE AND PROVENANCE
+        # Advisory only. These fields do not change decisions.
+        # -----------------------------------------------------
+
+        leadership_quality = market_risk_assessment.get(
+            "data_quality", {}
+        )
+
+        if not isinstance(leadership_quality, dict):
+            leadership_quality = {}
+
+        leadership_quality_fields = [
+            ("Expected tickers", "market_leadership_tickers_expected"),
+            ("Available tickers", "market_leadership_tickers_available"),
+            ("Stale or invalid tickers", "market_leadership_tickers_stale"),
+            ("Close-price fallbacks", "market_leadership_close_fallback_count"),
+        ]
+
+        leadership_quality_rows = [
+            {
+                "Measure": label,
+                "Value": leadership_quality.get(key),
+                "Evidence Status": (
+                    "PROVIDED" if key in leadership_quality
+                    else "NOT PROVIDED — NOT ASSESSED"
+                ),
+                "Governance": "SHADOW — ADVISORY ONLY",
+            }
+            for label, key in leadership_quality_fields
+        ]
+
+        write_risk_section(
+            "MARKET LEADERSHIP DATA QUALITY",
+            leadership_quality_rows,
+            "Stage 2 market-leadership data-quality counts unavailable — NOT ASSESSED",
+        )
+
+        breadth_rows = market_risk_assessment.get(
+            "market_breadth_indicators", []
+        )
+
+        if not isinstance(breadth_rows, list):
+            breadth_rows = []
+
+        mag7_coverage_rows = [
+            row for row in breadth_rows
+            if isinstance(row, dict)
+            and "Constituent Coverage" in row
+        ]
+
+        write_risk_section(
+            "MAG7 CONSTITUENT COVERAGE",
+            mag7_coverage_rows,
+            "No MAG7 constituent-coverage record supplied — NOT ASSESSED",
+        )
+
+        leadership_provenance = market_risk_assessment.get(
+            "market_leadership_data_provenance", []
+        )
+
+        write_risk_section(
+            "MARKET LEADERSHIP TICKER PROVENANCE",
+            leadership_provenance,
+            "No per-ticker Stage 2 provenance records supplied — NOT ASSESSED",
+        )
+
         write_risk_section(
             "ETF LOOK-THROUGH GAPS — NOT ASSESSED",
             market_risk_assessment.get("known_etf_holdings", []),
             "No ETF look-through status data available",
+        )
+
+        write_risk_section(
+            "SECTOR / INDUSTRY EXPOSURE AND OVERLAP",
+            market_risk_assessment.get("common_theme_exposure", []),
+            "No measured sector/industry overlap data available",
+        )
+
+        write_risk_section(
+            "EXPLICIT INVESTMENT THEMES — ASSESSMENT STATUS",
+            market_risk_assessment.get(
+                "explicit_investment_theme_assessment",
+                [],
+            ),
+            "Explicit investment themes not assessed — "
+            "source-backed mapping required",
         )
 
         write_risk_section(

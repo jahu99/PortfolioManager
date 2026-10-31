@@ -555,9 +555,7 @@ def main():
                 )
             )
 
-            investment_score = round(
-                float(investment_score)
-            )
+            investment_score = float(investment_score)
 
             signal = generate_signal(
                 investment_score,
@@ -1092,6 +1090,9 @@ def main():
         f"{len(results)}"
     )
 
+    # Preserve the full scored pool for BUY NEW selection.
+    buy_new_selection_pool = list(results)
+
     results = results[:200]
 
     print(
@@ -1317,10 +1318,34 @@ def main():
 
         buy_new_candidates = (
             select_buy_new_candidates(
-                pd.DataFrame(results),
+                pd.DataFrame(buy_new_selection_pool),
                 portfolio_summary=portfolio_summary,
             )
         )
+
+        # Include selected candidates outside Top 200 downstream.
+        if (
+            isinstance(buy_new_candidates, pd.DataFrame)
+            and not buy_new_candidates.empty
+            and "Ticker" in buy_new_candidates.columns
+        ):
+            full_pool = {
+                str(row.get("Ticker", "")).strip().upper(): row
+                for row in buy_new_selection_pool
+                if str(row.get("Ticker", "")).strip()
+            }
+            present = {
+                str(row.get("Ticker", "")).strip().upper()
+                for row in results
+                if str(row.get("Ticker", "")).strip()
+            }
+
+            for value in buy_new_candidates["Ticker"]:
+                ticker = str(value).strip().upper()
+                if ticker and ticker not in present and ticker in full_pool:
+                    results.append(full_pool[ticker].copy())
+                    present.add(ticker)
+                    print("Added BUY NEW candidate outside Top 200:", ticker)
 
         print(
 

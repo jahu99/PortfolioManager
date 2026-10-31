@@ -380,6 +380,43 @@ def load_actual_holdings():
     return holdings
 
 
+def load_actual_cash_balance():
+    """
+    Read existing portfolio cash from holdings_raw.csv.
+
+    Cash is valued by Market Value, not Quantity. This is deliberately
+    separate from load_actual_holdings(), which excludes CASH from
+    security-position calculations.
+    """
+    if not os.path.exists(HOLDINGS_FILE):
+        return 0.0
+
+    try:
+        holdings = pd.read_csv(HOLDINGS_FILE)
+    except Exception as exc:
+        print(f"WARNING: Unable to read cash balance: {exc}")
+        return 0.0
+
+    required = {"Ticker", "Market Value"}
+    if not required.issubset(holdings.columns):
+        print(
+            "WARNING: Cannot read existing cash; holdings file "
+            "requires Ticker and Market Value columns."
+        )
+        return 0.0
+
+    cash_rows = holdings.loc[
+        holdings["Ticker"].astype(str).str.strip().str.upper() == "CASH"
+    ]
+
+    cash_values = pd.to_numeric(
+        cash_rows["Market Value"],
+        errors="coerce"
+    ).fillna(0.0)
+
+    return round(max(0.0, float(cash_values.sum())), 2)
+
+
 # ============================================================
 # DECISION NORMALISATION
 # ============================================================
@@ -1099,7 +1136,7 @@ def _build_macro_regime_assessment():
 
     else:
         latest = float(closes.iloc[-1])
-        change_bps = (latest - float(closes.iloc[-21])) * 100.0
+        change_bps = (latest - float(closes.iloc[-21])) * 10.0
 
         row["Observation Date"] = pd.Timestamp(
             closes.index[-1]
@@ -1316,7 +1353,7 @@ def _build_macro_regime_assessment():
         else:
             latest = float(closes.iloc[-1])
             previous = float(closes.iloc[-21])
-            change_bps = (latest - previous) * 100.0
+            change_bps = (latest - previous) * 10.0
 
             row["Observation Date"] = pd.Timestamp(
                 closes.index[-1]
@@ -1441,16 +1478,14 @@ def _build_macro_regime_assessment():
             "proxies. Review candidate sensitivity and sizing."
         )
 
-    elif (
-        elevated_count == 1
-        and len(regime_assessed) == len(regime_indicators) == 3
-    ):
+    elif elevated_count == 1:
         result["status"] = "CAUTION"
         result["regime"] = "CAUTION"
         result["summary"] = (
             "One configured macro proxy has an elevated-risk signal. "
-            "Review sensitive candidates even though the proxy set is "
-            "not classified as adverse."
+            f"{len(regime_assessed)} of {len(regime_indicators)} "
+            "composite proxies were assessed. Review sensitive candidates; "
+            "the incomplete proxy set prevents a complete regime assessment."
         )
 
     elif len(regime_assessed) == len(regime_indicators) == 3:
@@ -1519,6 +1554,8 @@ def _build_market_risk_assessment(
         "company_risk_flags": [],
         "individual_stock_assessments": [],
         "transaction_risk_reviews": [],
+        "common_theme_exposure": [],
+        "explicit_investment_theme_assessment": [],
         "recommendations": [],
         "macro_stress_scenarios": [],
         "data_quality": {
@@ -1844,136 +1881,402 @@ def _build_market_risk_assessment(
     # --------------------------------------------------------
     # SHADOW MARKET BREADTH / RELATIVE STRENGTH
     # --------------------------------------------------------
-    # RSP/SPY compares the S&P 500 equal-weight ETF with the
-    # capitalisation-weighted S&P 500 ETF. It is diagnostic only:
-    # no stress thresholds or production allocation rules are applied.
+    # These indicators are diagnostic only. They do not feed
+    # production decisions, allocation eligibility or sizing.
+    #
+    # RSP/SPY: equal-weight versus capitalisation-weighted S&P 500.
+    # IWM/SPY: US small-cap versus broad-market relative strength.
+    # QQQ/SPY: Nasdaq-100 versus broad-market relative strength.
+    # MAG7: simple average of seven constituent returns versus SPY.
+    #
+    # All comparisons use common observation dates. No signal
+    # thresholds are applied.
 
-    breadth = {
-        "Indicator": "RSP/SPY Relative Strength",
+    def _leadership_closes(data):
+        """Return usable prices and explicitly identify the selected price basis."""
+        if data is None or data.empty:
+            return None, None
+
+        frame = data.copy()
+        frame.index = pd.to_datetime(frame.index, errors="coerce")
+        frame = frame.loc[~frame.index.isna()]
+
+        if getattr(frame.index, "tz", None) is not None:
+            frame.index = frame.index.tz_localize(None)
+
+        frame = frame.sort_index()
+        frame = frame.loc[~frame.index.duplicated(keep="last")]
+
+        if "Adj Close" in frame.columns:
+            adjusted = pd.to_numeric(
+                frame["Adj Close"], errors="coerce"
+            ).dropna()
+            adjusted = adjusted[adjusted > 0]
+        else:
+            adjusted = pd.Series(dtype="float64")
+
+        if not adjusted.empty:
+            return adjusted, "Adj Close"
+
+        if "Close" not in frame.columns:
+            return None, None
+
+        closes = pd.to_numeric(
+            frame["Close"], errors="coerce"
+        ).dropna()
+        closes = closes[closes > 0]
+
+        if closes.empty:
+            return None, None
+
+        return closes, "Close (fallback)"
+
+
+    def _leadership_series(ticker):
+        """Load one ticker and retain auditable price-source/freshness metadata."""
+        provenance = {
+            "Ticker": ticker,
+            "Retrieval Status": "UNASSESSED",
+            "Price Column": None,
+            "Price Basis": None,
+            "Latest Observation": None,
+            "Observation Age Days": None,
+            "Freshness Status": "UNASSESSED",
+        }
+
+        try:
+            data = get_stock_data(ticker, period="1y")
+            closes, price_basis = _leadership_closes(data)
+
+            if closes is None:
+                provenance["Retrieval Status"] = "MISSING OR UNUSABLE"
+                return None, (
+                    f"{ticker}: no usable closing-price history."
+                ), provenance
+
+            latest_date = pd.Timestamp(closes.index[-1])
+            age_days = (
+                pd.Timestamp(datetime.now().date())
+                - latest_date.normalize()
+            ).days
+
+            provenance.update({
+                "Retrieval Status": "AVAILABLE",
+                "Price Column": (
+                    "Adj Close" if price_basis == "Adj Close" else "Close"
+                ),
+                "Price Basis": price_basis,
+                "Latest Observation": latest_date.strftime("%Y-%m-%d"),
+                "Observation Age Days": age_days,
+                "Freshness Status": (
+                    "FRESH" if 0 <= age_days <= 5 else "STALE OR INVALID"
+                ),
+            })
+
+            return closes.rename(ticker), None, provenance
+
+        except Exception as exc:
+            provenance["Retrieval Status"] = "RETRIEVAL FAILED"
+            return None, (
+                f"{ticker}: data retrieval failed ({type(exc).__name__})."
+            ), provenance
+
+
+    def _aligned_leadership_prices(tickers):
+        series = []
+        errors = []
+        provenance = []
+
+        for ticker in tickers:
+            closes, error, ticker_provenance = _leadership_series(ticker)
+            provenance.append(ticker_provenance)
+
+            if closes is None:
+                errors.append(error)
+            else:
+                series.append(closes)
+
+        if errors:
+            return None, "; ".join(errors), provenance
+
+        aligned = pd.concat(
+            series, axis=1, join="inner"
+        ).dropna().sort_index()
+
+        if aligned.empty:
+            return None, (
+                "No common valid observation dates across "
+                + ", ".join(tickers) + "."
+            ), provenance
+
+        return aligned, None, provenance
+
+
+    def _relative_strength_indicator(
+        name,
+        numerator_ticker,
+        denominator_ticker="SPY",
+    ):
+        row = {
+            "Indicator": name,
+            "Status": "UNASSESSED",
+            "Latest Observation": None,
+            "Relative Change 20 Sessions %": None,
+            "Relative Change 60 Sessions %": None,
+            "Evidence": "",
+            "Interpretation": (
+                "Positive values indicate improving relative strength "
+                "versus the comparison benchmark; negative values "
+                "indicate weakening relative strength."
+            ),
+            "Advisory Only": True,
+        }
+
+        aligned, error, provenance = _aligned_leadership_prices(
+            [numerator_ticker, denominator_ticker]
+        )
+        row["Ticker Data Provenance"] = provenance
+
+        if aligned is None:
+            row["Evidence"] = error
+            return row
+
+        latest_date = pd.Timestamp(aligned.index[-1])
+        today_date = pd.Timestamp(datetime.now().date())
+        age_days = (today_date - latest_date.normalize()).days
+
+        row["Latest Observation"] = latest_date.strftime("%Y-%m-%d")
+
+        if age_days < 0 or age_days > 5:
+            row["Evidence"] = (
+                f"Latest common observation is {age_days} calendar "
+                "days old; treated as stale or invalid."
+            )
+            return row
+
+        ratio = (
+            aligned[numerator_ticker]
+            / aligned[denominator_ticker]
+        )
+
+        if len(ratio) >= 21:
+            row["Relative Change 20 Sessions %"] = round(
+                (float(ratio.iloc[-1]) / float(ratio.iloc[-21]) - 1.0)
+                * 100.0,
+                2,
+            )
+
+        if len(ratio) >= 61:
+            row["Relative Change 60 Sessions %"] = round(
+                (float(ratio.iloc[-1]) / float(ratio.iloc[-61]) - 1.0)
+                * 100.0,
+                2,
+            )
+
+        if (
+            row["Relative Change 20 Sessions %"] is None
+            and row["Relative Change 60 Sessions %"] is None
+        ):
+            row["Evidence"] = (
+                f"Only {len(ratio)} common observations available; "
+                "at least 21 are required for a 20-session comparison."
+            )
+            return row
+
+        row["Status"] = "ASSESSED — NO THRESHOLDS"
+        row["Evidence"] = (
+            f"{numerator_ticker}/{denominator_ticker} relative-price "
+            f"change calculated over {len(ratio)} common observation "
+            "dates, using adjusted closes where available. "
+            "No signal thresholds applied."
+        )
+
+        return row
+
+    leadership_indicators = [
+        _relative_strength_indicator(
+            "RSP/SPY Relative Strength",
+            "RSP",
+        ),
+        _relative_strength_indicator(
+            "IWM/SPY Small-Cap Relative Strength",
+            "IWM",
+        ),
+        _relative_strength_indicator(
+            "QQQ/SPY Nasdaq-100 Relative Strength",
+            "QQQ",
+        ),
+    ]
+
+    # MAG7 constituent leadership: simple equal-weight average of
+    # the seven individual period returns, less the SPY period return.
+    # This is not a daily-rebalanced equal-weight index.
+
+    mag7_tickers = [
+        "AAPL",
+        "MSFT",
+        "AMZN",
+        "GOOGL",
+        "META",
+        "NVDA",
+        "TSLA",
+    ]
+
+    mag7_row = {
+        "Indicator": "MAG7 Equal-Weight Relative Performance vs SPY",
         "Status": "UNASSESSED",
         "Latest Observation": None,
         "Relative Change 20 Sessions %": None,
         "Relative Change 60 Sessions %": None,
         "Evidence": "",
         "Interpretation": (
-            "Positive change indicates improving equal-weight relative "
-            "strength; negative change indicates weakening relative strength."
+            "Positive values indicate that the simple average MAG7 "
+            "constituent return exceeded SPY; negative values indicate "
+            "underperformance."
         ),
         "Advisory Only": True,
+        "Constituent Coverage": 0,
+        "Constituents Required": 7,
     }
 
-    try:
-        rsp_data = get_stock_data("RSP", period="1y")
-        spy_data = get_stock_data("SPY", period="1y")
+    mag7_aligned, mag7_error, mag7_provenance = (
+        _aligned_leadership_prices(mag7_tickers + ["SPY"])
+    )
+    mag7_row["Ticker Data Provenance"] = mag7_provenance
+    mag7_row["Constituent Coverage"] = sum(
+        item["Retrieval Status"] == "AVAILABLE"
+        for item in mag7_provenance
+        if item["Ticker"] in mag7_tickers
+    )
+    missing_mag7 = [
+        item["Ticker"]
+        for item in mag7_provenance
+        if item["Ticker"] in mag7_tickers
+        and item["Retrieval Status"] != "AVAILABLE"
+    ]
 
-        def _relative_strength_closes(data):
-            if data is None or data.empty:
-                return None
+    if mag7_aligned is None:
+        mag7_row["Evidence"] = (
+            "MAG7 assessment requires valid histories for all seven "
+            "constituents and SPY. "
+            f"Retrieved {mag7_row['Constituent Coverage']}/7 MAG7 constituents. "
+            f"Unavailable constituents: {', '.join(missing_mag7) or 'none'}. "
+            + str(mag7_error)
+        )
+    else:
+        latest_date = pd.Timestamp(mag7_aligned.index[-1])
+        today_date = pd.Timestamp(datetime.now().date())
+        age_days = (today_date - latest_date.normalize()).days
 
-            frame = data.copy()
-            frame.index = pd.to_datetime(frame.index)
-            if getattr(frame.index, "tz", None) is not None:
-                frame.index = frame.index.tz_localize(None)
-            frame = frame.sort_index()
-
-            column = (
-                "Adj Close"
-                if "Adj Close" in frame.columns
-                else "Close"
-            )
-            if column not in frame.columns:
-                return None
-
-            values = pd.to_numeric(
-                frame[column], errors="coerce"
-            ).dropna()
-            values = values[~values.index.duplicated(keep="last")]
-            return values[values > 0]
-
-        rsp_closes = _relative_strength_closes(rsp_data)
-        spy_closes = _relative_strength_closes(spy_data)
-
-        if rsp_closes is None or spy_closes is None:
-            breadth["Evidence"] = (
-                "RSP or SPY cached price data is missing or has no "
-                "usable closing-price column."
+        mag7_row["Latest Observation"] = latest_date.strftime("%Y-%m-%d")
+        if age_days < 0 or age_days > 5:
+            mag7_row["Evidence"] = (
+                f"Latest common observation is {age_days} calendar "
+                "days old; treated as stale or invalid."
             )
         else:
-            aligned = pd.concat(
-                [rsp_closes.rename("RSP"), spy_closes.rename("SPY")],
-                axis=1,
-                join="inner",
-            ).dropna()
+            for lookback, field in (
+                (21, "Relative Change 20 Sessions %"),
+                (61, "Relative Change 60 Sessions %"),
+            ):
+                if len(mag7_aligned) < lookback:
+                    continue
 
-            if aligned.empty:
-                breadth["Evidence"] = (
-                    "RSP and SPY have no common valid observation dates."
+                start_prices = mag7_aligned.iloc[-lookback]
+                end_prices = mag7_aligned.iloc[-1]
+
+                constituent_returns = (
+                    end_prices[mag7_tickers]
+                    / start_prices[mag7_tickers]
+                    - 1.0
+                ) * 100.0
+
+                spy_return = (
+                    float(end_prices["SPY"])
+                    / float(start_prices["SPY"])
+                    - 1.0
+                ) * 100.0
+
+                equal_weight_return = float(
+                    constituent_returns.mean()
+                )
+
+                mag7_row[field] = round(
+                    equal_weight_return - spy_return,
+                    2,
+                )
+
+            if (
+                mag7_row["Relative Change 20 Sessions %"] is None
+                and mag7_row["Relative Change 60 Sessions %"] is None
+            ):
+                mag7_row["Evidence"] = (
+                    f"Only {len(mag7_aligned)} common observations "
+                    "available; at least 21 are required."
                 )
             else:
-                ratio = aligned["RSP"] / aligned["SPY"]
-                latest_date = pd.Timestamp(ratio.index[-1])
-                today_date = pd.Timestamp(datetime.now().date())
-
-                breadth["Latest Observation"] = latest_date.strftime(
-                    "%Y-%m-%d"
+                mag7_row["Status"] = "ASSESSED — NO THRESHOLDS"
+                mag7_row["Evidence"] = (
+                    "Simple arithmetic average of the seven MAG7 "
+                    "constituents' period returns, less SPY's period "
+                    "return, calculated on common dates. This is not "
+                    "a daily-rebalanced equal-weight index. "
+                    "No signal thresholds applied."
                 )
 
-                age_days = (
-                    today_date - latest_date.normalize()
-                ).days
+    leadership_indicators.append(mag7_row)
 
-                if age_days < 0 or age_days > 5:
-                    breadth["Evidence"] = (
-                        f"Latest common observation is {age_days} calendar "
-                        "days old; data is treated as stale or invalid."
-                    )
-                else:
-                    if len(ratio) >= 21:
-                        change_20 = (
-                            float(ratio.iloc[-1] / ratio.iloc[-21]) - 1
-                        ) * 100
-                        breadth["Relative Change 20 Sessions %"] = round(
-                            change_20, 2
-                        )
-
-                    if len(ratio) >= 61:
-                        change_60 = (
-                            float(ratio.iloc[-1] / ratio.iloc[-61]) - 1
-                        ) * 100
-                        breadth["Relative Change 60 Sessions %"] = round(
-                            change_60, 2
-                        )
-
-                    if (
-                        breadth["Relative Change 20 Sessions %"] is None
-                        and breadth["Relative Change 60 Sessions %"] is None
-                    ):
-                        breadth["Evidence"] = (
-                            "Insufficient common observations: at least 21 "
-                            "are required for 20 sessions and 61 for 60."
-                        )
-                    else:
-                        breadth["Status"] = "ASSESSED — NO THRESHOLDS"
-                        breadth["Evidence"] = (
-                            f"Calculated from {len(aligned)} common RSP/SPY "
-                            "observation dates using adjusted closes where "
-                            "available. No arbitrary signal thresholds applied."
-                        )
-
-    except Exception as exc:
-        breadth["Status"] = "UNASSESSED"
-        breadth["Evidence"] = (
-            f"Relative-strength assessment failed: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    assessment["market_breadth_indicators"].append(breadth)
-    assessment["data_quality"]["market_breadth_assessed"] = (
-        breadth["Status"] == "ASSESSED — NO THRESHOLDS"
+    assessment["market_breadth_indicators"].extend(
+        leadership_indicators
     )
 
-    # --------------------------------------------------------
-    # CACHE-ONLY MACRO PROXY ASSESSMENT (SHADOW)
+    assessment["data_quality"]["market_breadth_assessed"] = any(
+        item["Status"] == "ASSESSED — NO THRESHOLDS"
+        for item in leadership_indicators
+    )
+    assessment["data_quality"]["market_leadership_indicator_count"] = len(
+        leadership_indicators
+    )
+    assessment["data_quality"]["market_leadership_assessed_count"] = sum(
+        item["Status"] == "ASSESSED — NO THRESHOLDS"
+        for item in leadership_indicators
+    )
+    assessment["data_quality"]["mag7_constituent_coverage"] = (
+        mag7_row["Constituent Coverage"]
+    )
+
+    _leadership_provenance_by_ticker = {}
+    for _indicator in leadership_indicators:
+        for _item in _indicator.get("Ticker Data Provenance", []):
+            if isinstance(_item, dict):
+                _leadership_provenance_by_ticker[_item["Ticker"]] = _item
+
+    _leadership_provenance = list(
+        _leadership_provenance_by_ticker.values()
+    )
+
+    assessment["market_leadership_data_provenance"] = (
+        _leadership_provenance
+    )
+
+    assessment["data_quality"]["market_leadership_tickers_expected"] = (
+        len(_leadership_provenance)
+    )
+    assessment["data_quality"]["market_leadership_tickers_available"] = sum(
+        item["Retrieval Status"] == "AVAILABLE"
+        for item in _leadership_provenance
+    )
+    assessment["data_quality"]["market_leadership_tickers_stale"] = sum(
+        item["Freshness Status"] == "STALE OR INVALID"
+        for item in _leadership_provenance
+    )
+    assessment["data_quality"]["market_leadership_close_fallback_count"] = sum(
+        item["Price Basis"] == "Close (fallback)"
+        for item in _leadership_provenance
+    )
+
+
+    # CACHE-ONLY MACRO PROXY ASSESSMENT (SHADOW)    # CACHE-ONLY MACRO PROXY ASSESSMENT (SHADOW)
     # --------------------------------------------------------
     macro_assessment = _build_macro_regime_assessment()
     assessment["macro_risk_assessment"] = macro_assessment
@@ -3315,6 +3618,130 @@ def _build_market_risk_assessment(
         },
     ]
 
+    # --------------------------------------------------------
+    # MEASURED SECTOR / INDUSTRY CLASSIFICATION OVERLAP
+    # SHADOW ONLY — descriptive, not an allocation rule.
+    # --------------------------------------------------------
+
+    _overlap_groups = {}
+
+    for _state, _positions, _denominator in (
+        ("CURRENT", current_positions, current_holdings_value),
+        ("PROPOSED", proposed_positions, proposed_holdings_value),
+    ):
+        for _ticker, _position in _positions.items():
+            _value = max(0.0, safe_float(_position.get("value", 0)))
+            if _value <= 0:
+                continue
+
+            # ETF constituent exposure is not available here.
+            if str(_position.get("asset_type", "")).strip().upper() == "ETF":
+                continue
+
+            for _classification, _raw_label in (
+                ("SECTOR", _normalise_economic_sector(_position.get("sector"))),
+                ("INDUSTRY", _normalise_text(_position.get("industry"))),
+            ):
+                _label = str(_raw_label or "").strip()
+                if _label.upper() in {
+                    "", "N/A", "NA", "UNKNOWN", "NONE", "NULL",
+                    "UNCLASSIFIED", "ETF", "ETP",
+                }:
+                    continue
+
+                _key = (_classification, _label.upper())
+                _group = _overlap_groups.setdefault(
+                    _key,
+                    {
+                        "classification": _classification,
+                        "label": _label,
+                        "current_tickers": [],
+                        "current_value": 0.0,
+                        "proposed_tickers": [],
+                        "proposed_value": 0.0,
+                    },
+                )
+
+                _ticker_field = (
+                    "current_tickers"
+                    if _state == "CURRENT"
+                    else "proposed_tickers"
+                )
+                _value_field = (
+                    "current_value"
+                    if _state == "CURRENT"
+                    else "proposed_value"
+                )
+
+                _group[_ticker_field].append(_ticker)
+                _group[_value_field] += _value
+
+    for _key in sorted(_overlap_groups):
+        _group = _overlap_groups[_key]
+        _current_tickers = sorted(set(_group["current_tickers"]))
+        _proposed_tickers = sorted(set(_group["proposed_tickers"]))
+        _current_amount = _group["current_value"]
+        _proposed_amount = _group["proposed_value"]
+
+        assessment["common_theme_exposure"].append({
+            "classification": _group["classification"],
+            "classification_label": _group["label"],
+            "current_tickers": _current_tickers,
+            "current_holding_count": len(_current_tickers),
+            "current_exposure_value": round(_current_amount, 2),
+            "current_exposure_percent_of_holdings": round(
+                100.0 * _current_amount / current_holdings_value, 2
+            ) if current_holdings_value > 0 else None,
+            "proposed_tickers": _proposed_tickers,
+            "proposed_holding_count": len(_proposed_tickers),
+            "proposed_exposure_value": round(_proposed_amount, 2),
+            "proposed_exposure_percent_of_holdings": round(
+                100.0 * _proposed_amount / proposed_holdings_value, 2
+            ) if proposed_holdings_value > 0 else None,
+            "evidence": "Existing reconciled sector/industry classifications.",
+            "advisory_only": True,
+        })
+
+    assessment["common_theme_exposure"].sort(
+        key=lambda item: (
+            item["classification"],
+            -max(
+                item["current_exposure_value"],
+                item["proposed_exposure_value"],
+            ),
+            item["classification_label"],
+        )
+    )
+
+    # Explicit investment themes are deliberately not inferred from
+    # sector/industry labels or historical price correlation.
+    # Source-backed company-to-theme mapping is not currently available.
+    assessment["explicit_investment_theme_assessment"] = [
+        {
+            "theme": _theme,
+            "status": "UNASSESSED — SOURCE-BACKED MAPPING REQUIRED",
+            "evidence_available": False,
+            "advisory_only": True,
+        }
+        for _theme in (
+            "AI INFRASTRUCTURE",
+            "SEMICONDUCTORS",
+            "CLOUD INFRASTRUCTURE",
+            "DIGITAL ADVERTISING",
+        )
+    ]
+    assessment["data_quality"]["correlated_theme_assessed"] = False
+
+    assessment["limitations"].append(
+        "Sector and industry overlap measures use available company "
+        "classifications; they do not establish common investment themes."
+    )
+    assessment["limitations"].append(
+        "Explicit investment themes remain unassessed until source-backed "
+        "company-to-theme mappings are available. Price correlation is not "
+        "evidence of a shared investment theme."
+    )
+
     known_etf_tickers = {
         item["ticker"] for item in assessment["known_etf_holdings"]
     }
@@ -4599,9 +5026,13 @@ def _build_market_risk_assessment(
         elif any(value in _risk_statuses for value in _statuses):
             _status = "SIGNAL_DETECTED"
             _status_reason = "At least one linked market/macro proxy breached a provisional review threshold."
-        elif _statuses and all(value in _risk_statuses | _clear_statuses for value in _statuses):
+        elif (
+            len(_evidence) == len(_definition["indicators"])
+            and _statuses
+            and all(value in _clear_statuses for value in _statuses)
+        ):
             _status = "NO_CONFIGURED_TRIGGER"
-            _status_reason = "Linked proxies were assessed without a configured threshold breach; this does not rule out the scenario."
+            _status_reason = "All configured linked proxies were assessed without a configured threshold breach; this does not rule out the scenario."
         else:
             _status = "UNASSESSED"
             _status_reason = "Linked indicators are missing, stale or not assessed; missing data is not low risk."
@@ -5793,14 +6224,19 @@ def generate_portfolio_reallocation(
 
 
 
-        risk_score = safe_float(
-            row.get(
-                "Risk Score",
-                row.get(
-                    "risk_score",
-                    0
-                )
-            )
+        raw_risk_score = row.get(
+            "Risk Score",
+            row.get("risk_score", None)
+        )
+
+        risk_score = safe_float(raw_risk_score)
+
+        # Zero is treated as unavailable because this pipeline may
+        # use zero as its default when no risk score was supplied.
+        risk_score_available = (
+            raw_risk_score is not None
+            and not pd.isna(raw_risk_score)
+            and risk_score > 0
         )
 
         current_value = safe_float(
@@ -5855,6 +6291,12 @@ def generate_portfolio_reallocation(
                 "Action": "ADD",
                 "Investment Score": score,
                 "Risk Score": risk_score,
+                "Risk Score Available": risk_score_available,
+                "Risk Score Status": (
+                    "AVAILABLE"
+                    if risk_score_available
+                    else "UNKNOWN / NOT SCORED"
+                ),
                 "Destination Priority": (
                     destination_priority
                 ),
@@ -6010,17 +6452,16 @@ def generate_portfolio_reallocation(
         risk_multiplier = 1.0
 
         risk_score = safe_float(
-            destination.get(
-                "Risk Score",
-                0
-            )
+            destination.get("Risk Score", 0)
         )
 
-        if risk_score > 0:
+        risk_score_available = bool(
+            destination.get("Risk Score Available", False)
+        )
 
+        if risk_score_available:
             if risk_score >= 10.0:
                 risk_multiplier = 1.0
-
             else:
                 risk_multiplier = 0.70
 
@@ -6217,6 +6658,32 @@ def generate_portfolio_reallocation(
                 ),
                 "Permitted Release %": 100.0,
                 "Authorised Destination": ""
+            }
+        )
+
+    # --------------------------------------------------------
+    # Existing portfolio cash
+    # --------------------------------------------------------
+
+    actual_cash_balance = load_actual_cash_balance()
+
+    if actual_cash_balance > 0:
+        funding_candidates.append(
+            {
+                "Ticker": "CASH",
+                "Name": "Existing Portfolio Cash",
+                "Current Value": actual_cash_balance,
+                "Current Quantity": 0.0,
+                "Current Allocation %": 0.0,
+                "Sector": "Cash",
+                "Asset Type": "CASH",
+                "Final Decision": "EXISTING CASH",
+                "Investment Score": 0.0,
+                "Funding Priority": 390.0,
+                "Owned": False,
+                "Funding Reason": "Existing cash balance from holdings_raw.csv",
+                "Permitted Release %": 100.0,
+                "Authorised Destination": "",
             }
         )
 
@@ -6486,6 +6953,7 @@ def generate_portfolio_reallocation(
     funding_metadata = {}
 
     assessment_cash = 0.0
+    existing_cash = 0.0
     released_from_holdings = 0.0
 
     for candidate in funding_candidates:
@@ -6516,7 +6984,7 @@ def generate_portfolio_reallocation(
             )
         )
 
-        if source_decision == "CASH":
+        if source_decision in {"CASH", "EXISTING CASH"}:
 
             permitted_release = source_value
 
@@ -6545,6 +7013,10 @@ def generate_portfolio_reallocation(
 
             assessment_cash += permitted_release
 
+        elif source_decision == "EXISTING CASH":
+
+            existing_cash += permitted_release
+
         else:
 
             released_from_holdings += permitted_release
@@ -6559,6 +7031,7 @@ def generate_portfolio_reallocation(
 
     total_available_capital = round(
         assessment_cash
+        + existing_cash
         + released_from_holdings,
         2
     )
@@ -7326,6 +7799,7 @@ def generate_portfolio_reallocation(
 
     total_released = round(
         assessment_cash
+        + existing_cash
         + released_from_holdings,
         2
     )
@@ -7381,6 +7855,10 @@ def generate_portfolio_reallocation(
     summary = {
         "Assessment Cash": round(
             assessment_cash,
+            2
+        ),
+        "Existing Portfolio Cash": round(
+            existing_cash,
             2
         ),
         "Released From Holdings": round(
@@ -7802,6 +8280,8 @@ def generate_portfolio_reallocation(
         ("candidate_macro_reviews", "CANDIDATE MACRO SENSITIVITY REVIEWS"),
         ("holding_market_sensitivity", "HOLDING MARKET SENSITIVITY"),
         ("correlated_holding_clusters", "CORRELATED HOLDING PAIRS"),
+        ("common_theme_exposure", "SECTOR / INDUSTRY EXPOSURE AND OVERLAP"),
+        ("explicit_investment_theme_assessment", "EXPLICIT INVESTMENT THEMES — ASSESSMENT STATUS"),
         ("holding_market_sensitivity_unavailable", "HOLDING PRICE DATA GAPS"),
         ("portfolio_concentration", "PORTFOLIO CONCENTRATION"),
         ("company_risk_flags", "COMPANY RISK FLAGS"),

@@ -147,6 +147,65 @@ def build_reallocation_audit(
         summary = {}
 
     # ============================================================
+    # ACTUAL TRANSACTION TOTALS
+    # ============================================================
+    # Audit actual generated transactions separately from the
+    # engine's planned destination allocations and funding limits.
+
+    actual_destination_allocations = {}
+    actual_source_releases = {}
+
+    if not reallocation_df.empty:
+        for _, transaction in reallocation_df.iterrows():
+            amount_value = transaction.get(
+                "Reallocated Capital",
+                None
+            )
+
+            if amount_value is None or pd.isna(amount_value):
+                amount_value = transaction.get(
+                    "Released Capital",
+                    0
+                )
+
+            amount = _safe_float(amount_value)
+
+            if amount <= 0:
+                continue
+
+            destination_ticker = _clean_ticker(
+                transaction.get("Destination Ticker", "")
+            )
+            source_ticker = _clean_ticker(
+                transaction.get("Source Ticker", "")
+            )
+
+            if destination_ticker:
+                actual_destination_allocations[
+                    destination_ticker
+                ] = (
+                    actual_destination_allocations.get(
+                        destination_ticker, 0.0
+                    ) + amount
+                )
+
+            if source_ticker:
+                actual_source_releases[source_ticker] = (
+                    actual_source_releases.get(
+                        source_ticker, 0.0
+                    ) + amount
+                )
+
+    actual_destination_allocations = {
+        ticker: round(amount, 2)
+        for ticker, amount in actual_destination_allocations.items()
+    }
+    actual_source_releases = {
+        ticker: round(amount, 2)
+        for ticker, amount in actual_source_releases.items()
+    }
+
+    # ============================================================
     # LOOKUPS
     # ============================================================
 
@@ -264,11 +323,16 @@ def build_reallocation_audit(
             1.0
         )
 
-        allocation = _safe_float(
+        planned_allocation = _safe_float(
             destination_allocations.get(
                 ticker,
                 0
             )
+        )
+
+        allocation = actual_destination_allocations.get(
+            ticker,
+            0.0
         )
 
         is_eligible = (
@@ -396,6 +460,19 @@ def build_reallocation_audit(
                     score,
                     2
                 ),
+                "Risk Score": destination.get(
+                    "Risk Score"
+                ),
+                "Risk Score Available": bool(
+                    destination.get(
+                        "Risk Score Available",
+                        False
+                    )
+                ),
+                "Risk Score Status": destination.get(
+                    "Risk Score Status",
+                    "UNKNOWN / NOT SCORED"
+                ),
                 "Sector": destination.get(
                     "Sector",
                     ""
@@ -423,6 +500,10 @@ def build_reallocation_audit(
                     2
                 ),
                 "Selected For Deployment": is_selected,
+                "Planned Allocation": round(
+                    planned_allocation,
+                    2
+                ),
                 "Allocated Capital": round(
                     allocation,
                     2
@@ -484,15 +565,21 @@ def build_reallocation_audit(
             )
         )
 
-        released_capital = _safe_float(
+        permitted_release_capital = _safe_float(
             current_value
             * permitted_release_percent
             / 100.0
         )
 
         if source_action == "CASH":
+            permitted_release_capital = current_value
 
-            released_capital = current_value
+        # This is the amount evidenced by generated transactions,
+        # not the maximum amount the source was permitted to release.
+        released_capital = actual_source_releases.get(
+            ticker,
+            0.0
+        )
 
         funding_rows.append(
             {
@@ -510,9 +597,18 @@ def build_reallocation_audit(
                     permitted_release_percent,
                     2
                 ),
+                "Permitted Release Capital": round(
+                    permitted_release_capital,
+                    2
+                ),
                 "Released Capital": round(
                     released_capital,
                     2
+                ),
+                "Funding Status": (
+                    "ACTUALLY FUNDED"
+                    if released_capital > 0
+                    else "NO ACTUAL RELEASE"
                 ),
                 "Funding Priority": round(
                     _safe_float(
@@ -567,13 +663,9 @@ def build_reallocation_audit(
             reallocation_df
         )
 
-    allocated_destination_count = len(
-        {
-            ticker
-            for ticker, amount
-            in destination_allocations.items()
-            if _safe_float(amount) >= min_trade_value
-        }
+    allocated_destination_count = sum(
+        amount >= min_trade_value
+        for amount in actual_destination_allocations.values()
     )
 
     excluded_destination_count = 0
@@ -663,7 +755,11 @@ def build_reallocation_audit(
             ),
             2
         ),
-        "Funding Sources": len(
+        "Funding Sources": sum(
+            amount > 0
+            for amount in actual_source_releases.values()
+        ),
+        "Funding Candidates": len(
             funding_rows
         ),
         "Destination Candidates": len(
