@@ -8352,6 +8352,17 @@ def generate_portfolio_reallocation(
 
     print("\nSHADOW MARKET AND PORTFOLIO RISK ASSESSMENT")
 
+    print("\nEXPOSURE RECONCILIATION CHECKS (ADVISORY ONLY)")
+    validation_rows = market_risk_assessment.get("exposure_validation", [])
+    if validation_rows:
+        print(
+            pd.DataFrame(validation_rows)[
+                ["check", "status", "observed", "expected", "detail"]
+            ].to_string(index=False)
+        )
+    else:
+        print("No exposure reconciliation checks returned.")
+
 
     print("\nEXPOSURE DENOMINATOR BASIS")
 
