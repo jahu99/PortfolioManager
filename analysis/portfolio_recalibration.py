@@ -1079,7 +1079,19 @@ def _build_macro_regime_assessment():
             if latest_date.tzinfo is not None:
                 latest_date = latest_date.tz_localize(None)
 
-            if (today - latest_date.normalize()).days > 5:
+            observation_age_days = (
+                today - latest_date.normalize()
+            ).days
+
+            if observation_age_days < 0:
+                cache[ticker] = (
+                    None,
+                    f"Invalid future-dated observation: "
+                    f"{latest_date:%Y-%m-%d}.",
+                )
+                return cache[ticker]
+
+            if observation_age_days > 5:
                 cache[ticker] = (
                     None,
                     f"Cached data stale; latest observation "
@@ -1110,6 +1122,8 @@ def _build_macro_regime_assessment():
             "Evidence": "",
             "Advisory Only": True,
             "Regime Contribution": True,
+            "Data Source": "Local cached market-price history",
+            "Retrieval Mode": "CACHE_ONLY",
         }
 
     # ------------------------------------------------------------
@@ -1468,28 +1482,59 @@ def _build_macro_regime_assessment():
         if item["Observation Date"]
     ]
     result["as_of"] = min(dates) if dates else None
+    result["oldest_observation_date"] = min(dates) if dates else None
+    result["latest_observation_date"] = max(dates) if dates else None
+    result["assessment_timestamp"] = pd.Timestamp.now(
+        tz="UTC"
+    ).isoformat()
+
+    result["assessment_completeness"] = (
+        "COMPLETE"
+        if len(regime_assessed) == len(regime_indicators)
+        else "PARTIAL"
+    )
+    result["coverage_percent"] = round(
+        len(regime_assessed) / len(regime_indicators) * 100,
+        1,
+    ) if regime_indicators else 0.0
+    result["missing_indicator_count"] = (
+        len(regime_indicators) - len(regime_assessed)
+    )
 
     if high_count or elevated_count >= 2:
         result["status"] = "ADVERSE"
-        result["regime"] = "ADVERSE"
+        result["signal_status"] = "ADVERSE"
+        result["regime"] = (
+            "ADVERSE"
+            if result["assessment_completeness"] == "COMPLETE"
+            else "ADVERSE — PARTIALLY ASSESSED"
+        )
         result["summary"] = (
             f"Macro-risk proxy review signals detected: {high_count} high "
             f"and {elevated_count} elevated among the three composite "
-            "proxies. Review candidate sensitivity and sizing."
+            f"proxies. Coverage: {len(regime_assessed)}/"
+            f"{len(regime_indicators)}. Review candidate sensitivity and "
+            "sizing; incomplete coverage limits confidence."
         )
 
     elif elevated_count == 1:
         result["status"] = "CAUTION"
-        result["regime"] = "CAUTION"
+        result["signal_status"] = "CAUTION"
+        result["regime"] = (
+            "CAUTION"
+            if result["assessment_completeness"] == "COMPLETE"
+            else "CAUTION — PARTIALLY ASSESSED"
+        )
         result["summary"] = (
             "One configured macro proxy has an elevated-risk signal. "
             f"{len(regime_assessed)} of {len(regime_indicators)} "
             "composite proxies were assessed. Review sensitive candidates; "
-            "the incomplete proxy set prevents a complete regime assessment."
+            "incomplete coverage limits confidence."
         )
 
-    elif len(regime_assessed) == len(regime_indicators) == 3:
+    elif result["assessment_completeness"] == "COMPLETE":
         result["status"] = "NEUTRAL"
+        result["signal_status"] = "NO CONFIGURED THRESHOLD BREACH"
         result["regime"] = "NEUTRAL"
         result["summary"] = (
             "All three configured composite macro proxies were assessed "
@@ -1499,7 +1544,8 @@ def _build_macro_regime_assessment():
 
     else:
         result["status"] = "UNASSESSED"
-        result["regime"] = "UNASSESSED"
+        result["signal_status"] = "UNASSESSED"
+        result["regime"] = "PARTIALLY ASSESSED — NO COMPLETE REGIME"
         result["summary"] = (
             f"Only {len(regime_assessed)} of {len(regime_indicators)} "
             "composite macro proxies were assessed. A complete macro "
@@ -1593,8 +1639,33 @@ def _build_market_risk_assessment(
     # They do not change production decisions or trade sizing.
 
     from datetime import datetime
-    from data.market_data import get_stock_data
+    from data import market_data
 
+    def _load_cached_market_prices(ticker):
+        """
+        Read existing local price history only.
+
+        SHADOW risk assessment must not trigger network retrieval.
+        Returns (prices, reason); reason is populated when unavailable.
+        """
+        try:
+            cache_file = market_data._cache_file(ticker, "1y")
+
+            if not os.path.exists(cache_file):
+                return None, "No local cached price history."
+
+            prices = pd.read_parquet(cache_file)
+
+            if prices is None or prices.empty:
+                return None, "Cached price history is empty."
+
+            if not isinstance(prices, pd.DataFrame):
+                return None, "Cached price history is not a DataFrame."
+
+            return prices, None
+
+        except Exception as exc:
+            return None, f"Cache read failed ({type(exc).__name__})."
     assessment["market_stress_indicators"] = []
     assessment["market_breadth_indicators"] = []
 
@@ -1647,13 +1718,19 @@ def _build_market_risk_assessment(
         }
 
         try:
-            prices = get_stock_data(ticker, period="1y")
+            prices, cache_error = _load_cached_market_prices(ticker)
 
-            if prices is None or prices.empty or "Close" not in prices.columns:
-                indicator["Evidence"] = "No usable benchmark price data."
+            if (
+                prices is None
+                or prices.empty
+                or "Close" not in prices.columns
+            ):
+                indicator["Evidence"] = (
+                    cache_error
+                    or "Cached data has no usable Close column."
+                )
                 assessment["market_stress_indicators"].append(indicator)
                 continue
-
             prices = prices.copy()
             prices.index = pd.to_datetime(prices.index)
             prices = prices.sort_index()
@@ -1682,9 +1759,9 @@ def _build_market_risk_assessment(
             indicator["Latest Observation"] = latest_date.strftime("%Y-%m-%d")
 
             # Avoid interpreting stale cached prices as current conditions.
-            if (today - latest_date.normalize()).days > 5:
+            if (today - latest_date.normalize()).days < 0 or (today - latest_date.normalize()).days > 5:
                 indicator["Evidence"] = (
-                    "Latest observation is more than five calendar days old."
+                    "Latest observation is future-dated or more than five calendar days old."
                 )
                 assessment["market_stress_indicators"].append(indicator)
                 continue
@@ -1945,20 +2022,55 @@ def _build_market_risk_assessment(
         }
 
         try:
-            data = get_stock_data(ticker, period="1y")
+            data, cache_error = _load_cached_market_prices(ticker)
+
+            if data is None:
+                provenance["Retrieval Status"] = "CACHE UNAVAILABLE"
+                provenance["Retrieval Detail"] = cache_error
+                return None, f"{ticker}: {cache_error}", provenance
+
             closes, price_basis = _leadership_closes(data)
 
             if closes is None:
                 provenance["Retrieval Status"] = "MISSING OR UNUSABLE"
+                provenance["Retrieval Detail"] = (
+                    "Cached data contains no usable closing-price history."
+                )
                 return None, (
                     f"{ticker}: no usable closing-price history."
                 ), provenance
-
             latest_date = pd.Timestamp(closes.index[-1])
+
+            if latest_date.tzinfo is not None:
+                latest_date = latest_date.tz_localize(None)
+
             age_days = (
                 pd.Timestamp(datetime.now().date())
                 - latest_date.normalize()
             ).days
+
+            if age_days < 0 or age_days > 5:
+                provenance.update({
+                    "Retrieval Status": "UNAVAILABLE - INVALID FRESHNESS",
+                    "Price Column": (
+                        "Adj Close" if price_basis == "Adj Close" else "Close"
+                    ),
+                    "Price Basis": price_basis,
+                    "Latest Observation": latest_date.strftime("%Y-%m-%d"),
+                    "Observation Age Days": age_days,
+                    "Freshness Status": (
+                        "FUTURE-DATED" if age_days < 0 else "STALE"
+                    ),
+                })
+                freshness_reason = (
+                    "future-dated"
+                    if age_days < 0
+                    else "more than five calendar days old"
+                )
+                return None, (
+                    f"{ticker}: latest observation "
+                    f"{latest_date:%Y-%m-%d} is {freshness_reason}."
+                ), provenance
 
             provenance.update({
                 "Retrieval Status": "AVAILABLE",
@@ -1968,11 +2080,8 @@ def _build_market_risk_assessment(
                 "Price Basis": price_basis,
                 "Latest Observation": latest_date.strftime("%Y-%m-%d"),
                 "Observation Age Days": age_days,
-                "Freshness Status": (
-                    "FRESH" if 0 <= age_days <= 5 else "STALE OR INVALID"
-                ),
+                "Freshness Status": "FRESH",
             })
-
             return closes.rename(ticker), None, provenance
 
         except Exception as exc:
@@ -2226,11 +2335,28 @@ def _build_market_risk_assessment(
 
     leadership_indicators.append(mag7_row)
 
-    assessment["market_breadth_indicators"].extend(
+    # Relative-strength comparisons are leadership indicators.
+    # They are not constituent-level market breadth measurements.
+    assessment["market_leadership_indicators"] = (
         leadership_indicators
     )
 
-    assessment["data_quality"]["market_breadth_assessed"] = any(
+    # Retain the existing field for output compatibility, but do not
+    # misclassify relative-strength indicators as market breadth.
+    assessment["market_breadth_indicators"] = []
+
+    assessment["market_breadth_assessment"] = {
+        "status": "UNASSESSED",
+        "reason": (
+            "Constituent-level advance/decline, percentage-above-moving-"
+            "average and new-high/new-low data are not currently available."
+        ),
+        "advisory_only": True,
+    }
+
+    assessment["data_quality"]["market_breadth_assessed"] = False
+    assessment["data_quality"]["market_breadth_status"] = "UNASSESSED"
+    assessment["data_quality"]["market_leadership_assessed"] = any(
         item["Status"] == "ASSESSED — NO THRESHOLDS"
         for item in leadership_indicators
     )
@@ -2290,6 +2416,15 @@ def _build_market_risk_assessment(
 
     assessment["data_quality"]["macro_proxy_indicators_total"] = (
         macro_assessment.get("regime_indicator_count", 0)
+    )
+    assessment["data_quality"]["macro_proxy_coverage_percent"] = (
+        macro_assessment.get("coverage_percent", 0.0)
+    )
+    assessment["data_quality"]["macro_assessment_completeness"] = (
+        macro_assessment.get("assessment_completeness", "UNASSESSED")
+    )
+    assessment["data_quality"]["macro_missing_indicator_count"] = (
+        macro_assessment.get("missing_indicator_count", 0)
     )
 
 
@@ -3154,15 +3289,18 @@ def _build_market_risk_assessment(
 
     for _ticker in sorted(set(_sensitivity_tickers) | set(_sensitivity_benchmarks)):
         try:
-            _prices = get_stock_data(_ticker, period="1y")
+            _prices, _cache_error = _load_cached_market_prices(_ticker)
+
             if (
                 _prices is None
                 or _prices.empty
                 or "Close" not in _prices.columns
             ):
-                _sensitivity_unavailable.append((_ticker, "No usable price data"))
+                _sensitivity_unavailable.append((
+                    _ticker,
+                    _cache_error or "Cached data has no usable Close column",
+                ))
                 continue
-
             _prices = _prices.copy()
             _prices.index = pd.to_datetime(_prices.index)
             if _prices.index.tz is not None:
@@ -3189,12 +3327,21 @@ def _build_market_risk_assessment(
             if _latest_date.tzinfo is not None:
                 _latest_date = _latest_date.tz_localize(None)
 
-            if (_sensitivity_today - _latest_date.normalize()).days > 5:
+            _sensitivity_age_days = (
+                _sensitivity_today - _latest_date.normalize()
+            ).days
+
+            if _sensitivity_age_days < 0:
+                _sensitivity_unavailable.append(
+                    (_ticker, f"Future-dated prices: latest {_latest_date.date()}")
+                )
+                continue
+
+            if _sensitivity_age_days > 5:
                 _sensitivity_unavailable.append(
                     (_ticker, f"Stale prices: latest {_latest_date.date()}")
                 )
                 continue
-
             _returns = _closes.pct_change().replace(
                 [float("inf"), float("-inf")], float("nan")
             ).dropna()
@@ -8265,7 +8412,20 @@ def generate_portfolio_reallocation(
 
     print("\nMACRO RISK PROXY ASSESSMENT")
     print("Status:", macro_assessment.get("status", "UNASSESSED"))
-    print("As of:", macro_assessment.get("as_of"))
+    print(
+        "Oldest observation date (legacy as_of):",
+        macro_assessment.get("as_of"),
+    )
+    print(
+        "Latest observation date:",
+        macro_assessment.get("latest_observation_date"),
+    )
+    print(
+        "Observation date coverage:",
+        macro_assessment.get("oldest_observation_date"),
+        "to",
+        macro_assessment.get("latest_observation_date"),
+    )
     print("Summary:", macro_assessment.get("summary", "No macro assessment returned."))
     macro_rows = macro_assessment.get("indicators", [])
     if macro_rows:
@@ -8273,9 +8433,23 @@ def generate_portfolio_reallocation(
     print("Historical pre-trade status:", macro_assessment.get("historical_pre_trade_status", "NOT_ASSESSED"))
     print("Historical pre-trade limitation:", macro_assessment.get("historical_pre_trade_reason", "Not available."))
 
+    breadth_assessment = market_risk_assessment.get(
+        "market_breadth_assessment", {}
+    )
+    print("\nMARKET BREADTH ASSESSMENT")
+    print("Status:", breadth_assessment.get("status", "UNASSESSED"))
+    print(
+        "Reason:",
+        breadth_assessment.get(
+            "reason",
+            "Constituent-level breadth data is not available.",
+        ),
+    )
+
     for section, title in (
         ("market_stress_indicators", "BROAD-MARKET STRESS INDICATORS"),
-    ("market_breadth_indicators", "MARKET BREADTH AND RELATIVE STRENGTH"),
+        ("market_breadth_indicators", "MARKET BREADTH INDICATORS — CONSTITUENT LEVEL"),
+        ("market_leadership_indicators", "MARKET LEADERSHIP / RELATIVE STRENGTH"),
         ("macro_stress_scenarios", "MACRO STRESS SCENARIO ASSESSMENT"),
         ("candidate_macro_reviews", "CANDIDATE MACRO SENSITIVITY REVIEWS"),
         ("holding_market_sensitivity", "HOLDING MARKET SENSITIVITY"),
