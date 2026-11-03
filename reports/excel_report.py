@@ -6572,10 +6572,63 @@ def create_report(
             "No per-ticker Stage 2 provenance records supplied — NOT ASSESSED",
         )
 
+        etf_lookthrough = market_risk_assessment.get(
+            "etf_lookthrough_assessment", {}
+        )
+        if not isinstance(etf_lookthrough, dict):
+            etf_lookthrough = {}
+
+        etf_lookthrough_overview = [{
+            "Overall Status": etf_lookthrough.get("status", "NOT ASSESSED"),
+            "Source Policy": etf_lookthrough.get("source_policy"),
+            "Maximum Evidence Age (Days)": etf_lookthrough.get("max_age_days"),
+            "Current ETF Value Assessed": etf_lookthrough.get(
+                "current", {}
+            ).get("assessed_etf_value"),
+            "Current ETF Value Unassessed": etf_lookthrough.get(
+                "current", {}
+            ).get("unassessed_etf_value"),
+            "Proposed ETF Value Assessed": etf_lookthrough.get(
+                "proposed", {}
+            ).get("assessed_etf_value"),
+            "Proposed ETF Value Unassessed": etf_lookthrough.get(
+                "proposed", {}
+            ).get("unassessed_etf_value"),
+            "Advisory Only": etf_lookthrough.get("advisory_only", True),
+        }]
+
         write_risk_section(
-            "ETF LOOK-THROUGH GAPS — NOT ASSESSED",
+            "ETF HOLDINGS LOOK-THROUGH — OVERVIEW",
+            etf_lookthrough_overview,
+            "ETF issuer-holdings look-through has not been assessed.",
+        )
+
+        etf_dimension_rows = []
+        for _state in ("current", "proposed"):
+            _state_data = etf_lookthrough.get(_state, {})
+            if not isinstance(_state_data, dict):
+                continue
+            for _dimension in ("sector", "country", "industry"):
+                for _label, _value in _state_data.get(_dimension, {}).items():
+                    etf_dimension_rows.append({
+                        "Portfolio State": _state.upper(),
+                        "Classification": _dimension.upper(),
+                        "Classification Label": _label,
+                        "Look-Through Exposure Value": round(_value, 2),
+                        "Evidence Basis": "Issuer-published ETF constituent weights",
+                        "Advisory Only": True,
+                    })
+
+        write_risk_section(
+            "ETF LOOK-THROUGH — SECTOR, COUNTRY AND INDUSTRY",
+            etf_dimension_rows,
+            "No validated ETF constituent classifications available.",
+        )
+
+        write_risk_section(
+            "ETF LOOK-THROUGH — FUND-LEVEL EVIDENCE AND GAPS",
             market_risk_assessment.get("known_etf_holdings", []),
-            "No ETF look-through status data available",
+            "No ETF holdings or look-through status data available.",
         )
 
         write_risk_section(
