@@ -4522,6 +4522,7 @@ def _build_market_risk_assessment(
                 unassessed_value += _value
                 continue
             assessed_value += _value
+            _dimension_weights = {"sector": 0.0, "country": 0.0, "industry": 0.0}
             for _holding in _evidence["holdings"]:
                 _weighted_value = _value * _holding["weight"]
                 for _dimension, _label, _totals in (
@@ -4532,6 +4533,13 @@ def _build_market_risk_assessment(
                     if str(_label or "").strip().upper() in {"", "N/A", "NA", "UNKNOWN", "NONE", "NULL", "UNCLASSIFIED", "ETF", "ETP"}:
                         continue
                     _totals[_label] = _totals.get(_label, 0.0) + _weighted_value
+                    _dimension_weights[_dimension.lower()] += _holding["weight"]
+            _record["sector_lookthrough_status"] = "ASSESSED" if _dimension_weights["sector"] >= 0.95 else "PARTIAL — CLASSIFICATION GAPS"
+            _record["country_lookthrough_status"] = "ASSESSED" if _dimension_weights["country"] >= 0.95 else "PARTIAL — CLASSIFICATION GAPS"
+            _record["industry_lookthrough_status"] = "ASSESSED" if _dimension_weights["industry"] >= 0.95 else "PARTIAL — CLASSIFICATION GAPS"
+            _record["sector_classified_weight_percent"] = round(_dimension_weights["sector"] * 100, 2)
+            _record["country_classified_weight_percent"] = round(_dimension_weights["country"] * 100, 2)
+            _record["industry_classified_weight_percent"] = round(_dimension_weights["industry"] * 100, 2)
         return {
             "assessed_etf_value": assessed_value,
             "unassessed_etf_value": unassessed_value,
@@ -4569,9 +4577,25 @@ def _build_market_risk_assessment(
             _evidence = _etf_lookthrough_cache.get(_ticker, {})
             if _evidence.get("status") != "ASSESSED":
                 continue
-            for _missing in (_missing_sector, _missing_country, _missing_industry):
-                while _ticker in _missing:
-                    _missing.remove(_ticker)
+            _dimension_status = {
+                "sector": _evidence.get("holdings", []),
+                "country": _evidence.get("holdings", []),
+                "industry": _evidence.get("holdings", []),
+            }
+            for _dimension, _missing in (
+                ("sector", _missing_sector),
+                ("country", _missing_country),
+                ("industry", _missing_industry),
+            ):
+                _field = "sector" if _dimension == "sector" else _dimension
+                _complete = all(
+                    str(_holding.get(_field, "")).strip().upper()
+                    not in {"", "N/A", "NA", "UNKNOWN", "NONE", "NULL", "UNCLASSIFIED", "ETF", "ETP"}
+                    for _holding in _dimension_status[_dimension]
+                )
+                if _complete:
+                    while _ticker in _missing:
+                        _missing.remove(_ticker)
 
     assessment["etf_lookthrough_assessment"] = {
         "status": "ASSESSED" if _current_etf_exposure["unassessed_etf_value"] == 0 and _proposed_etf_exposure["unassessed_etf_value"] == 0 else "PARTIALLY ASSESSED" if _current_etf_exposure["assessed_etf_value"] or _proposed_etf_exposure["assessed_etf_value"] else "NOT ASSESSED",
@@ -4587,6 +4611,20 @@ def _build_market_risk_assessment(
     assessment["data_quality"]["etf_unassessed_portfolio_percent"] = round(
         100.0 * _current_etf_exposure["unassessed_etf_value"] / current_holdings_value, 2
     ) if current_holdings_value > 0 else 0.0
+    assessment["data_quality"]["current_sector_classification_coverage_percent"] = round(
+        min(current_classified_sector_value / current_holdings_value * 100.0, 100.0), 2
+    ) if current_holdings_value > 0 else 0.0
+    assessment["data_quality"]["current_country_classification_coverage_percent"] = round(
+        min(current_classified_country_value / current_holdings_value * 100.0, 100.0), 2
+    ) if current_holdings_value > 0 else 0.0
+    assessment["data_quality"]["current_sector_classification_complete"] = (
+        not missing_sector_tickers
+        and current_classified_sector_value >= current_holdings_value - 0.01
+    )
+    assessment["data_quality"]["current_country_classification_complete"] = (
+        not missing_country_tickers
+        and current_classified_country_value >= current_holdings_value - 0.01
+    )
 
     # --------------------------------------------------------
     # SHADOW HOLDING MARKET SENSITIVITY AND CO-MOVEMENT
