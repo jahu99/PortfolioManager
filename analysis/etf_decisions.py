@@ -378,6 +378,9 @@ def decide_etf(
                 ),
             "ETF Score": 0,
             "ETF Signal": "UNKNOWN",
+            "ETF Indicators Assessed": 0,
+            "ETF Indicators Available": 5,
+            "ETF Evidence Coverage %": 0.0,
         }
 
     # ========================================================
@@ -547,6 +550,72 @@ def decide_etf(
         reduction = 100
 
     # ========================================================
+    # EVIDENCE SUFFICIENCY SAFEGUARD
+    # ========================================================
+
+    indicators_assessed = etf_analysis.get(
+        "ETF Indicators Assessed"
+    )
+
+    # Backwards-compatible fallback for older analysis payloads.
+    if indicators_assessed is None:
+
+        def _has_etf_evidence(key):
+            try:
+                value = float(etf_analysis.get(key))
+                return (
+                    value == value
+                    and value not in (
+                        float("inf"),
+                        float("-inf")
+                    )
+                )
+            except (TypeError, ValueError):
+                return False
+
+        indicators_assessed = sum((
+            _has_etf_evidence("Current Price")
+            and _has_etf_evidence("MA50"),
+
+            _has_etf_evidence("Current Price")
+            and _has_etf_evidence("MA200"),
+
+            _has_etf_evidence("MA50")
+            and _has_etf_evidence("MA200"),
+
+            _has_etf_evidence("6M Return %"),
+
+            _has_etf_evidence("12M Return %"),
+        ))
+
+    indicators_assessed = int(indicators_assessed)
+
+    if indicators_assessed < 4:
+
+        # Insufficient evidence for a portfolio change.
+        decision = "HOLD"
+        reduction = 0
+
+    elif indicators_assessed == 4:
+
+        # Four indicators can support a partial reduction,
+        # but cannot justify a full exit or a new/additional buy.
+        if owned and decision in ("SELL", "REDUCE"):
+
+            decision = "REDUCE"
+            reduction = min(
+                float(reduction or 50),
+                50
+            )
+
+        else:
+
+            decision = "HOLD"
+            reduction = 0
+
+    # Five of five indicators: retain existing decision rules.
+
+    # ========================================================
     # CONFIDENCE
     # ========================================================
 
@@ -592,6 +661,15 @@ def decide_etf(
 
         "ETF Signal":
             signal,
+
+        "ETF Indicators Assessed":
+            indicators_assessed,
+
+        "ETF Indicators Available":
+            5,
+
+        "ETF Evidence Coverage %":
+            indicators_assessed / 5 * 100,
 
         "Current Price":
             etf_analysis.get(

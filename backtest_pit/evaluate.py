@@ -36,19 +36,20 @@ def eligibility(panel: PricePanel, min_price: float = 5.0,
     return ((panel.close >= min_price) & (dollar_vol >= min_dollar_volume)).fillna(False)
 
 
-def forward_returns(adj: pd.DataFrame, positions: np.ndarray, horizon: int, lag: int = 1) -> pd.DataFrame:
+def forward_returns(adj: pd.DataFrame, positions: np.ndarray, horizon: int, lag: int = 1,
+                    exits=None) -> pd.DataFrame:
     """Total return from close ``t+lag`` to close ``t+lag+horizon``, indexed by signal date ``t``.
 
-    If a name stops trading before the exit date, its last available price is
-    used (so a collapse before delisting is counted rather than dropped). Names
-    with no entry price are NaN.
+    Exit prices come from ``exits`` (a ``backtest_pit.exits.ExitPrices``) when given, which separates short data
+    gaps from permanent delistings and can apply a terminal return. Without it the last available price is
+    forward-filled. Names with no entry price are NaN.
     """
     entry = positions + lag
     exit_ = entry + horizon
     ok = exit_ < len(adj)
     if not ok.any():
         return pd.DataFrame(columns=adj.columns, dtype=float)
-    adj_exit = adj.ffill()
+    adj_exit = exits.price if exits is not None else adj.ffill()
     e = adj.iloc[entry[ok]].to_numpy()
     x = adj_exit.iloc[exit_[ok]].to_numpy()
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -106,9 +107,9 @@ def cross_section_stats(factor: pd.DataFrame, fwd: pd.DataFrame, elig: pd.DataFr
 
 def evaluate_factor(name: str, factor: pd.DataFrame, adj: pd.DataFrame, elig: pd.DataFrame,
                     positions: np.ndarray, horizon: int, lag: int = 1, n_tests: int = 1,
-                    q: int = 5, min_names: int = 50, n_boot: int = 5000, seed: int = 0):
+                    q: int = 5, min_names: int = 50, n_boot: int = 5000, seed: int = 0, exits=None):
     """Returns (summary_dict, per_date_frame)."""
-    fwd = forward_returns(adj, positions, horizon, lag)
+    fwd = forward_returns(adj, positions, horizon, lag, exits)
     ic, quants, names, ties = cross_section_stats(factor, fwd, elig, q=q, min_names=min_names, seed=seed)
     row = {"factor": name, "horizon_days": horizon, "n_dates": int(len(ic))}
     nan = float("nan")

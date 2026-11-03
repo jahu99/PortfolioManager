@@ -6357,6 +6357,18 @@ def create_report(
         )
 
         write_risk_section(
+            "FINANCIAL STATEMENT EVIDENCE INVENTORY",
+            market_risk_assessment.get("financial_resilience_evidence", []),
+            "No financial-statement evidence records supplied — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "SHADOW FINANCIAL RESILIENCE METRICS",
+            market_risk_assessment.get("financial_resilience_metrics", []),
+            "No common-period operating-company financial metrics available — NOT ASSESSED",
+        )
+
+        write_risk_section(
             "EXPOSURE CONSISTENCY VALIDATION",
             market_risk_assessment.get("exposure_validation", []),
             "No exposure validation results are available",
@@ -6390,6 +6402,12 @@ def create_report(
             "MARKET BREADTH AND RELATIVE STRENGTH",
             market_risk_assessment.get("market_breadth_indicators", []),
             "RSP/SPY relative strength unavailable — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "SECTOR BREADTH AND EQUAL-WEIGHTED ROTATION",
+            market_risk_assessment.get("market_sector_breadth", []),
+            "No constituent-level sector breadth or rotation data available — NOT ASSESSED",
         )
 
         # -----------------------------------------------------
@@ -6469,6 +6487,24 @@ def create_report(
             "SECTOR / INDUSTRY EXPOSURE AND OVERLAP",
             market_risk_assessment.get("common_theme_exposure", []),
             "No measured sector/industry overlap data available",
+        )
+
+        write_risk_section(
+            "HOLDING MARKET SENSITIVITY",
+            market_risk_assessment.get("holding_market_sensitivity", []),
+            "No holding market-sensitivity records available — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "CORRELATED HOLDING PAIRS",
+            market_risk_assessment.get("correlated_holding_clusters", []),
+            "No correlated holding pairs identified or assessed — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "HOLDING PRICE DATA GAPS",
+            market_risk_assessment.get("holding_market_sensitivity_unavailable", []),
+            "No holding price-data gap records supplied",
         )
 
         write_risk_section(
@@ -7497,6 +7533,35 @@ def create_report(
             sheet_name="Alerts",
             index=False
         )
+        # --------------------------------------------------------
+        # PORTFOLIO REALLOCATION AUDIT — READ-ONLY REPORT OUTPUT
+        # --------------------------------------------------------
+        if isinstance(reallocation_audit, dict):
+            destination_audit_df = reallocation_audit.get(
+                "destination_audit"
+            )
+            if isinstance(destination_audit_df, pd.DataFrame):
+                destination_audit_df.to_excel(
+                    writer,
+                    sheet_name="Reallocation Destination Audit",
+                    index=False,
+                )
+            funding_audit_df = reallocation_audit.get(
+                "funding_audit"
+            )
+            if isinstance(funding_audit_df, pd.DataFrame):
+                funding_audit_df.to_excel(
+                    writer,
+                    sheet_name="Reallocation Funding Audit",
+                    index=False,
+                )
+            audit_summary = reallocation_audit.get("summary")
+            if isinstance(audit_summary, dict):
+                pd.DataFrame([audit_summary]).to_excel(
+                    writer,
+                    sheet_name="Reallocation Audit Summary",
+                    index=False,
+                )
 
     # =========================================================
     # WORKBOOK VERIFICATION

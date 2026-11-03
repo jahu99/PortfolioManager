@@ -1,7 +1,10 @@
 import pandas as pd
 import traceback
 
-from data.fundamentals import get_fundamentals
+from data.fundamentals import (
+    get_fundamentals,
+    get_financial_statements,
+)
 
 from data.database import (
     initialise_database,
@@ -2281,6 +2284,211 @@ def main():
     # Portfolio Reallocation
     # ---------------------------------
 
+    # ---------------------------------
+    # SHADOW FINANCIAL STATEMENT EVIDENCE
+    #
+    # Collect annual statements for existing holdings and
+    # final-decision candidates.
+    #
+    # This data is passed only to the advisory SHADOW
+    # risk assessment. It does not enter Investment Score,
+    # production decisions, eligibility or allocation.
+    # ---------------------------------
+
+    financial_statements_by_ticker = {}
+
+    financial_statement_tickers = set()
+    identified_etf_tickers = set()
+
+    for source_frame in (
+        portfolio_summary,
+        final_portfolio_decisions,
+    ):
+
+        if (
+            not isinstance(source_frame, pd.DataFrame)
+            or source_frame.empty
+            or "Ticker" not in source_frame.columns
+        ):
+            continue
+
+        for source_row in source_frame.to_dict("records"):
+
+            statement_ticker = str(
+                source_row.get("Ticker", "")
+            ).strip().upper()
+
+            if (
+                not statement_ticker
+                or statement_ticker == "CASH"
+            ):
+                continue
+
+            instrument_type_values = [
+                source_row.get("Asset Type", ""),
+                source_row.get("Security Type", ""),
+                source_row.get("Instrument Type", ""),
+                source_row.get("Quote Type", ""),
+            ]
+
+            instrument_type_text = " ".join(
+                str(value).upper()
+                for value in instrument_type_values
+                if value is not None
+            )
+
+            if any(
+                marker in instrument_type_text
+                for marker in (
+                    "ETF",
+                    "ETP",
+                    "EXCHANGE TRADED FUND",
+                    "EXCHANGE-TRADED FUND",
+                )
+            ):
+                identified_etf_tickers.add(
+                    statement_ticker
+                )
+            else:
+                financial_statement_tickers.add(
+                    statement_ticker
+                )
+
+    # Exclude any ticker identified as an ETF in either source.
+    financial_statement_tickers -= identified_etf_tickers
+
+    for statement_ticker in sorted(
+        financial_statement_tickers
+    ):
+
+        try:
+            financial_statements_by_ticker[statement_ticker] = (
+                get_financial_statements(statement_ticker)
+            )
+
+        except Exception as exc:
+
+            financial_statements_by_ticker[statement_ticker] = {
+                "Ticker": statement_ticker,
+                "Status": "UNAVAILABLE",
+                "Source": "Yahoo Finance via yfinance",
+                "Annual": {},
+                "Errors": [
+                    f"{type(exc).__name__}: {exc}"
+                ],
+            }
+
+    print(
+        "SHADOW FINANCIAL STATEMENT COVERAGE:",
+        len(financial_statements_by_ticker),
+        "securities collected;",
+        len(identified_etf_tickers),
+        "identified ETFs excluded."
+    )
+
+    # ------------------------------------------------------------
+    # SHADOW MARKET BREADTH PRICE HISTORY REFRESH
+    # ------------------------------------------------------------
+    # Refresh the active S&P 500 universe before the advisory
+    # assessment. Existing cache freshness logic controls downloads.
+    # Failures must not interrupt the portfolio review.
+
+    print("\\nREFRESHING SHADOW MARKET BREADTH PRICE HISTORY")
+
+    try:
+        from data import market_data
+
+        breadth_universe = pd.read_csv(
+            "data/cache/market_breadth/sp500_constituents.csv"
+        )
+
+        required_columns = {"Ticker", "Effective To"}
+        missing_columns = required_columns - set(breadth_universe.columns)
+
+        if missing_columns:
+            print(
+                "SHADOW BREADTH REFRESH SKIPPED: missing columns:",
+                sorted(missing_columns),
+            )
+        else:
+            active_rows = breadth_universe[
+                breadth_universe["Effective To"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .eq("")
+            ]
+
+            constituent_tickers = set(
+                active_rows["Ticker"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .loc[lambda values: values.ne("")]
+                .unique()
+            )
+
+            benchmark_tickers = {
+                "SPY",
+                "RSP",
+                "IWM",
+                "QQQ",
+            }
+
+            breadth_tickers = sorted(
+                constituent_tickers | benchmark_tickers
+            )
+
+            current_count = 0
+            non_current_count = 0
+            unavailable_count = 0
+
+            for breadth_ticker in breadth_tickers:
+                try:
+                    prices = market_data.get_stock_data(
+                        breadth_ticker,
+                        period="2y",
+                    )
+
+                    if (
+                        isinstance(prices, pd.DataFrame)
+                        and not prices.empty
+                        and market_data._cache_is_current(prices)
+                    ):
+                        current_count += 1
+                    elif isinstance(prices, pd.DataFrame) and not prices.empty:
+                        non_current_count += 1
+                    else:
+                        unavailable_count += 1
+
+                except Exception as exc:
+                    unavailable_count += 1
+                    print(
+                        "SHADOW BREADTH REFRESH FAILED:",
+                        breadth_ticker,
+                        type(exc).__name__,
+                        str(exc),
+                    )
+
+            print(
+                "SHADOW BREADTH PRICE REFRESH:",
+                len(breadth_tickers),
+                "constituent/benchmark tickers;",
+                current_count,
+                "current 2-year histories;",
+                non_current_count,
+                "non-current histories;",
+                unavailable_count,
+                "unavailable or failed.",
+            )
+
+    except Exception as exc:
+        print(
+            "SHADOW BREADTH REFRESH ERROR — continuing portfolio review:",
+            type(exc).__name__,
+            str(exc),
+        )
+
     print(
         "\nGENERATING PORTFOLIO REALLOCATION"
     )
@@ -2292,6 +2500,9 @@ def main():
             final_portfolio_decisions=final_portfolio_decisions,
             portfolio_value=portfolio_summary["Current Value"].sum(),
             market_intelligence=market_intelligence,
+            financial_statements_by_ticker=(
+                financial_statements_by_ticker
+            ),
         )
 
         print(

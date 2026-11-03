@@ -89,6 +89,26 @@ def _f_mom_6_1(p: PricePanel, seed: int) -> pd.DataFrame:
     return momentum(p.adj_close, 126, 21)
 
 
+def _f_technical_mom_6_1(p: PricePanel, seed: int) -> pd.DataFrame:
+    """Research-only: equal-weight technical and 6-month momentum ranks."""
+    technical = _f_technical(p, seed)
+    mom = _f_mom_6_1(p, seed)
+    technical_rank = technical.rank(axis=1, pct=True)
+    momentum_rank = mom.rank(axis=1, pct=True)
+    combined = 0.5 * technical_rank + 0.5 * momentum_rank
+    return combined.where(technical.notna() & mom.notna())
+
+
+def _f_technical_mom_12_1(p: PricePanel, seed: int) -> pd.DataFrame:
+    """Research-only: equal-weight technical and 12-month momentum ranks."""
+    technical = _f_technical(p, seed)
+    mom = _f_mom_12_1(p, seed)
+    technical_rank = technical.rank(axis=1, pct=True)
+    momentum_rank = mom.rank(axis=1, pct=True)
+    combined = 0.5 * technical_rank + 0.5 * momentum_rank
+    return combined.where(technical.notna() & mom.notna())
+
+
 def _f_random(p: PricePanel, seed: int) -> pd.DataFrame:
     return random_factor(p.close, seed)
 
@@ -98,6 +118,8 @@ FACTORS = {
     "technical_score": _f_technical,
     "mom_12_1": _f_mom_12_1,
     "mom_6_1": _f_mom_6_1,
+    "technical_mom_6_1": _f_technical_mom_6_1,
+    "technical_mom_12_1": _f_technical_mom_12_1,
     "random": _f_random,
 }
 

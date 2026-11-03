@@ -1569,6 +1569,7 @@ def _build_market_risk_assessment(
     portfolio_value,
     market_intelligence=None,
     reallocation=None,
+    financial_statements_by_ticker=None,
 ):
     """
     Build an advisory-only market and portfolio risk assessment.
@@ -1599,6 +1600,7 @@ def _build_market_risk_assessment(
         "known_etf_holdings": [],
         "company_risk_flags": [],
         "individual_stock_assessments": [],
+        "financial_resilience_evidence": [],
         "transaction_risk_reviews": [],
         "common_theme_exposure": [],
         "explicit_investment_theme_assessment": [],
@@ -1607,6 +1609,9 @@ def _build_market_risk_assessment(
         "data_quality": {
             "portfolio_data_available": False,
             "market_intelligence_available": False,
+            "financial_statements_received": 0,
+            "financial_statements_with_data": 0,
+            "financial_statements_unavailable": 0,
             "transaction_data_available": False,
             "sector_country_classification_available": False,
             "instrument_type_classification_available": False,
@@ -1649,23 +1654,47 @@ def _build_market_risk_assessment(
         Returns (prices, reason); reason is populated when unavailable.
         """
         try:
-            cache_file = market_data._cache_file(ticker, "1y")
+            cache_errors = []
 
-            if not os.path.exists(cache_file):
-                return None, "No local cached price history."
+            # Prefer the longer history, but use an existing one-year
+            # cache when the two-year cache is absent or unusable.
+            for period in ("2y", "1y"):
+                cache_file = market_data._cache_file(ticker, period)
 
-            prices = pd.read_parquet(cache_file)
+                if not os.path.exists(cache_file):
+                    continue
 
-            if prices is None or prices.empty:
-                return None, "Cached price history is empty."
+                try:
+                    prices = pd.read_parquet(cache_file)
+                except Exception as exc:
+                    cache_errors.append(
+                        f"{period} cache read failed ({type(exc).__name__})."
+                    )
+                    continue
 
-            if not isinstance(prices, pd.DataFrame):
-                return None, "Cached price history is not a DataFrame."
+                if not isinstance(prices, pd.DataFrame):
+                    cache_errors.append(
+                        f"{period} cache is not a DataFrame."
+                    )
+                    continue
 
-            return prices, None
+                if prices.empty:
+                    cache_errors.append(
+                        f"{period} cache is empty."
+                    )
+                    continue
+
+                return prices, None
+
+            if cache_errors:
+                return None, "No usable local cached price history. " + " ".join(
+                    cache_errors
+                )
+
+            return None, "No local cached price history (checked 2y and 1y caches)."
 
         except Exception as exc:
-            return None, f"Cache read failed ({type(exc).__name__})."
+            return None, f"Cache lookup failed ({type(exc).__name__})."
     assessment["market_stress_indicators"] = []
     assessment["market_breadth_indicators"] = []
 
@@ -1696,7 +1725,24 @@ def _build_market_risk_assessment(
         },
     ]
 
+    assessment["data_quality"]["market_benchmarks_expected"] = len(
+        benchmark_definitions
+    )
+
     today = pd.Timestamp(datetime.now().date())
+
+    try:
+        latest_expected_market_session = pd.Timestamp(
+            market_data._latest_completed_us_trading_date()
+        ).normalize()
+    except Exception:
+        latest_expected_market_session = None
+
+    assessment["data_quality"]["market_benchmark_latest_expected_session"] = (
+        latest_expected_market_session.strftime("%Y-%m-%d")
+        if latest_expected_market_session is not None
+        else None
+    )
 
     for benchmark in benchmark_definitions:
         ticker = benchmark["ticker"]
@@ -1706,7 +1752,15 @@ def _build_market_risk_assessment(
             "Benchmark": benchmark["name"],
             "Role": benchmark["role"],
             "Status": "UNASSESSED",
+            "Assessment Completeness": "UNASSESSED",
+            "Missing Metrics": [],
             "Latest Observation": None,
+            "Expected Latest Session": (
+                latest_expected_market_session.strftime("%Y-%m-%d")
+                if latest_expected_market_session is not None
+                else None
+            ),
+            "Observation Alignment": "UNASSESSED",
             "Return 20 Sessions %": None,
             "Return 60 Sessions %": None,
             "Realised Volatility 20 Sessions % Annualised": None,
@@ -1775,6 +1829,8 @@ def _build_market_risk_assessment(
 
             if ticker == "^VIX":
                 indicator["VIX Level"] = round(latest, 2)
+                indicator["Assessment Completeness"] = "COMPLETE"
+                indicator["Missing Metrics"] = []
 
                 if latest >= 30:
                     indicator["Status"] = "HIGH STRESS"
@@ -1818,12 +1874,13 @@ def _build_market_risk_assessment(
                         "Realised Volatility 20 Sessions % Annualised"
                     ] = round(float(realised_volatility), 2)
 
-                trailing_high = closes.tail(252).max()
+                if len(closes) >= 252:
+                    trailing_high = closes.tail(252).max()
 
-                indicator["Drawdown From 52 Week High %"] = round(
-                    (latest / float(trailing_high) - 1) * 100,
-                    2,
-                )
+                    indicator["Drawdown From 52 Week High %"] = round(
+                        (latest / float(trailing_high) - 1) * 100,
+                        2,
+                    )
 
                 return_20d = indicator["Return 20 Sessions %"]
                 return_60d = indicator["Return 60 Sessions %"]
@@ -1833,6 +1890,15 @@ def _build_market_risk_assessment(
                 drawdown_52w = indicator[
                     "Drawdown From 52 Week High %"
                 ]
+                missing_metrics = []
+                if indicator["Return 20 Sessions %"] is None:
+                    missing_metrics.append("20-session return")
+                if indicator["Return 60 Sessions %"] is None:
+                    missing_metrics.append("60-session return")
+                if indicator["Realised Volatility 20 Sessions % Annualised"] is None:
+                    missing_metrics.append("20-session realised volatility")
+                if indicator["Drawdown From 52 Week High %"] is None:
+                    missing_metrics.append("252-session drawdown")
 
                 # Provisional shadow-only review thresholds.
                 breaches = []
@@ -1899,6 +1965,33 @@ def _build_market_risk_assessment(
                         "geopolitical risks remain outside this assessment."
                     )
 
+                indicator["Missing Metrics"] = missing_metrics
+                indicator["Assessment Completeness"] = (
+                    "PARTIAL" if missing_metrics else "COMPLETE"
+                )
+                if missing_metrics:
+                    if indicator["Status"] == "NO PROVISIONAL THRESHOLD BREACH":
+                        indicator["Status"] = (
+                            "PARTIALLY ASSESSED — NO PROVISIONAL THRESHOLD BREACH"
+                        )
+                    indicator["Evidence"] += (
+                        " Metrics unavailable: "
+                        + ", ".join(missing_metrics)
+                        + "."
+                    )
+                if all(value is None for value in (
+                    indicator["Return 20 Sessions %"],
+                    indicator["Return 60 Sessions %"],
+                    indicator["Realised Volatility 20 Sessions % Annualised"],
+                    indicator["Drawdown From 52 Week High %"],
+                )):
+                    indicator["Status"] = "UNASSESSED"
+                    indicator["Assessment Completeness"] = "UNASSESSED"
+                    indicator["Evidence"] = (
+                        "Fresh observation available, but insufficient history; no 20-session return, "
+                        "60-session return, realised volatility or "
+                        "252-session drawdown could be calculated."
+                    )
                 indicator["Threshold Basis"] = (
                     "PROVISIONAL SHADOW REVIEW THRESHOLDS: "
                     f"20-session return {benchmark['return_20d_stress']}%; "
@@ -1908,7 +2001,35 @@ def _build_market_risk_assessment(
                     "high stress 40%."
                 )
 
-            assessment["data_quality"]["market_benchmarks_available"] += 1
+            if latest_expected_market_session is None:
+                indicator["Observation Alignment"] = "NOT VERIFIED"
+                if indicator["Assessment Completeness"] != "UNASSESSED":
+                    indicator["Assessment Completeness"] = "PARTIAL"
+                indicator["Evidence"] += (
+                    " Latest completed US market session could not be verified."
+                )
+            elif latest_date.normalize() < latest_expected_market_session:
+                indicator["Observation Alignment"] = (
+                    "BEHIND LATEST COMPLETED SESSION"
+                )
+                if indicator["Assessment Completeness"] != "UNASSESSED":
+                    indicator["Assessment Completeness"] = "PARTIAL"
+
+                if indicator["Status"] == "NO VIX THRESHOLD BREACH":
+                    indicator["Status"] = (
+                        "PARTIALLY ASSESSED — NO VIX THRESHOLD BREACH"
+                    )
+                elif indicator["Status"] == "NO PROVISIONAL THRESHOLD BREACH":
+                    indicator["Status"] = (
+                        "PARTIALLY ASSESSED — NO PROVISIONAL THRESHOLD BREACH"
+                    )
+
+                indicator["Evidence"] += (
+                    " Observation is behind latest completed US market session "
+                    f"({latest_expected_market_session:%Y-%m-%d})."
+                )
+            else:
+                indicator["Observation Alignment"] = "ALIGNED"
 
         except Exception as exc:
             indicator["Status"] = "UNASSESSED"
@@ -1924,6 +2045,36 @@ def _build_market_risk_assessment(
         if item["Status"] != "UNASSESSED"
     ]
 
+    _benchmarks_expected = assessment["data_quality"][
+        "market_benchmarks_expected"
+    ]
+    _benchmarks_complete = sum(
+        item.get("Assessment Completeness") == "COMPLETE"
+        for item in assessment["market_stress_indicators"]
+    )
+    _benchmarks_partial = sum(
+        item.get("Assessment Completeness") == "PARTIAL"
+        for item in assessment["market_stress_indicators"]
+    )
+    _benchmarks_available = _benchmarks_complete + _benchmarks_partial
+    assessment["data_quality"]["market_benchmarks_available"] = (
+        _benchmarks_available
+    )
+    assessment["data_quality"]["market_benchmarks_unavailable"] = (
+        _benchmarks_expected - _benchmarks_available
+    )
+    assessment["data_quality"]["market_benchmarks_assessment_unavailable"] = (
+        _benchmarks_expected
+        - _benchmarks_complete
+        - _benchmarks_partial
+    )
+    assessment["data_quality"]["market_stress_coverage_status"] = (
+        "COMPLETE"
+        if _benchmarks_complete == _benchmarks_expected
+        else "PARTIAL"
+        if (_benchmarks_complete + _benchmarks_partial) > 0
+        else "UNAVAILABLE"
+    )
     assessment["data_quality"]["market_stress_assessed"] = bool(
         assessed_benchmarks
     )
@@ -1935,7 +2086,15 @@ def _build_market_risk_assessment(
         )
 
         if stress_count:
-            assessment["market_stress_status"] = "STRESS SIGNAL DETECTED"
+            coverage_is_partial = (
+                assessment["data_quality"]["market_stress_coverage_status"]
+                != "COMPLETE"
+            )
+            assessment["market_stress_status"] = (
+                "STRESS SIGNAL DETECTED — PARTIAL COVERAGE"
+                if coverage_is_partial
+                else "STRESS SIGNAL DETECTED"
+            )
             assessment["recommendations"].append({
                 "Priority": "REVIEW",
                 "Recommendation": (
@@ -1945,9 +2104,19 @@ def _build_market_risk_assessment(
                 "Evidence": (
                     f"{stress_count} assessed benchmark(s) breached "
                     "a provisional stress threshold."
+                    + (
+                        " Overall benchmark coverage is partial; treat this "
+                        "as a qualified market-stress signal."
+                        if coverage_is_partial
+                        else ""
+                    )
                 ),
                 "Governance": "ADVISORY ONLY — NO AUTOMATIC DECISION CHANGE",
             })
+        elif assessment["data_quality"]["market_stress_coverage_status"] != "COMPLETE":
+            assessment["market_stress_status"] = (
+                "PARTIALLY ASSESSED — NO BREACH IN AVAILABLE BENCHMARKS"
+            )
         else:
             assessment["market_stress_status"] = (
                 "NO PROVISIONAL STRESS THRESHOLD BREACH"
@@ -2341,21 +2510,731 @@ def _build_market_risk_assessment(
         leadership_indicators
     )
 
-    # Retain the existing field for output compatibility, but do not
-    # misclassify relative-strength indicators as market breadth.
-    assessment["market_breadth_indicators"] = []
+    # ------------------------------------------------------------
+    # CONSTITUENT-LEVEL MARKET BREADTH (SHADOW / CACHE ONLY)
+    # ------------------------------------------------------------
+    # Input contract:
+    # data/cache/market_breadth/sp500_constituents.csv
+    #
+    # Required columns:
+    # Ticker, Sector, Effective From, Effective To, Source, Retrieved At
+    #
+    # One row represents one membership interval. Effective To may be
+    # blank for a currently active membership. The file must contain
+    # dated membership records; a ticker list without effective dates
+    # is not accepted.
+    #
+    # All price inputs come from the existing local market-price cache.
+    # This assessment never downloads or refreshes constituent prices.
 
-    assessment["market_breadth_assessment"] = {
-        "status": "UNASSESSED",
-        "reason": (
-            "Constituent-level advance/decline, percentage-above-moving-"
-            "average and new-high/new-low data are not currently available."
-        ),
-        "advisory_only": True,
-    }
+    def _build_constituent_market_breadth():
+        universe_path = os.path.join(
+            "data",
+            "cache",
+            "market_breadth",
+            "sp500_constituents.csv",
+        )
 
-    assessment["data_quality"]["market_breadth_assessed"] = False
-    assessment["data_quality"]["market_breadth_status"] = "UNASSESSED"
+        result = {
+            "status": "UNASSESSED",
+            "as_of": None,
+            "universe_file": universe_path,
+            "universe_source": [],
+            "universe_retrieved_at": None,
+            "active_constituents_expected": 0,
+            "price_history_available": 0,
+            "price_history_unavailable": 0,
+            "invalid_universe_rows": 0,
+            "historical_backtest_eligible": False,
+            "point_in_time_membership_status": "NOT_VALIDATED",
+            "reason": "",
+            "limitations": [
+                "A current constituent snapshot is not sufficient for historical backtesting.",
+                "The cumulative advance/decline line is not calculated until historical point-in-time membership completeness is validated.",
+                "52-week highs and lows are based on adjusted closing prices, not intraday highs and lows.",
+                "Sector returns are equal-weighted constituent returns, not official sector-index returns.",
+                "No investment or reallocation thresholds are applied.",
+            ],
+            "price_data_provenance": [],
+            "advisory_only": True,
+        }
+
+        empty = [], []
+
+        if not os.path.isfile(universe_path):
+            result["reason"] = (
+                "Constituent universe file is missing. Create the dated "
+                "CSV using the required columns documented in the assessment."
+            )
+            return result, *empty
+
+        try:
+            universe = pd.read_csv(
+                universe_path,
+                dtype=str,
+                keep_default_na=False,
+            )
+        except Exception as exc:
+            result["reason"] = (
+                f"Constituent universe could not be read: {type(exc).__name__}."
+            )
+            return result, *empty
+
+        if universe.empty:
+            result["reason"] = "Constituent universe file contains no rows."
+            return result, *empty
+
+        normalised_columns = {
+            str(column).strip().casefold().replace("_", " "): column
+            for column in universe.columns
+        }
+
+        required_columns = {
+            "ticker",
+            "sector",
+            "effective from",
+            "effective to",
+            "source",
+            "retrieved at",
+        }
+
+        missing_columns = sorted(
+            required_columns - set(normalised_columns)
+        )
+
+        if missing_columns:
+            result["reason"] = (
+                "Constituent universe is missing required columns: "
+                + ", ".join(missing_columns)
+            )
+            return result, *empty
+
+        rename_columns = {
+            normalised_columns[name]: name
+            for name in required_columns
+        }
+        universe = universe.rename(columns=rename_columns)
+
+        for column in ("ticker", "sector", "source"):
+            universe[column] = (
+                universe[column].astype(str).str.strip()
+            )
+
+        universe["ticker"] = universe["ticker"].str.upper()
+        universe["sector"] = universe["sector"].replace("", "UNCLASSIFIED")
+        universe["_effective_from"] = pd.to_datetime(
+            universe["effective from"],
+            errors="coerce",
+        ).dt.normalize()
+        universe["_effective_to"] = pd.to_datetime(
+            universe["effective to"].replace("", pd.NA),
+            errors="coerce",
+        ).dt.normalize()
+        universe["_retrieved_at"] = pd.to_datetime(
+            universe["retrieved at"],
+            errors="coerce",
+            utc=True,
+        )
+
+        valid_rows = (
+            universe["ticker"].ne("")
+            & universe["source"].ne("")
+            & universe["_effective_from"].notna()
+            & universe["_retrieved_at"].notna()
+            & (
+                universe["_effective_to"].isna()
+                | universe["_effective_to"].ge(
+                    universe["_effective_from"]
+                )
+            )
+            & (
+                universe["_retrieved_at"]
+                <= pd.Timestamp.now(tz="UTC")
+            )
+        )
+
+        result["invalid_universe_rows"] = int((~valid_rows).sum())
+
+        universe = universe.loc[valid_rows].copy()
+
+        if universe.empty:
+            result["reason"] = (
+                "No valid constituent records remain after validating "
+                "ticker, source, effective dates and retrieval timestamp."
+            )
+            return result, *empty
+
+        # Anchor membership and prices to the latest valid SPY session.
+        spy_closes, spy_error, spy_provenance = _leadership_series("SPY")
+
+        if spy_closes is None or len(spy_closes) < 2:
+            result["reason"] = (
+                "Unable to establish the latest and previous market sessions "
+                "from cached SPY history: "
+                + str(spy_error or "insufficient SPY observations")
+            )
+            return result, *empty
+
+        spy_closes = spy_closes.copy()
+        spy_closes.index = pd.DatetimeIndex(
+            pd.to_datetime(spy_closes.index, errors="coerce")
+        ).normalize()
+        spy_closes = spy_closes.loc[
+            ~spy_closes.index.isna()
+        ].sort_index()
+        spy_closes = spy_closes.loc[
+            ~spy_closes.index.duplicated(keep="last")
+        ]
+
+        if len(spy_closes) < 2:
+            result["reason"] = (
+                "SPY history has fewer than two valid market sessions."
+            )
+            return result, *empty
+
+        as_of = pd.Timestamp(spy_closes.index[-1]).normalize()
+        previous_session = pd.Timestamp(
+            spy_closes.index[-2]
+        ).normalize()
+
+        result["as_of"] = as_of.strftime("%Y-%m-%d")
+
+        universe["_retrieved_date"] = (
+            universe["_retrieved_at"]
+            .dt.tz_convert(None)
+            .dt.normalize()
+        )
+
+        active = universe.loc[
+            universe["_effective_from"].le(as_of)
+            & (
+                universe["_effective_to"].isna()
+                | universe["_effective_to"].ge(as_of)
+            )
+        ].copy()
+
+        if active.empty:
+            result["reason"] = (
+                "No constituent membership records are effective on "
+                f"{as_of:%Y-%m-%d}."
+            )
+            return result, *empty
+
+        duplicate_tickers = active.loc[
+            active["ticker"].duplicated(keep=False),
+            "ticker",
+        ].unique().tolist()
+
+        if duplicate_tickers:
+            result["reason"] = (
+                "Ambiguous active membership: duplicate active ticker "
+                "records found for "
+                + ", ".join(sorted(duplicate_tickers)[:20])
+            )
+            return result, *empty
+
+        today = pd.Timestamp(datetime.now().date())
+        retrieval_age = (
+            today - active["_retrieved_date"]
+        ).dt.days
+
+        if retrieval_age.isna().any() or (retrieval_age < 0).any():
+            result["reason"] = (
+                "Constituent universe contains invalid or future retrieval dates."
+            )
+            return result, *empty
+
+        if (retrieval_age > 90).any():
+            result["reason"] = (
+                "Constituent universe is stale: at least one active record "
+                "was retrieved more than 90 days ago."
+            )
+            return result, *empty
+
+        result["active_constituents_expected"] = int(len(active))
+        result["universe_source"] = sorted(
+            active["source"].dropna().astype(str).unique().tolist()
+        )
+        result["universe_retrieved_at"] = str(
+            active["_retrieved_at"].max()
+        )
+
+        spy_return_20 = (
+            float(spy_closes.iloc[-1])
+            / float(spy_closes.iloc[-21]) - 1.0
+        ) * 100.0 if len(spy_closes) >= 21 else None
+
+        spy_return_60 = (
+            float(spy_closes.iloc[-1])
+            / float(spy_closes.iloc[-61]) - 1.0
+        ) * 100.0 if len(spy_closes) >= 61 else None
+
+        constituent_rows = []
+
+        for record in active.itertuples(index=False):
+            ticker = str(getattr(record, "ticker")).strip().upper()
+            sector = str(getattr(record, "sector") or "UNCLASSIFIED").strip()
+
+            closes, error, provenance = _leadership_series(ticker)
+
+            provenance_row = dict(provenance)
+            provenance_row["Ticker"] = ticker
+            provenance_row["Sector"] = sector
+
+            if closes is None:
+                provenance_row["Breadth Eligibility"] = "UNAVAILABLE"
+                provenance_row["Breadth Exclusion Reason"] = str(error)
+                result["price_data_provenance"].append(provenance_row)
+                continue
+
+            closes = closes.copy()
+            closes.index = pd.DatetimeIndex(
+                pd.to_datetime(closes.index, errors="coerce")
+            ).normalize()
+            closes = closes.loc[
+                ~closes.index.isna()
+            ].sort_index()
+            closes = closes.loc[
+                ~closes.index.duplicated(keep="last")
+            ]
+            closes = closes.loc[closes.index <= as_of]
+
+            if closes.empty or pd.Timestamp(closes.index[-1]) != as_of:
+                provenance_row["Breadth Eligibility"] = "UNAVAILABLE"
+                provenance_row["Breadth Exclusion Reason"] = (
+                    "No constituent closing price on the SPY assessment date."
+                )
+                result["price_data_provenance"].append(provenance_row)
+                continue
+
+            closes = pd.to_numeric(
+                closes,
+                errors="coerce",
+            ).dropna()
+            closes = closes[closes > 0]
+
+            if closes.empty or pd.Timestamp(closes.index[-1]) != as_of:
+                provenance_row["Breadth Eligibility"] = "UNAVAILABLE"
+                provenance_row["Breadth Exclusion Reason"] = (
+                    "No valid positive closing price on the assessment date."
+                )
+                result["price_data_provenance"].append(provenance_row)
+                continue
+
+            latest_close = float(closes.iloc[-1])
+            previous_close = (
+                float(closes.loc[previous_session])
+                if previous_session in closes.index
+                else None
+            )
+
+            above_50 = None
+            above_200 = None
+            new_high_52w = None
+            new_low_52w = None
+            return_20 = None
+            return_60 = None
+
+            if len(closes) >= 50:
+                above_50 = latest_close > float(closes.tail(50).mean())
+
+            if len(closes) >= 200:
+                above_200 = latest_close > float(closes.tail(200).mean())
+
+            if len(closes) >= 252:
+                trailing_252 = closes.tail(252)
+                high_252 = float(trailing_252.max())
+                low_252 = float(trailing_252.min())
+                tolerance = max(abs(latest_close), 1.0) * 1e-8
+                new_high_52w = latest_close >= high_252 - tolerance
+                new_low_52w = latest_close <= low_252 + tolerance
+
+            if len(closes) >= 21:
+                return_20 = (
+                    latest_close / float(closes.iloc[-21]) - 1.0
+                ) * 100.0
+
+            if len(closes) >= 61:
+                return_60 = (
+                    latest_close / float(closes.iloc[-61]) - 1.0
+                ) * 100.0
+
+            advance_state = None
+
+            if previous_close is not None:
+                if latest_close > previous_close:
+                    advance_state = "ADVANCE"
+                elif latest_close < previous_close:
+                    advance_state = "DECLINE"
+                else:
+                    advance_state = "UNCHANGED"
+
+            constituent_rows.append({
+                "Ticker": ticker,
+                "Sector": sector or "UNCLASSIFIED",
+                "Price Available": True,
+                "Advance State": advance_state,
+                "Above 50D MA": above_50,
+                "Above 200D MA": above_200,
+                "New 52W High": new_high_52w,
+                "New 52W Low": new_low_52w,
+                "Return 20 Sessions %": return_20,
+                "Return 60 Sessions %": return_60,
+            })
+
+            provenance_row["Breadth Eligibility"] = "AVAILABLE"
+            provenance_row["Breadth Exclusion Reason"] = None
+            provenance_row["Breadth Observation Date"] = (
+                as_of.strftime("%Y-%m-%d")
+            )
+            provenance_row["Observations Available"] = int(len(closes))
+            result["price_data_provenance"].append(provenance_row)
+
+        result["price_history_available"] = len(constituent_rows)
+        result["price_history_unavailable"] = (
+            result["active_constituents_expected"]
+            - result["price_history_available"]
+        )
+
+        if not constituent_rows:
+            result["reason"] = (
+                "No active constituents have usable cached prices on "
+                f"the SPY assessment date {as_of:%Y-%m-%d}."
+            )
+            return result, *empty
+
+        def _valid_rows(field):
+            return [
+                row for row in constituent_rows
+                if row.get(field) is not None
+            ]
+
+        def _metric_status(available, expected):
+            if available <= 0:
+                return "UNASSESSED"
+            if (
+                available == expected
+                and result["invalid_universe_rows"] == 0
+            ):
+                return "ASSESSED — FULL COVERAGE"
+            return "ASSESSED — PARTIAL COVERAGE"
+
+        expected = result["active_constituents_expected"]
+        breadth_rows = []
+
+        def _append_breadth_metric(
+            name,
+            value,
+            units,
+            available,
+            method,
+            extra=None,
+        ):
+            row = {
+                "Indicator": name,
+                "Value": value,
+                "Units": units,
+                "As Of": as_of.strftime("%Y-%m-%d"),
+                "Available Constituents": int(available),
+                "Expected Constituents": int(expected),
+                "Coverage %": (
+                    round(available / expected * 100.0, 2)
+                    if expected else None
+                ),
+                "Status": _metric_status(available, expected),
+                "Method": method,
+                "Advisory Only": True,
+            }
+            if extra:
+                row.update(extra)
+            breadth_rows.append(row)
+
+        ad_rows = _valid_rows("Advance State")
+        advances = sum(
+            row["Advance State"] == "ADVANCE" for row in ad_rows
+        )
+        declines = sum(
+            row["Advance State"] == "DECLINE" for row in ad_rows
+        )
+        unchanged = sum(
+            row["Advance State"] == "UNCHANGED" for row in ad_rows
+        )
+        net_advances = advances - declines
+
+        _append_breadth_metric(
+            "Advance / Decline",
+            net_advances if ad_rows else None,
+            "Net advances",
+            len(ad_rows),
+            (
+                f"Constituent close-to-close direction from "
+                f"{previous_session:%Y-%m-%d} to {as_of:%Y-%m-%d}; "
+                "only constituents with prices on both exact market sessions."
+            ),
+            {
+                "Advancers": advances,
+                "Decliners": declines,
+                "Unchanged": unchanged,
+                "Net Advances": net_advances if ad_rows else None,
+                "Advance / Decline Ratio": (
+                    round(advances / declines, 3)
+                    if declines else None
+                ),
+            },
+        )
+
+        for field, label in (
+            ("Above 50D MA", "Constituents Above 50-Day Moving Average"),
+            ("Above 200D MA", "Constituents Above 200-Day Moving Average"),
+        ):
+            valid = _valid_rows(field)
+            count_above = sum(row[field] is True for row in valid)
+            _append_breadth_metric(
+                label,
+                round(count_above / len(valid) * 100.0, 2)
+                if valid else None,
+                "%",
+                len(valid),
+                "Latest adjusted close above the mean of the trailing "
+                f"{50 if field == 'Above 50D MA' else 200} valid daily adjusted closes.",
+                {"Above Moving Average": count_above},
+            )
+
+        high_rows = _valid_rows("New 52W High")
+        low_rows = _valid_rows("New 52W Low")
+        high_count = sum(row["New 52W High"] is True for row in high_rows)
+        low_count = sum(row["New 52W Low"] is True for row in low_rows)
+
+        _append_breadth_metric(
+            "52-Week Closing Highs",
+            high_count if high_rows else None,
+            "Constituents",
+            len(high_rows),
+            "Latest adjusted close equals the highest of the trailing 252 valid adjusted closes.",
+        )
+        _append_breadth_metric(
+            "52-Week Closing Lows",
+            low_count if low_rows else None,
+            "Constituents",
+            len(low_rows),
+            "Latest adjusted close equals the lowest of the trailing 252 valid adjusted closes.",
+        )
+        _append_breadth_metric(
+            "Net 52-Week Highs",
+            high_count - low_count if high_rows and low_rows else None,
+            "Net constituents",
+            min(len(high_rows), len(low_rows)),
+            "52-week closing highs less 52-week closing lows.",
+            {
+                "52-Week Highs": high_count if high_rows else None,
+                "52-Week Lows": low_count if low_rows else None,
+            },
+        )
+
+        sector_rows = []
+        sector_groups = {}
+
+        for row in constituent_rows:
+            sector = row.get("Sector") or "UNCLASSIFIED"
+            sector_groups.setdefault(sector, []).append(row)
+
+        for sector, rows in sorted(sector_groups.items()):
+            sector_expected = sum(
+                str(item.get("sector") or "UNCLASSIFIED") == sector
+                for item in active[["ticker", "sector"]].to_dict("records")
+            )
+            sector_price_rows = [
+                row for row in rows if row.get("Price Available")
+            ]
+            sector_ad_rows = [
+                row for row in rows if row.get("Advance State") is not None
+            ]
+            sector_50_rows = _valid_rows("Above 50D MA")
+            sector_200_rows = _valid_rows("Above 200D MA")
+
+            # Restrict each metric to the current sector.
+            sector_50_rows = [
+                row for row in sector_50_rows if row["Sector"] == sector
+            ]
+            sector_200_rows = [
+                row for row in sector_200_rows if row["Sector"] == sector
+            ]
+
+            sector_high_rows = [
+                row for row in rows if row.get("New 52W High") is not None
+            ]
+            sector_low_rows = [
+                row for row in rows if row.get("New 52W Low") is not None
+            ]
+
+            sector_advances = sum(
+                row["Advance State"] == "ADVANCE"
+                for row in sector_ad_rows
+            )
+            sector_declines = sum(
+                row["Advance State"] == "DECLINE"
+                for row in sector_ad_rows
+            )
+
+            returns_20 = [
+                row["Return 20 Sessions %"]
+                for row in rows
+                if row.get("Return 20 Sessions %") is not None
+            ]
+            returns_60 = [
+                row["Return 60 Sessions %"]
+                for row in rows
+                if row.get("Return 60 Sessions %") is not None
+            ]
+
+            sector_return_20 = (
+                sum(returns_20) / len(returns_20)
+                if returns_20 else None
+            )
+            sector_return_60 = (
+                sum(returns_60) / len(returns_60)
+                if returns_60 else None
+            )
+
+            sector_above_50 = sum(
+                row["Above 50D MA"] is True
+                for row in sector_50_rows
+            )
+            sector_above_200 = sum(
+                row["Above 200D MA"] is True
+                for row in sector_200_rows
+            )
+            sector_highs = sum(
+                row["New 52W High"] is True
+                for row in sector_high_rows
+            )
+            sector_lows = sum(
+                row["New 52W Low"] is True
+                for row in sector_low_rows
+            )
+
+            sector_rows.append({
+                "Sector": sector,
+                "As Of": as_of.strftime("%Y-%m-%d"),
+                "Active Constituents": int(sector_expected),
+                "Price History Available": len(sector_price_rows),
+                "Price Coverage %": (
+                    round(
+                        len(sector_price_rows) / sector_expected * 100.0,
+                        2,
+                    )
+                    if sector_expected else None
+                ),
+                "Advancers": sector_advances,
+                "Decliners": sector_declines,
+                "Net Advances": (
+                    sector_advances - sector_declines
+                    if sector_ad_rows else None
+                ),
+                "Above 50D MA %": (
+                    round(
+                        sector_above_50 / len(sector_50_rows) * 100.0,
+                        2,
+                    )
+                    if sector_50_rows else None
+                ),
+                "Above 50D MA Coverage": len(sector_50_rows),
+                "Above 200D MA %": (
+                    round(
+                        sector_above_200 / len(sector_200_rows) * 100.0,
+                        2,
+                    )
+                    if sector_200_rows else None
+                ),
+                "Above 200D MA Coverage": len(sector_200_rows),
+                "52W Highs": sector_highs if sector_high_rows else None,
+                "52W Lows": sector_lows if sector_low_rows else None,
+                "Equal-Weight Return 20 Sessions %": (
+                    round(sector_return_20, 2)
+                    if sector_return_20 is not None else None
+                ),
+                "Relative Return vs SPY 20 Sessions %": (
+                    round(sector_return_20 - spy_return_20, 2)
+                    if sector_return_20 is not None
+                    and spy_return_20 is not None else None
+                ),
+                "Equal-Weight Return 60 Sessions %": (
+                    round(sector_return_60, 2)
+                    if sector_return_60 is not None else None
+                ),
+                "Relative Return vs SPY 60 Sessions %": (
+                    round(sector_return_60 - spy_return_60, 2)
+                    if sector_return_60 is not None
+                    and spy_return_60 is not None else None
+                ),
+                "Return 20 Sessions Coverage": len(returns_20),
+                "Return 60 Sessions Coverage": len(returns_60),
+                "Status": (
+                    "ASSESSED — FULL PRICE COVERAGE"
+                    if len(sector_price_rows) == sector_expected
+                    and result["invalid_universe_rows"] == 0
+                    else "ASSESSED — PARTIAL PRICE COVERAGE"
+                ),
+                "Advisory Only": True,
+            })
+
+        assessed_metrics = [
+            row for row in breadth_rows
+            if row["Status"] != "UNASSESSED"
+        ]
+
+        if not assessed_metrics:
+            result["reason"] = (
+                "Constituent universe loaded, but no breadth measures "
+                "have sufficient price history."
+            )
+        else:
+            all_full = all(
+                row["Status"] == "ASSESSED — FULL COVERAGE"
+                for row in assessed_metrics
+            )
+            result["status"] = (
+                "ASSESSED — FULL COVERAGE"
+                if all_full
+                else "ASSESSED — PARTIAL COVERAGE"
+            )
+            result["reason"] = (
+                f"Calculated constituent breadth for {len(constituent_rows)} "
+                f"of {expected} active constituents as of {as_of:%Y-%m-%d}. "
+                f"{result['price_history_unavailable']} constituents lacked "
+                "usable prices on the assessment date. Metric-level coverage "
+                "is reported separately."
+            )
+
+        return result, breadth_rows, sector_rows
+
+    breadth_assessment, breadth_rows, sector_rows = (
+        _build_constituent_market_breadth()
+    )
+
+    assessment["market_breadth_assessment"] = breadth_assessment
+    assessment["market_breadth_indicators"] = breadth_rows
+    assessment["market_sector_breadth"] = sector_rows
+
+    assessment["data_quality"]["market_breadth_assessed"] = (
+        breadth_assessment["status"].startswith("ASSESSED")
+    )
+    assessment["data_quality"]["market_breadth_status"] = (
+        breadth_assessment["status"]
+    )
+    assessment["data_quality"]["market_breadth_constituents_expected"] = (
+        breadth_assessment["active_constituents_expected"]
+    )
+    assessment["data_quality"]["market_breadth_price_histories_available"] = (
+        breadth_assessment["price_history_available"]
+    )
+    assessment["data_quality"]["market_breadth_price_histories_unavailable"] = (
+        breadth_assessment["price_history_unavailable"]
+    )
+    assessment["data_quality"]["market_breadth_invalid_universe_rows"] = (
+        breadth_assessment["invalid_universe_rows"]
+    )
+
     assessment["data_quality"]["market_leadership_assessed"] = any(
         item["Status"] == "ASSESSED — NO THRESHOLDS"
         for item in leadership_indicators
@@ -2389,15 +3268,19 @@ def _build_market_risk_assessment(
         len(_leadership_provenance)
     )
     assessment["data_quality"]["market_leadership_tickers_available"] = sum(
-        item["Retrieval Status"] == "AVAILABLE"
+        item.get("Retrieval Status") == "AVAILABLE"
+        for item in _leadership_provenance
+    )
+    assessment["data_quality"]["market_leadership_tickers_unavailable"] = sum(
+        item.get("Retrieval Status") != "AVAILABLE"
         for item in _leadership_provenance
     )
     assessment["data_quality"]["market_leadership_tickers_stale"] = sum(
-        item["Freshness Status"] == "STALE OR INVALID"
+        item.get("Freshness Status") in {"STALE", "FUTURE-DATED"}
         for item in _leadership_provenance
     )
     assessment["data_quality"]["market_leadership_close_fallback_count"] = sum(
-        item["Price Basis"] == "Close (fallback)"
+        item.get("Price Basis") == "Close (fallback)"
         for item in _leadership_provenance
     )
 
@@ -2781,9 +3664,122 @@ def _build_market_risk_assessment(
     else:
         transaction_rows = list(reallocation)
 
+    def _classify_company_intelligence_evidence(record):
+        """
+        PARTIAL means at least one substantive field is present.
+        It does not imply comprehensive company-risk coverage.
+        """
+        if not isinstance(record, dict):
+            return "UNAVAILABLE"
+
+        def _company_text(value):
+            if value is None:
+                return ""
+            try:
+                if pd.isna(value):
+                    return ""
+            except (TypeError, ValueError):
+                pass
+            return str(value).strip()
+
+        def _company_value_present(value):
+            if value is None:
+                return False
+            try:
+                if pd.isna(value):
+                    return False
+            except (TypeError, ValueError):
+                pass
+            return bool(str(value).strip())
+
+        source_label = _company_text(record.get("Source"))
+        if not source_label or source_label.upper() == "UNAVAILABLE":
+            return "UNAVAILABLE"
+
+        numeric_fields = (
+            "Analyst Mean Score",
+            "Analyst Target Mean",
+            "Analyst Target High",
+            "Analyst Target Low",
+            "Current Price",
+            "Analyst Target Upside %",
+        )
+
+        for field in numeric_fields:
+            value = record.get(field)
+            if not _company_value_present(value):
+                continue
+            try:
+                numeric_value = float(
+                    str(value).replace("%", "").replace(",", "")
+                )
+                if (
+                    pd.notna(numeric_value)
+                    and numeric_value not in (
+                        float("inf"),
+                        float("-inf"),
+                    )
+                    and (
+                        field == "Analyst Target Upside %"
+                        or numeric_value > 0
+                    )
+                ):
+                    return "PARTIAL"
+            except (TypeError, ValueError):
+                continue
+
+        recommendation = _company_text(
+            record.get("Analyst Recommendation")
+        ).upper()
+        if recommendation not in {"", "UNKNOWN", "NONE", "N/A", "NA"}:
+            return "PARTIAL"
+
+        earnings_status = _company_text(
+            record.get("Earnings Status")
+        ).upper()
+        if (
+            earnings_status == "SCHEDULED"
+            and _company_value_present(record.get("Next Earnings Date"))
+        ):
+            return "PARTIAL"
+
+        headlines = record.get("News Headlines")
+        if isinstance(headlines, (list, tuple)):
+            if any(
+                str(item).strip()
+                for item in headlines
+                if item is not None
+            ):
+                return "PARTIAL"
+        elif isinstance(headlines, str) and headlines.strip():
+            return "PARTIAL"
+
+        return "UNAVAILABLE"
+
+    _intelligence_evidence_classes = [
+        _classify_company_intelligence_evidence(record)
+        for record in intelligence_rows
+    ]
+    _intelligence_records_with_evidence = sum(
+        status == "PARTIAL"
+        for status in _intelligence_evidence_classes
+    )
+
     assessment["data_quality"]["portfolio_data_available"] = bool(rows)
     assessment["data_quality"]["market_intelligence_available"] = bool(
         intelligence_rows
+    )
+    assessment["data_quality"]["market_intelligence_records_received"] = (
+        len(intelligence_rows)
+    )
+    assessment["data_quality"]["market_intelligence_records_with_evidence"] = (
+        _intelligence_records_with_evidence
+    )
+    assessment["data_quality"]["market_intelligence_records_unavailable"] = (
+        len(intelligence_rows) - _intelligence_records_with_evidence
+    )
+    assessment["data_quality"]["market_intelligence_evidence_available"] = (
+        _intelligence_records_with_evidence > 0
     )
     assessment["data_quality"]["transaction_data_available"] = bool(
         transaction_rows
@@ -3174,6 +4170,7 @@ def _build_market_risk_assessment(
         ticker: dict(position) for ticker, position in current_positions.items()
     }
     external_cash_allocated = 0.0
+    existing_cash_allocated = 0.0
     transaction_amounts_valid = bool(transaction_rows)
 
     for transaction in transaction_rows:
@@ -3204,6 +4201,11 @@ def _build_market_risk_assessment(
         # Existing portfolio cash transfers must not inflate it.
         if source_ticker in {"ASSESSMENT CASH", "ASSESSMENT_CASH"}:
             external_cash_allocated += amount
+        elif (
+            source_ticker == "CASH"
+            and source_action == "EXISTING CASH"
+        ):
+            existing_cash_allocated += amount
 
         if destination_ticker and destination_ticker not in {"CASH", "ASSESSMENT CASH", "ASSESSMENT_CASH"}:
             destination = proposed_positions.setdefault(
@@ -3257,6 +4259,7 @@ def _build_market_risk_assessment(
     assessment["holding_market_sensitivity"] = []
     assessment["correlated_holding_clusters"] = []
     assessment["data_quality"]["holding_sensitivity_assessed"] = False
+    assessment["data_quality"]["holding_price_series_expected"] = 0
     assessment["data_quality"]["holding_price_series_available"] = 0
     assessment["data_quality"]["holding_price_series_unavailable"] = 0
     assessment["data_quality"]["holding_correlations_insufficient_data"] = 0
@@ -3448,11 +4451,25 @@ def _build_market_risk_assessment(
             )
             _row[_overlap_key] = len(_paired)
 
-            if len(_paired) >= 60 and _paired.iloc[:, 0].std() > 0 and _paired.iloc[:, 1].std() > 0:
-                _row[_correlation_key] = round(
-                    float(_paired.iloc[:, 0].corr(_paired.iloc[:, 1])), 3
+            if (
+                len(_paired) >= 60
+                and _paired.iloc[:, 0].std() > 0
+                and _paired.iloc[:, 1].std() > 0
+            ):
+                _correlation_value = float(
+                    _paired.iloc[:, 0].corr(_paired.iloc[:, 1])
                 )
-                _valid_correlations += 1
+
+                # Only count a correlation when the result is finite
+                # and within the mathematically valid correlation range.
+                if (
+                    pd.notna(_correlation_value)
+                    and -1.0 <= _correlation_value <= 1.0
+                ):
+                    _row[_correlation_key] = round(
+                        _correlation_value, 3
+                    )
+                    _valid_correlations += 1
 
         if _sp500_returns is not None and _down_market_dates:
             _down_holding_returns = _holding_returns[
@@ -3569,15 +4586,20 @@ def _build_market_risk_assessment(
         key=lambda item: item["Correlation"], reverse=True
     )
 
-    assessment["data_quality"]["holding_price_series_available"] = len(
-        _sensitivity_prices
-    ) - len(_sensitivity_benchmark_returns)
-    assessment["data_quality"]["holding_price_series_unavailable"] = len(
-        _sensitivity_unavailable
+    assessment["data_quality"]["holding_price_series_expected"] = len(
+        _sensitivity_tickers
     )
-    assessment["data_quality"]["holding_sensitivity_assessed"] = bool(
-        assessment["holding_market_sensitivity"]
-        and _sensitivity_benchmark_returns
+    assessment["data_quality"]["holding_price_series_available"] = sum(
+        ticker in _sensitivity_prices
+        for ticker in _sensitivity_tickers
+    )
+    assessment["data_quality"]["holding_price_series_unavailable"] = sum(
+        ticker not in _sensitivity_prices
+        for ticker in _sensitivity_tickers
+    )
+    assessment["data_quality"]["holding_sensitivity_assessed"] = any(
+        item.get("Status") == "ASSESSED"
+        for item in assessment["holding_market_sensitivity"]
     )
     # Price correlation identifies co-movement, not shared investment themes.
     # Theme assessment remains unavailable until explicit theme mappings exist.
@@ -3657,29 +4679,41 @@ def _build_market_risk_assessment(
             # underlying geographic look-through is available.
             proposed_missing_country_tickers.append(ticker)
 
-    # Denominator includes the current portfolio value plus the external cash
-    # actually represented in proposed transactions. Internal transfers net to
-    # zero. If the upstream portfolio value includes some cash balance, that
-    # balance remains in the denominator but is not assigned to a security sector.
-
+    # Retain total portfolio values for cash reconciliation. Concentration
+    # percentages use the separate owned-security-holdings denominators below.
     proposed_portfolio_value = max(0.0, portfolio_value) + external_cash_allocated
 
     # Explicit denominator definitions for SHADOW reporting.
-    # These are descriptive only: do not change the exposure calculations.
     assessment["exposure_denominators"] = {
         "current_portfolio_concentration": {
-            "value": round(max(0.0, portfolio_value), 2),
-            "basis": "UPSTREAM_PORTFOLIO_VALUE",
+            "value": round(current_holdings_value, 2),
+            "basis": "UNIQUE_POSITIVE_VALUE_SECURITY_HOLDINGS",
             "description": (
-                "Portfolio-level value supplied by the upstream portfolio summary."
+                "Reconciled current positive-value security holdings; excludes cash "
+                "and duplicate position rows."
             ),
         },
         "proposed_portfolio_concentration": {
+            "value": round(proposed_holdings_value, 2),
+            "basis": "PROJECTED_POSITIVE_VALUE_SECURITY_HOLDINGS",
+            "description": (
+                "Projected positive-value security holdings after proposed transactions; "
+                "excludes any unallocated cash."
+            ),
+        },
+        "current_total_portfolio_value": {
+            "value": round(max(0.0, portfolio_value), 2),
+            "basis": "UPSTREAM_PORTFOLIO_VALUE",
+            "description": (
+                "Whole-portfolio value including cash; retained for portfolio and "
+                "cash reconciliation, not security concentration."
+            ),
+        },
+        "proposed_total_portfolio_value": {
             "value": round(proposed_portfolio_value, 2),
             "basis": "UPSTREAM_PORTFOLIO_VALUE_PLUS_EXTERNAL_ASSESSMENT_CASH",
             "description": (
-                "Current upstream portfolio value plus external assessment cash "
-                "represented in proposed transactions."
+                "Projected whole-portfolio value including any unallocated cash."
             ),
         },
         "current_classification_coverage": {
@@ -3899,7 +4933,7 @@ def _build_market_risk_assessment(
         coverage["unclassified_other_tickers"] = sorted(unclassified - known_etf_tickers)
         coverage["look_through_required"] = bool(etf_gaps)
 
-    if portfolio_value > 0:
+    if current_holdings_value > 0 or proposed_holdings_value > 0:
         for exposure_type, current_exposures, proposed_exposures in (
             ("SECTOR", sector_values, proposed_sector_values),
             ("COUNTRY", country_values, proposed_country_values),
@@ -3909,10 +4943,13 @@ def _build_market_risk_assessment(
             for name in sorted(all_names):
                 current_amount = current_exposures.get(name, 0.0)
                 proposed_amount = proposed_exposures.get(name, 0.0)
-                current_pct = current_amount / portfolio_value * 100.0
+                current_pct = (
+                    current_amount / current_holdings_value * 100.0
+                    if current_holdings_value > 0 else 0.0
+                )
                 proposed_pct = (
-                    proposed_amount / proposed_portfolio_value * 100.0
-                    if proposed_portfolio_value > 0 else 0.0
+                    proposed_amount / proposed_holdings_value * 100.0
+                    if proposed_holdings_value > 0 else 0.0
                 )
                 comparison = {
                     "type": exposure_type,
@@ -3923,14 +4960,14 @@ def _build_market_risk_assessment(
                     "proposed_percent": round(proposed_pct, 2),
                     "change_percentage_points": round(proposed_pct - current_pct, 2),
                     "current_denominator_value": round(
-                        max(0.0, portfolio_value), 2
+                        current_holdings_value, 2
                     ),
-                    "current_denominator_basis": "UPSTREAM_PORTFOLIO_VALUE",
+                    "current_denominator_basis": "UNIQUE_POSITIVE_VALUE_SECURITY_HOLDINGS",
                     "proposed_denominator_value": round(
-                        proposed_portfolio_value, 2
+                        proposed_holdings_value, 2
                     ),
                     "proposed_denominator_basis": (
-                        "UPSTREAM_PORTFOLIO_VALUE_PLUS_EXTERNAL_ASSESSMENT_CASH"
+                        "PROJECTED_POSITIVE_VALUE_SECURITY_HOLDINGS"
                     ),
                     "measurement": "ESTIMATED_PROPOSED_EXPOSURE",
                     "advisory_only": True,
@@ -3942,8 +4979,8 @@ def _build_market_risk_assessment(
                         "name": name,
                         "exposure_value": round(current_amount, 2),
                         "exposure_percent": round(current_pct, 2),
-                        "denominator_value": round(max(0.0, portfolio_value), 2),
-                        "denominator_basis": "UPSTREAM_PORTFOLIO_VALUE",
+                        "denominator_value": round(current_holdings_value, 2),
+                        "denominator_basis": "UNIQUE_POSITIVE_VALUE_SECURITY_HOLDINGS",
                         "measurement": "CURRENT_OBSERVED_EXPOSURE",
                         "trigger": "REVIEW_AT_30_PERCENT",
                     })
@@ -3956,9 +4993,9 @@ def _build_market_risk_assessment(
                         "change_percentage_points": round(proposed_pct - current_pct, 2),
                         "measurement": "ESTIMATED_PROPOSED_EXPOSURE",
                         "trigger": "REVIEW_AT_30_PERCENT",
-                        "denominator_value": round(proposed_portfolio_value, 2),
+                        "denominator_value": round(proposed_holdings_value, 2),
                         "denominator_basis": (
-                            "UPSTREAM_PORTFOLIO_VALUE_PLUS_EXTERNAL_ASSESSMENT_CASH"
+                            "PROJECTED_POSITIVE_VALUE_SECURITY_HOLDINGS"
                         )
                     }
                     assessment["proposed_portfolio_concentration"].append(proposed_record)
@@ -3981,7 +5018,7 @@ def _build_market_risk_assessment(
                         "subject": name,
                         "reason": (
                             f"Current {exposure_type.lower()} exposure is {current_pct:.1f}% "
-                            "of portfolio value. Review the exposure before increasing it further."
+                            "of owned security holdings. Review the exposure before increasing it further."
                         ),
                         "confidence": "HIGH",
                         "evidence_type": "OBSERVED_PORTFOLIO_EXPOSURE",
@@ -3989,7 +5026,7 @@ def _build_market_risk_assessment(
                     })
     else:
         assessment["limitations"].append(
-            "Portfolio value is missing or non-positive; concentration percentages cannot be calculated."
+            "Security holdings value is missing or non-positive; holdings concentration percentages cannot be calculated."
         )
 
     # --------------------------------------------------------
@@ -4023,12 +5060,112 @@ def _build_market_risk_assessment(
         )
 
     baseline_unallocated = portfolio_value - current_holdings_value
+
+    # Independently verify the portfolio residual against the cash recorded
+    # in holdings_raw.csv. A residual alone is not evidence of cash.
+    actual_cash_balance = None
+    cash_evidence_detail = (
+        f"Cash evidence unavailable: {HOLDINGS_FILE} does not exist."
+    )
+
+    if os.path.exists(HOLDINGS_FILE):
+        try:
+            cash_source = pd.read_csv(HOLDINGS_FILE)
+            required_cash_columns = {"Ticker", "Market Value"}
+
+            if not required_cash_columns.issubset(cash_source.columns):
+                cash_evidence_detail = (
+                    f"Cash evidence unavailable: {HOLDINGS_FILE} "
+                    "does not contain Ticker and Market Value columns."
+                )
+            else:
+                cash_mask = (
+                    cash_source["Ticker"].astype(str).str.strip().str.upper()
+                    == "CASH"
+                )
+                cash_rows = cash_source.loc[cash_mask]
+                cash_values = pd.to_numeric(
+                    cash_rows["Market Value"],
+                    errors="coerce",
+                )
+
+                if not cash_rows.empty and (
+                    cash_values.isna().any()
+                    or (cash_values < -0.01).any()
+                ):
+                    cash_evidence_detail = (
+                        "Cash evidence is incomplete or contains a negative "
+                        "cash row; the balance cannot be verified."
+                    )
+                else:
+                    cash_total = float(cash_values.sum())
+                    if cash_total < -0.01:
+                        cash_evidence_detail = (
+                            "The net cash balance in the holdings file is "
+                            "negative and cannot be treated as deployable cash."
+                        )
+                    else:
+                        actual_cash_balance = round(max(0.0, cash_total), 2)
+                        cash_evidence_detail = (
+                            f"Verified existing cash from {HOLDINGS_FILE}: "
+                            f"£{actual_cash_balance:.2f} across "
+                            f"{len(cash_rows)} CASH row(s)."
+                        )
+
+        except Exception as exc:
+            cash_evidence_detail = (
+                f"Unable to independently read existing cash from "
+                f"{HOLDINGS_FILE}: {exc}"
+            )
+
+    assessment["data_quality"]["existing_cash_balance_evidence_status"] = (
+        "AVAILABLE" if actual_cash_balance is not None else "UNASSESSED"
+    )
+    assessment["data_quality"]["existing_cash_balance_value"] = (
+        actual_cash_balance
+    )
+
+    if actual_cash_balance is None:
+        reconciliation_status = "UNASSESSED"
+        reconciliation_detail = (
+            f"Portfolio residual is £{baseline_unallocated:.2f}, but it "
+            f"cannot be verified as cash. {cash_evidence_detail}"
+        )
+        expected_cash_value = None
+    else:
+        cash_variance = baseline_unallocated - actual_cash_balance
+        expected_cash_value = actual_cash_balance
+
+        if baseline_unallocated < -0.02 or cash_variance < -0.02:
+            reconciliation_status = "FAIL"
+            reconciliation_detail = (
+                f"Portfolio residual is £{baseline_unallocated:.2f}, "
+                f"while verified cash is £{actual_cash_balance:.2f}. "
+                f"Difference: £{cash_variance:.2f}. Recorded securities "
+                "plus verified cash exceed the upstream portfolio value."
+            )
+        elif abs(cash_variance) <= 0.02:
+            reconciliation_status = "PASS"
+            reconciliation_detail = (
+                f"Portfolio residual of £{baseline_unallocated:.2f} "
+                f"matches verified cash of £{actual_cash_balance:.2f} "
+                "within tolerance."
+            )
+        else:
+            reconciliation_status = "WARN"
+            reconciliation_detail = (
+                f"Portfolio residual is £{baseline_unallocated:.2f}, "
+                f"but verified cash is £{actual_cash_balance:.2f}. "
+                f"Unexplained difference: £{cash_variance:.2f}; "
+                "the difference is not assumed to be cash."
+            )
+
     _add_exposure_check(
         "CURRENT_PORTFOLIO_VALUE_RECONCILIATION",
-        "FAIL" if baseline_unallocated < -0.01 else "PASS",
-        round(portfolio_value, 2),
-        round(current_holdings_value + max(0.0, baseline_unallocated), 2),
-        "Portfolio value is compared with classified and unclassified current holdings. Positive residual is retained as unallocated value/cash; a negative residual means holdings exceed the supplied portfolio denominator.",
+        reconciliation_status,
+        round(baseline_unallocated, 2),
+        expected_cash_value,
+        reconciliation_detail,
     )
 
     source_totals = {}
@@ -4075,17 +5212,23 @@ def _build_market_risk_assessment(
         "Total proposed funding from any holding must not exceed its current value. Exceptions: " + str(overdrawn_sources),
     )
 
-    expected_proposed_holdings = current_holdings_value + external_cash_allocated
+    expected_proposed_holdings = (
+        current_holdings_value
+        + existing_cash_allocated
+        + external_cash_allocated
+    )
     holdings_residual = proposed_holdings_value - expected_proposed_holdings
     _add_exposure_check(
         "PROPOSED_HOLDINGS_RECONCILIATION",
         "FAIL" if abs(holdings_residual) > 0.02 else "PASS",
         round(proposed_holdings_value, 2),
         round(expected_proposed_holdings, 2),
-        f"Proposed security holdings should equal current security holdings plus cash allocated from the assessment cash pool, after internal source-to-destination transfers net to zero. Residual: {holdings_residual:.2f}.",
+        f"Proposed security holdings should equal current security holdings plus existing portfolio cash allocated and external assessment cash allocated, after internal source-to-destination transfers net to zero. Residual: {holdings_residual:.2f}.",
     )
 
-    expected_unallocated = baseline_unallocated
+    expected_unallocated = (
+        baseline_unallocated - existing_cash_allocated
+    )
     proposed_unallocated = proposed_portfolio_value - proposed_holdings_value
     unallocated_residual = proposed_unallocated - expected_unallocated
     _add_exposure_check(
@@ -4093,7 +5236,7 @@ def _build_market_risk_assessment(
         "FAIL" if abs(unallocated_residual) > 0.02 else "PASS",
         round(proposed_unallocated, 2),
         round(expected_unallocated, 2),
-        f"The current unallocated portfolio value/cash should remain constant after internal transfers and explicit assessment-cash additions. Residual: {unallocated_residual:.2f}.",
+        f"Expected unallocated value equals baseline unallocated portfolio value less existing portfolio cash allocated to destinations. External assessment cash increases both the proposed denominator and proposed holdings; internal transfers net to zero. Residual: {unallocated_residual:.2f}.",
     )
 
     _add_exposure_check(
@@ -4715,6 +5858,7 @@ def _build_market_risk_assessment(
                 "portfolio_roles": roles,
                 "price_risk": price_risk,
                 "intelligence_available": False,
+                "evidence_quality": "UNAVAILABLE",
                 "news_headlines_available": False,
                 "earnings_status": None,
                 "analyst_target_upside_percent": None,
@@ -4742,20 +5886,21 @@ def _build_market_risk_assessment(
 
             continue
 
-        source = _normalise_text(row.get("Source")).upper()
+        evidence_quality = _classify_company_intelligence_evidence(row)
         headlines = row.get("News Headlines")
         earnings_status = _normalise_text(
             row.get("Earnings Status")
         ).upper()
         target_upside = row.get("Analyst Target Upside %")
 
-        unavailable = source == "UNAVAILABLE"
+        unavailable = evidence_quality == "UNAVAILABLE"
 
         flag = {
             "ticker": ticker,
             "portfolio_roles": roles,
             "price_risk": price_risk,
             "intelligence_available": not unavailable,
+            "evidence_quality": evidence_quality,
             "news_headlines_available": _is_present(headlines),
             "earnings_status": earnings_status or None,
             "analyst_target_upside_percent": None,
@@ -4870,11 +6015,11 @@ def _build_market_risk_assessment(
         intelligence = intelligence_by_ticker.get(ticker)
         flag = flags_by_ticker.get(ticker)
         decision_row = decision_by_ticker.get(ticker, {})
-        source_status = (
-            _normalise_text(intelligence.get("Source")).upper()
-            if intelligence is not None else ""
+        evidence_quality = (
+            _classify_company_intelligence_evidence(intelligence)
+            if intelligence is not None else "UNAVAILABLE"
         )
-        evidence_available = intelligence is not None and source_status != "UNAVAILABLE"
+        evidence_available = evidence_quality == "PARTIAL"
 
         is_etf = (
             fundamentals_by_ticker.get(ticker, "").upper() == "ETF"
@@ -4990,6 +6135,7 @@ def _build_market_risk_assessment(
             "recommended_action": action,
             "reason": "; ".join(str(reason) for reason in reasons),
             "evidence_available": evidence_available,
+            "evidence_quality": evidence_quality,
             "evidence_scope": "Existing market-intelligence fields only; macro, correlated-theme and comprehensive company risk are not assessed here.",
             "confidence": confidence,
             "advisory_only": True,
@@ -5288,6 +6434,621 @@ def _build_market_risk_assessment(
         "enough current observations are available; this is not a full macro model. "
         "Historical pre-purchase macro warnings remain unassessed without purchase "
         "dates and point-in-time macro snapshots."
+    )
+
+    # --------------------------------------------------------
+    # FINANCIAL STATEMENT EVIDENCE INVENTORY
+    #
+    # Availability, periods and provenance only.
+    # No resilience ratios or risk thresholds are inferred.
+    # --------------------------------------------------------
+
+    statement_mapping = (
+        financial_statements_by_ticker
+        if isinstance(financial_statements_by_ticker, dict)
+        else {}
+    )
+
+    statement_records_with_data = 0
+
+    statement_definitions = {
+        "balance_sheet": "Balance Sheet",
+        "income_statement": "Income Statement",
+        "cash_flow": "Cash Flow",
+    }
+
+    for statement_ticker, statement_record in sorted(
+        statement_mapping.items()
+    ):
+
+        if not isinstance(statement_record, dict):
+            statement_record = {}
+
+        annual_statements = statement_record.get(
+            "Annual",
+            {}
+        )
+
+        if not isinstance(annual_statements, dict):
+            annual_statements = {}
+
+        statement_periods = {}
+        statement_row_counts = {}
+
+        available_statement_count = 0
+
+        for statement_key, statement_label in (
+            statement_definitions.items()
+        ):
+
+            statement_rows = annual_statements.get(
+                statement_key,
+                []
+            )
+
+            if not isinstance(statement_rows, list):
+                statement_rows = []
+
+            if statement_rows:
+                available_statement_count += 1
+
+            statement_row_counts[statement_label] = len(
+                statement_rows
+            )
+
+            statement_periods[statement_label] = sorted({
+                str(row.get("period_end"))
+                for row in statement_rows
+                if (
+                    isinstance(row, dict)
+                    and row.get("period_end")
+                )
+            }, reverse=True)
+
+        evidence_status = (
+            "AVAILABLE"
+            if available_statement_count == 3
+            else "PARTIAL"
+            if available_statement_count > 0
+            else "UNAVAILABLE"
+        )
+
+        if available_statement_count > 0:
+            statement_records_with_data += 1
+
+        assessment["financial_resilience_evidence"].append({
+            "Ticker": str(statement_ticker).strip().upper(),
+            "Evidence Status": evidence_status,
+            "Source": statement_record.get("Source"),
+            "Retrieved At": statement_record.get("Retrieved At"),
+            "Statement Periods": statement_periods,
+            "Statement Row Counts": statement_row_counts,
+            "Available Statement Types": available_statement_count,
+            "Errors": statement_record.get("Errors", []),
+            "Assessment Scope": (
+                "Annual statement evidence inventory only; "
+                "financial-resilience metrics have not yet been calculated."
+            ),
+            "Advisory Only": True,
+        })
+
+    assessment["data_quality"][
+        "financial_statements_received"
+    ] = len(statement_mapping)
+
+    assessment["data_quality"][
+        "financial_statements_with_data"
+    ] = statement_records_with_data
+
+    assessment["data_quality"][
+        "financial_statements_unavailable"
+    ] = (
+        len(statement_mapping)
+        - statement_records_with_data
+    )
+
+    assessment["data_quality"][
+        "financial_statement_evidence_available"
+    ] = statement_records_with_data > 0
+
+    assessment["limitations"].append(
+        "Financial statement inventory records source availability, "
+        "periods and provenance. Separate SHADOW metrics are provided "
+        "for eligible operating companies only; specialist and "
+        "unverified business types remain unassessed. No validated "
+        "risk thresholds or composite resilience score are applied."
+    )
+
+
+    # --------------------------------------------------------
+    # SHADOW FINANCIAL RESILIENCE METRICS
+    #
+    # Exact fiscal-period joins across the three annual statements.
+    # Operating-company framework only.
+    # Descriptive metrics; no composite score or production impact.
+    # --------------------------------------------------------
+
+    import math
+
+    assessment.setdefault("financial_resilience_metrics", [])
+
+    _financial_classification_rows = {}
+
+    for _source_row in list(rows) + list(intelligence_rows):
+        if not isinstance(_source_row, dict):
+            continue
+
+        _source_ticker = clean_ticker(
+            _source_row.get(
+                "Ticker",
+                _source_row.get("ticker", "")
+            )
+        )
+
+        if _source_ticker:
+            _financial_classification_rows.setdefault(
+                _source_ticker, []
+            ).append(_source_row)
+
+    def _financial_text(value):
+        value = str(value or "").strip()
+        if value.upper() in {
+            "", "UNKNOWN", "N/A", "NA", "NONE", "NULL", "NAN"
+        }:
+            return ""
+        return value
+
+    def _financial_number(record, *field_names):
+        if not isinstance(record, dict):
+            return None
+
+        for field_name in field_names:
+            if field_name not in record:
+                continue
+
+            value = record.get(field_name)
+
+            if value is None or isinstance(value, bool):
+                continue
+
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+
+            if math.isfinite(number):
+                return number
+
+        return None
+
+    def _financial_period_map(statement_rows):
+        period_map = {}
+
+        if not isinstance(statement_rows, list):
+            return period_map
+
+        for statement_row in statement_rows:
+            if not isinstance(statement_row, dict):
+                continue
+
+            period_end = _financial_text(
+                statement_row.get("period_end")
+            )
+
+            if period_end:
+                period_map[period_end] = statement_row
+
+        return period_map
+
+    def _financial_business_classification(ticker, statement_record):
+        _metadata = metadata_by_ticker.get(ticker, {})
+        if not isinstance(_metadata, dict):
+            _metadata = {}
+
+        _sector = _financial_text(_metadata.get("sector"))
+        _industry = _financial_text(_metadata.get("industry"))
+        _company_name = _financial_text(
+            statement_record.get("Name")
+            if isinstance(statement_record, dict)
+            else ""
+        )
+
+        for _source_row in _financial_classification_rows.get(
+            ticker, []
+        ):
+            if not _sector:
+                _sector = _financial_text(
+                    _source_row.get(
+                        "Sector",
+                        _source_row.get("sector")
+                    )
+                )
+
+            if not _industry:
+                _industry = _financial_text(
+                    _source_row.get(
+                        "Industry",
+                        _source_row.get("industry")
+                    )
+                )
+
+            if not _company_name:
+                _company_name = _financial_text(
+                    _source_row.get(
+                        "Company Name",
+                        _source_row.get(
+                            "Name",
+                            _source_row.get("Security Name", "")
+                        )
+                    )
+                )
+
+        _sector_upper = _sector.upper()
+        _industry_upper = _industry.upper()
+        _name_upper = _company_name.upper()
+        _classification_text = (
+            _industry_upper + " " + _name_upper
+        )
+
+        if any(term in _classification_text for term in (
+            "BANK",
+            "BANKING",
+            "SAVINGS INSTITUTION",
+        )):
+            _business_class = "BANK"
+
+        elif any(term in _classification_text for term in (
+            "REAL ESTATE INVESTMENT TRUST",
+            "REIT",
+        )):
+            _business_class = "REIT"
+
+        elif any(term in _classification_text for term in (
+            "MASTER LIMITED PARTNERSHIP",
+            "LIMITED PARTNERSHIP",
+            "MLP",
+        )):
+            _business_class = "MLP / PARTNERSHIP"
+
+        elif any(term in _classification_text for term in (
+            "MIDSTREAM",
+            "PIPELINE",
+            "PIPELINES",
+            "GAS TRANSMISSION",
+            "OIL AND GAS STORAGE",
+            "OIL & GAS STORAGE",
+            "OIL AND GAS TRANSPORTATION",
+            "OIL & GAS TRANSPORTATION",
+        )):
+            _business_class = "MIDSTREAM SPECIALIST"
+
+        elif any(term in _classification_text for term in (
+            "MARINE SHIPPING",
+            "TANKER",
+            "LNG SHIPPING",
+            "LNG TRANSPORTATION",
+        )):
+            _business_class = "SHIPPING SPECIALIST"
+
+        elif any(term in _sector_upper for term in (
+            "FINANCIAL SERVICES",
+            "FINANCIALS",
+        )):
+            _business_class = "FINANCIAL NON-BANK"
+
+        elif "REAL ESTATE" in _sector_upper:
+            _business_class = "REAL ESTATE SPECIALIST"
+
+        elif not _sector or not _industry:
+            _business_class = "BUSINESS TYPE UNVERIFIED"
+
+        else:
+            _business_class = "OPERATING COMPANY"
+
+        _classification_evidence = (
+            f"Sector={_sector or 'UNAVAILABLE'}; "
+            f"Industry={_industry or 'UNAVAILABLE'}; "
+            f"Name={_company_name or 'UNAVAILABLE'}"
+        )
+
+        return _business_class, _classification_evidence
+
+    _specialist_business_classes = {
+        "BANK",
+        "FINANCIAL NON-BANK",
+        "REIT",
+        "MLP / PARTNERSHIP",
+        "MIDSTREAM SPECIALIST",
+        "SHIPPING SPECIALIST",
+        "REAL ESTATE SPECIALIST",
+    }
+
+    _financial_period_count = 0
+    _financial_ticker_count = 0
+    _financial_operating_tickers = set()
+    _financial_excluded_tickers = set()
+    _financial_unverified_tickers = set()
+
+    for _statement_ticker, _statement_record in sorted(
+        statement_mapping.items()
+    ):
+        _ticker = clean_ticker(_statement_ticker)
+
+        if not _ticker or not isinstance(_statement_record, dict):
+            continue
+
+        _annual = _statement_record.get("Annual", {})
+        if not isinstance(_annual, dict):
+            continue
+
+        _balance_rows = _financial_period_map(
+            _annual.get("balance_sheet", [])
+        )
+        _income_rows = _financial_period_map(
+            _annual.get("income_statement", [])
+        )
+        _cash_flow_rows = _financial_period_map(
+            _annual.get("cash_flow", [])
+        )
+
+        # Never join different fiscal periods.
+        _common_periods = sorted(
+            set(_balance_rows)
+            & set(_income_rows)
+            & set(_cash_flow_rows),
+            reverse=True,
+        )
+
+        _business_class, _classification_evidence = (
+            _financial_business_classification(
+                _ticker,
+                _statement_record,
+            )
+        )
+
+        if _business_class == "OPERATING COMPANY":
+            _financial_operating_tickers.add(_ticker)
+        elif _business_class == "BUSINESS TYPE UNVERIFIED":
+            _financial_unverified_tickers.add(_ticker)
+        else:
+            _financial_excluded_tickers.add(_ticker)
+
+        if _business_class != "OPERATING COMPANY":
+            continue
+
+        for _period in _common_periods:
+            _balance = _balance_rows[_period]
+            _income = _income_rows[_period]
+            _cash_flow = _cash_flow_rows[_period]
+
+            # Use total revenue where supplied; Revenue is the
+            # alternative provider label. Do not substitute
+            # Operating Revenue.
+            _revenue = _financial_number(
+                _income,
+                "Total Revenue",
+                "Revenue",
+            )
+
+            _revenue_field = (
+                "Total Revenue"
+                if _financial_number(_income, "Total Revenue") is not None
+                else "Revenue"
+                if _financial_number(_income, "Revenue") is not None
+                else None
+            )
+
+            _fcf = _financial_number(
+                _cash_flow,
+                "Free Cash Flow",
+            )
+
+            # Reported Net Debt only. Missing is not treated as zero,
+            # and no cash-based replacement is derived.
+            _reported_net_debt = _financial_number(
+                _balance,
+                "Net Debt",
+            )
+
+            _ebitda = _financial_number(
+                _income,
+                "EBITDA",
+            )
+
+            _ebit = _financial_number(
+                _income,
+                "EBIT",
+            )
+
+            _interest_expense = _financial_number(
+                _income,
+                "Interest Expense",
+            )
+
+            _interest_income = _financial_number(
+                _income,
+                "Interest Income",
+            )
+
+            # Total Debt is reported as supplied. No attempt is made
+            # to reconstruct it from current debt, long-term debt
+            # or lease components.
+            _total_debt = _financial_number(
+                _balance,
+                "Total Debt",
+            )
+
+            _fcf_margin = None
+            if _fcf is not None and _revenue is not None and _revenue > 0:
+                _fcf_margin = (_fcf / _revenue) * 100.0
+
+            if _fcf is None or _revenue is None:
+                _fcf_status = "NOT AVAILABLE — REQUIRED INPUT MISSING"
+            elif _revenue <= 0:
+                _fcf_status = "NOT MEANINGFUL — NON-POSITIVE REVENUE"
+            else:
+                _fcf_status = "AVAILABLE"
+
+            _net_debt_ebitda = None
+            if _reported_net_debt is None or _ebitda is None:
+                _leverage_status = (
+                    "NOT AVAILABLE — REPORTED INPUT MISSING"
+                )
+            elif _ebitda <= 0:
+                _leverage_status = (
+                    "NOT MEANINGFUL — NON-POSITIVE EBITDA"
+                )
+            else:
+                _net_debt_ebitda = _reported_net_debt / _ebitda
+                _leverage_status = "AVAILABLE"
+
+            _gross_interest_coverage = None
+            _interest_expense_revenue_pct = None
+
+            if _ebit is None or _interest_expense is None:
+                _interest_status = (
+                    "NOT AVAILABLE — EBIT OR INTEREST EXPENSE MISSING"
+                )
+            elif _ebit <= 0:
+                _interest_status = "NOT MEANINGFUL — NON-POSITIVE EBIT"
+            elif _interest_expense <= 0:
+                _interest_status = (
+                    "NOT MEANINGFUL — NO POSITIVE GROSS INTEREST EXPENSE"
+                )
+            else:
+                _gross_interest_coverage = _ebit / _interest_expense
+
+                if _revenue is not None and _revenue > 0:
+                    _interest_expense_revenue_pct = (
+                        _interest_expense / _revenue
+                    ) * 100.0
+
+                if (
+                    _interest_income is not None
+                    and _interest_income >= _interest_expense
+                ):
+                    _interest_status = (
+                        "AVAILABLE — NET INTEREST INCOME; "
+                        "GROSS COVERAGE IS DESCRIPTIVE"
+                    )
+                else:
+                    _interest_status = (
+                        "AVAILABLE — GROSS COVERAGE; "
+                        "REVIEW INTEREST EXPENSE MATERIALITY"
+                    )
+
+            _net_interest_income = None
+            if (
+                _interest_income is not None
+                and _interest_expense is not None
+            ):
+                _net_interest_income = (
+                    _interest_income - _interest_expense
+                )
+
+            _available_metric_count = sum(
+                status == "AVAILABLE"
+                or status.startswith("AVAILABLE —")
+                for status in (
+                    _fcf_status,
+                    _leverage_status,
+                    _interest_status,
+                )
+            )
+
+            if _available_metric_count == 3:
+                _overall_metric_status = "ASSESSED"
+            elif _available_metric_count > 0:
+                _overall_metric_status = "PARTIAL"
+            else:
+                _overall_metric_status = "NO USABLE METRICS"
+
+            assessment["financial_resilience_metrics"].append({
+                "Ticker": _ticker,
+                "Period End": _period,
+                "Business Classification": _business_class,
+                "Business Classification Evidence": (
+                    _classification_evidence
+                ),
+                "Revenue Field": _revenue_field,
+                "Revenue": _revenue,
+                "Free Cash Flow": _fcf,
+                "FCF Margin %": _fcf_margin,
+                "FCF Margin Status": _fcf_status,
+                "Reported Net Debt": _reported_net_debt,
+                "EBITDA": _ebitda,
+                "Reported Net Debt / EBITDA (x)": _net_debt_ebitda,
+                "Net Debt / EBITDA Status": _leverage_status,
+                "Reported Total Debt": _total_debt,
+                "EBIT": _ebit,
+                "Interest Expense": _interest_expense,
+                "Interest Income": _interest_income,
+                "Net Interest Income (Income - Expense)": (
+                    _net_interest_income
+                ),
+                "Interest Expense / Revenue %": (
+                    _interest_expense_revenue_pct
+                ),
+                "Gross EBIT / Interest Expense (x)": (
+                    _gross_interest_coverage
+                ),
+                "Interest Coverage Status": _interest_status,
+                "Financial Metric Status": _overall_metric_status,
+                "Advisory Only": True,
+            })
+
+            _financial_period_count += 1
+
+    _financial_ticker_count = len({
+        item["Ticker"]
+        for item in assessment["financial_resilience_metrics"]
+    })
+
+    assessment["data_quality"][
+        "financial_metric_operating_companies"
+    ] = len(_financial_operating_tickers)
+
+    assessment["data_quality"][
+        "financial_metric_tickers_reported"
+    ] = _financial_ticker_count
+
+    assessment["data_quality"][
+        "financial_metric_periods_reported"
+    ] = _financial_period_count
+
+    assessment["data_quality"][
+        "financial_specialist_businesses_excluded"
+    ] = len(_financial_excluded_tickers)
+
+    assessment["data_quality"][
+        "financial_business_types_unverified"
+    ] = len(_financial_unverified_tickers)
+
+    assessment["limitations"].append(
+        "Financial resilience ratios are descriptive SHADOW measures "
+        "for businesses classified as operating companies. Banks, "
+        "financial non-banks, REITs, partnerships, midstream, shipping "
+        "and real-estate specialists are excluded; unverified business "
+        "types are not assessed."
+    )
+
+    assessment["limitations"].append(
+        "Reported Net Debt is used without deriving a replacement. "
+        "Reported Total Debt is displayed without reconstructing it "
+        "from debt and lease components. Negative FCF margins and "
+        "negative reported Net Debt are retained."
+    )
+
+    assessment["limitations"].append(
+        "Gross EBIT / Interest Expense is shown with Interest Income "
+        "and Net Interest Income. Gross coverage is descriptive and "
+        "is not independently interpreted as debt-servicing strength."
+    )
+
+    assessment["limitations"].append(
+        "Financial statement amounts remain in issuer reporting "
+        "currency. No FX conversion, composite resilience score, "
+        "production scoring or portfolio decision change is made."
     )
 
     return assessment
@@ -5884,6 +7645,7 @@ def generate_portfolio_reallocation(
     portfolio_value,
     min_reallocation_trade_value=1.0,
     market_intelligence=None,
+    financial_statements_by_ticker=None,
 ):
     """
     Generate governed portfolio capital reallocation.
@@ -5956,6 +7718,7 @@ def generate_portfolio_reallocation(
                 final_portfolio_decisions=final_portfolio_decisions,
                 portfolio_value=portfolio_value,
                 market_intelligence=market_intelligence,
+                financial_statements_by_ticker=financial_statements_by_ticker,
             ),
         }
 
@@ -5996,6 +7759,7 @@ def generate_portfolio_reallocation(
                 final_portfolio_decisions=final_portfolio_decisions,
                 portfolio_value=portfolio_value,
                 market_intelligence=market_intelligence,
+                financial_statements_by_ticker=financial_statements_by_ticker,
             ),
         }
 
@@ -6040,6 +7804,7 @@ def generate_portfolio_reallocation(
                 final_portfolio_decisions=final_portfolio_decisions,
                 portfolio_value=portfolio_value,
                 market_intelligence=market_intelligence,
+                financial_statements_by_ticker=financial_statements_by_ticker,
             ),
         }
     # ========================================================
@@ -6086,6 +7851,7 @@ def generate_portfolio_reallocation(
                 final_portfolio_decisions=final_portfolio_decisions,
                 portfolio_value=portfolio_value,
                 market_intelligence=market_intelligence,
+                financial_statements_by_ticker=financial_statements_by_ticker,
             ),
         }
 
@@ -7924,6 +9690,27 @@ def generate_portfolio_reallocation(
         2
     )
 
+    if abs(destination_allocation_variance) <= 0.01:
+
+        destination_allocation_variance_reason = (
+            "Planned destination allocations match generated transactions."
+        )
+
+    elif destination_allocation_variance > 0:
+
+        destination_allocation_variance_reason = (
+            f"Planned destination allocations exceed generated "
+            f"transactions by £{destination_allocation_variance:.2f}."
+        )
+
+    else:
+
+        destination_allocation_variance_reason = (
+            f"Generated destination transactions exceed planned "
+            f"allocations by £{abs(destination_allocation_variance):.2f}."
+        )
+
+
     destination_allocation_status = (
         "PASS"
         if abs(destination_allocation_variance) <= 0.01
@@ -7944,12 +9731,120 @@ def generate_portfolio_reallocation(
         2
     )
 
+    # Funding candidate values are authorised release capacity. Only amounts
+    # represented by generated transactions are proposed as released capital.
+    # Any unused balance remains capacity, not unallocated cash.
+    total_authorised_funding_capacity = total_available_capital
+
     total_released = round(
-        assessment_cash
-        + existing_cash
-        + released_from_holdings,
-        2
+        sum(
+            safe_float(transaction.get("Released Capital", 0))
+            for transaction in transactions
+        ),
+        2,
     )
+
+    actual_assessment_cash_used = round(
+        sum(
+            safe_float(transaction.get("Released Capital", 0))
+            for transaction in transactions
+            if clean_ticker(transaction.get("Source Ticker", "")) == "ASSESSMENT CASH"
+        ),
+        2,
+    )
+
+    actual_existing_cash_used = round(
+        sum(
+            safe_float(transaction.get("Released Capital", 0))
+            for transaction in transactions
+            if (
+                clean_ticker(transaction.get("Source Ticker", "")) == "CASH"
+                and normalise_action(transaction.get("Source Action", "")) == "EXISTING CASH"
+            )
+        ),
+        2,
+    )
+
+    actual_released_from_holdings = round(
+        sum(
+            safe_float(transaction.get("Released Capital", 0))
+            for transaction in transactions
+            if clean_ticker(transaction.get("Source Ticker", ""))
+            not in {"ASSESSMENT CASH", "CASH"}
+        ),
+        2,
+    )
+
+    unused_authorised_funding_by_source = []
+    for source_ticker, remaining_amount in sorted(remaining_funding.items()):
+        remaining_amount = safe_float(remaining_amount)
+        if remaining_amount <= 0:
+            continue
+
+        source_metadata = funding_metadata.get(source_ticker, {})
+        unused_authorised_funding_by_source.append({
+            "Source Ticker": source_ticker,
+            "Unused Authorised Funding": round(remaining_amount, 2),
+            "Source Decision": normalise_action(
+                source_metadata.get("Final Decision", "")
+            ),
+            "Authorised Destination": clean_ticker(
+                source_metadata.get("Authorised Destination", "")
+            ),
+            "Funding Reason": source_metadata.get("Funding Reason", ""),
+        })
+
+    unused_authorised_funding_capacity = round(
+        sum(
+            safe_float(amount)
+            for amount in remaining_funding.values()
+        ),
+        2,
+    )
+
+    unused_destination_restricted_funding = round(
+        sum(
+            safe_float(amount)
+            for source_ticker, amount in remaining_funding.items()
+            if (
+                normalise_action(
+                    funding_metadata.get(source_ticker, {}).get("Final Decision", "")
+                ) == "HOLD"
+                and clean_ticker(
+                    funding_metadata.get(source_ticker, {}).get("Authorised Destination", "")
+                )
+            )
+        ),
+        2,
+    )
+
+    if abs(destination_allocation_variance) <= 0.01:
+
+        destination_allocation_variance_reason = (
+            "Planned destination allocations match the generated transactions."
+        )
+
+    elif destination_allocation_variance > 0:
+
+        destination_allocation_variance_reason = (
+            f"Planned destination allocations exceed generated transactions "
+            f"by £{destination_allocation_variance:.2f}."
+        )
+
+    else:
+
+        destination_allocation_variance_reason = (
+            f"Generated destination transactions exceed planned allocations "
+            f"by £{abs(destination_allocation_variance):.2f}."
+        )
+
+    if unused_destination_restricted_funding > 0.01:
+
+        destination_allocation_variance_reason += (
+            f" £{unused_destination_restricted_funding:.2f} of unused HOLD "
+            "funding remains restricted to its authorised replacement "
+            "destination and cannot be redirected to other destinations."
+        )
 
     reconciliation_variance = round(
         total_released - total_reallocated,
@@ -8004,16 +9899,23 @@ def generate_portfolio_reallocation(
             assessment_cash,
             2
         ),
+        "Assessment Cash Used": actual_assessment_cash_used,
         "Existing Portfolio Cash": round(
             existing_cash,
             2
         ),
-        "Released From Holdings": round(
+        "Existing Portfolio Cash Used": actual_existing_cash_used,
+        "Released From Holdings": actual_released_from_holdings,
+        "Authorised Release Capacity From Holdings": round(
             released_from_holdings,
             2
         ),
+        "Total Authorised Funding Capacity": total_authorised_funding_capacity,
         "Total Released": total_released,
         "Total Reallocated": total_reallocated,
+        "Unused Authorised Funding Capacity": unused_authorised_funding_capacity,
+        "Unused Authorised Funding By Source": unused_authorised_funding_by_source,
+        "Unused Destination-Restricted Funding": unused_destination_restricted_funding,
         "Actual Destination Allocation": (
             actual_destination_allocation
         ),
@@ -8025,6 +9927,9 @@ def generate_portfolio_reallocation(
         ),
         "Destination Allocation Reconciliation": (
             destination_allocation_status
+        ),
+        "Destination Allocation Variance Reason": (
+            destination_allocation_variance_reason
         ),
         "Unallocated Capital": unallocated_capital,
         "Reconciliation Variance": reconciliation_variance,
@@ -8084,6 +9989,7 @@ def generate_portfolio_reallocation(
         final_portfolio_decisions,
         portfolio_value,
         market_intelligence=market_intelligence,
+        financial_statements_by_ticker=financial_statements_by_ticker,
         reallocation=reallocation_df,
     )
 
@@ -8460,6 +10366,7 @@ def generate_portfolio_reallocation(
     for section, title in (
         ("market_stress_indicators", "BROAD-MARKET STRESS INDICATORS"),
         ("market_breadth_indicators", "MARKET BREADTH INDICATORS — CONSTITUENT LEVEL"),
+        ("market_sector_breadth", "SECTOR BREADTH AND EQUAL-WEIGHTED ROTATION"),
         ("market_leadership_indicators", "MARKET LEADERSHIP / RELATIVE STRENGTH"),
         ("macro_stress_scenarios", "MACRO STRESS SCENARIO ASSESSMENT"),
         ("candidate_macro_reviews", "CANDIDATE MACRO SENSITIVITY REVIEWS"),

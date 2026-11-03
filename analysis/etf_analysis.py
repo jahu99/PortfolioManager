@@ -185,6 +185,15 @@ def calculate_etf_score(close):
             "12M Return %":
                 None,
 
+            "ETF Indicators Assessed":
+                0,
+
+            "ETF Indicators Available":
+                5,
+
+            "ETF Evidence Coverage %":
+                0.0,
+
             "ETF Reasons":
                 "ETF price history unavailable",
 
@@ -223,10 +232,8 @@ def calculate_etf_score(close):
 
     else:
 
-        # Use available history rather than failing.
-        ma200 = safe_float(
-            close.mean()
-        )
+        # A shorter history is not a valid 200-day moving average.
+        ma200 = None
 
     # ========================================================
     # RETURNS
@@ -269,6 +276,18 @@ def calculate_etf_score(close):
                     twelve_month_price
                 ) - 1
             ) * 100
+
+    # ========================================================
+    # EVIDENCE COVERAGE
+    # ========================================================
+
+    indicators_assessed = sum((
+        current_price is not None and ma50 is not None,
+        current_price is not None and ma200 is not None,
+        ma50 is not None and ma200 is not None,
+        return_6m is not None,
+        return_12m is not None,
+    ))
 
     # ========================================================
     # SCORE
@@ -484,6 +503,15 @@ def calculate_etf_score(close):
 
         "12M Return %":
             return_12m,
+
+        "ETF Indicators Assessed":
+            indicators_assessed,
+
+        "ETF Indicators Available":
+            5,
+
+        "ETF Evidence Coverage %":
+            indicators_assessed / 5 * 100,
 
         "ETF Reasons":
             reasons_text,

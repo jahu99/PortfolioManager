@@ -73,6 +73,47 @@ def _normalise_action(value):
     return str(value).strip().upper()
 
 
+def _duplicate_tickers(records):
+    """Return sorted duplicate normalised tickers."""
+    seen = set()
+    duplicates = set()
+
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+
+        ticker = _clean_ticker(record.get("Ticker", ""))
+
+        if not ticker:
+            continue
+
+        if ticker in seen:
+            duplicates.add(ticker)
+        else:
+            seen.add(ticker)
+
+    return sorted(duplicates)
+
+
+def _duplicate_normalised_keys(values):
+    """Detect keys that collide after ticker normalisation."""
+    seen = set()
+    duplicates = set()
+
+    for value in values:
+        ticker = _clean_ticker(value)
+
+        if not ticker:
+            continue
+
+        if ticker in seen:
+            duplicates.add(ticker)
+        else:
+            seen.add(ticker)
+
+    return sorted(duplicates)
+
+
 def build_reallocation_audit(
     destinations,
     eligible_destinations,
@@ -154,47 +195,59 @@ def build_reallocation_audit(
 
     actual_destination_allocations = {}
     actual_source_releases = {}
+    actual_source_destinations = {}
 
     if not reallocation_df.empty:
         for _, transaction in reallocation_df.iterrows():
-            amount_value = transaction.get(
-                "Reallocated Capital",
-                None
-            )
 
-            if amount_value is None or pd.isna(amount_value):
-                amount_value = transaction.get(
+            released_amount = _safe_float(
+                transaction.get(
                     "Released Capital",
                     0
                 )
+            )
 
-            amount = _safe_float(amount_value)
-
-            if amount <= 0:
-                continue
+            reallocated_amount = _safe_float(
+                transaction.get(
+                    "Reallocated Capital",
+                    0
+                )
+            )
 
             destination_ticker = _clean_ticker(
                 transaction.get("Destination Ticker", "")
             )
+
             source_ticker = _clean_ticker(
                 transaction.get("Source Ticker", "")
             )
 
-            if destination_ticker:
+            if destination_ticker and reallocated_amount > 0:
+
                 actual_destination_allocations[
                     destination_ticker
                 ] = (
                     actual_destination_allocations.get(
-                        destination_ticker, 0.0
-                    ) + amount
+                        destination_ticker,
+                        0.0
+                    ) + reallocated_amount
                 )
 
-            if source_ticker:
+            if source_ticker and released_amount > 0:
+
                 actual_source_releases[source_ticker] = (
                     actual_source_releases.get(
-                        source_ticker, 0.0
-                    ) + amount
+                        source_ticker,
+                        0.0
+                    ) + released_amount
                 )
+
+            if source_ticker and reallocated_amount > 0:
+
+                actual_source_destinations.setdefault(
+                    source_ticker,
+                    []
+                ).append(destination_ticker)
 
     actual_destination_allocations = {
         ticker: round(amount, 2)
@@ -229,6 +282,28 @@ def build_reallocation_audit(
         ): candidate
         for candidate in funding_candidates
     }
+
+    duplicate_destination_tickers = _duplicate_tickers(
+        destinations
+    )
+
+    duplicate_eligible_tickers = _duplicate_tickers(
+        eligible_destinations
+    )
+
+    duplicate_deployment_tickers = _duplicate_tickers(
+        deployment_destinations
+    )
+
+    duplicate_funding_tickers = _duplicate_tickers(
+        funding_candidates
+    )
+
+    duplicate_destination_allocation_keys = (
+        _duplicate_normalised_keys(
+            destination_allocations.keys()
+        )
+    )
 
     # ============================================================
     # DESTINATION AUDIT
@@ -362,9 +437,8 @@ def build_reallocation_audit(
             status = "EXCLUDED"
 
             reason = (
-                f"Allocation Capacity £{allocation_capacity:.2f} "
-                f"is below the minimum trade value of "
-                f"£{min_trade_value:.2f}"
+                "Did not pass the engine's destination eligibility "
+                "assessment."
             )
 
         elif not is_selected:
@@ -415,8 +489,8 @@ def build_reallocation_audit(
             max_destination_allocation = (
                 _safe_float(
                     summary.get(
-                        "Total Released",
-                        0
+                        "Total Authorised Funding Capacity",
+                        summary.get("Total Released", 0)
                     )
                 )
                 * _safe_float(
@@ -574,12 +648,95 @@ def build_reallocation_audit(
         if source_action == "CASH":
             permitted_release_capital = current_value
 
-        # This is the amount evidenced by generated transactions,
-        # not the maximum amount the source was permitted to release.
+        # Independently compare actual source releases with the
+        # permitted release capacity calculated from the candidate.
         released_capital = actual_source_releases.get(
             ticker,
             0.0
         )
+
+        unused_permitted_capacity = round(
+            max(
+                0.0,
+                permitted_release_capital - released_capital
+            ),
+            2
+        )
+
+        excess_release = round(
+            max(
+                0.0,
+                released_capital - permitted_release_capital
+            ),
+            2
+        )
+
+        funding_capacity_status = (
+            "FAIL"
+            if excess_release > 0.01
+            else "PASS"
+        )
+
+        authorised_destination = _clean_ticker(
+            candidate.get(
+                "Authorised Destination",
+                ""
+            )
+        )
+
+        source_destinations = actual_source_destinations.get(
+            ticker,
+            []
+        )
+
+        actual_destinations = sorted(
+            {
+                destination
+                for destination in source_destinations
+                if destination
+            }
+        )
+
+        missing_destination_transactions = sum(
+            not destination
+            for destination in source_destinations
+        )
+
+        is_destination_restricted_hold = (
+            source_action == "HOLD"
+            and bool(authorised_destination)
+        )
+
+        restriction_violations = []
+
+        if is_destination_restricted_hold:
+
+            restriction_violations = [
+                destination
+                for destination in actual_destinations
+                if destination != authorised_destination
+            ]
+
+            if missing_destination_transactions:
+                restriction_violations.append(
+                    "<MISSING DESTINATION>"
+                )
+
+            restriction_violations = sorted(
+                set(restriction_violations)
+            )
+
+        if not is_destination_restricted_hold:
+            restriction_status = "NOT RESTRICTED"
+
+        elif released_capital <= 0:
+            restriction_status = "NOT TESTED - NO RELEASE"
+
+        elif restriction_violations:
+            restriction_status = "FAIL"
+
+        else:
+            restriction_status = "PASS"
 
         funding_rows.append(
             {
@@ -605,6 +762,13 @@ def build_reallocation_audit(
                     released_capital,
                     2
                 ),
+                "Unused Permitted Release Capital": (
+                    unused_permitted_capacity
+                ),
+                "Excess Release": excess_release,
+                "Funding Capacity Status": (
+                    funding_capacity_status
+                ),
                 "Funding Status": (
                     "ACTUALLY FUNDED"
                     if released_capital > 0
@@ -625,6 +789,15 @@ def build_reallocation_audit(
                         ""
                     )
                 ),
+                "Actual Destinations": (
+                    "; ".join(actual_destinations)
+                    if actual_destinations
+                    else ""
+                ),
+                "Restricted Destination Violations": (
+                    "; ".join(restriction_violations)
+                ),
+                "Restriction Status": restriction_status,
                 "Funding Reason": candidate.get(
                     "Funding Reason",
                     ""
@@ -722,6 +895,33 @@ def build_reallocation_audit(
             ),
             2
         ),
+        "Total Authorised Funding Capacity": round(
+            _safe_float(
+                summary.get(
+                    "Total Authorised Funding Capacity",
+                    summary.get("Total Released", 0)
+                )
+            ),
+            2
+        ),
+        "Unused Authorised Funding Capacity": round(
+            _safe_float(
+                summary.get(
+                    "Unused Authorised Funding Capacity",
+                    0
+                )
+            ),
+            2
+        ),
+        "Unused Destination-Restricted Funding": round(
+            _safe_float(
+                summary.get(
+                    "Unused Destination-Restricted Funding",
+                    0
+                )
+            ),
+            2
+        ),
         "Unallocated Capital": round(
             _safe_float(
                 summary.get(
@@ -795,6 +995,34 @@ def build_reallocation_audit(
         ),
         "Minimum Trade Value": (
             min_trade_value
+        ),
+        "Duplicate Destination Candidate Tickers": (
+            "; ".join(duplicate_destination_tickers)
+        ),
+        "Duplicate Eligible Destination Tickers": (
+            "; ".join(duplicate_eligible_tickers)
+        ),
+        "Duplicate Deployment Destination Tickers": (
+            "; ".join(duplicate_deployment_tickers)
+        ),
+        "Duplicate Funding Candidate Tickers": (
+            "; ".join(duplicate_funding_tickers)
+        ),
+        "Duplicate Destination Allocation Keys": (
+            "; ".join(duplicate_destination_allocation_keys)
+        ),
+        "Duplicate Ticker Diagnostics Status": (
+            "REVIEW"
+            if any(
+                [
+                    duplicate_destination_tickers,
+                    duplicate_eligible_tickers,
+                    duplicate_deployment_tickers,
+                    duplicate_funding_tickers,
+                    duplicate_destination_allocation_keys,
+                ]
+            )
+            else "PASS"
         ),
     }
 

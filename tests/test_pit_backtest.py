@@ -10,6 +10,7 @@ import pandas as pd
 from backtest_pit.data import PricePanel
 from backtest_pit.evaluate import (block_bootstrap_ci, eligibility, evaluate_factor, forward_returns,
                                    month_end_positions)
+from backtest_pit.exits import GAP, TERMINAL, ExitModel, exit_event_summary
 from backtest_pit.factors import FACTORS, momentum, rsi_wilder, technical_score
 from backtest_pit.portfolio import simulate_top_n, summarize_portfolio
 
@@ -226,6 +227,81 @@ class TestPortfolio(unittest.TestCase):
         self.assertGreaterEqual(s["total_cost"], 0.0019)
 
 
+class TestExitModel(unittest.TestCase):
+    def _adj(self):
+        idx = pd.bdate_range("2021-01-01", periods=60)
+        a = pd.DataFrame({"LIVE": np.arange(100.0, 160.0), "GAP": np.arange(100.0, 160.0),
+                          "DEAD": np.arange(100.0, 160.0), "LAG": np.arange(100.0, 160.0)}, index=idx)
+        a.loc[idx[20:25], "GAP"] = np.nan      # resumes later
+        a.loc[idx[30:], "DEAD"] = np.nan       # ends for good
+        a.loc[idx[57:], "LAG"] = np.nan        # within grace: data lag, not a delisting
+        return a
+
+    def test_separates_gap_terminal_and_recent_lag(self):
+        ex = ExitModel(0.0, grace_days=5).build(self._adj())
+        self.assertEqual(ex.terminated_names, ["DEAD"])
+        self.assertEqual(ex.flags["GAP"].iloc[22], GAP)
+        self.assertEqual(ex.flags["DEAD"].iloc[40], TERMINAL)
+        self.assertEqual(ex.flags["LAG"].iloc[58], GAP)
+
+    def test_delist_return_applies_only_after_termination(self):
+        adj = self._adj()
+        ex = ExitModel(-0.3, 5).build(adj)
+        self.assertAlmostEqual(ex.price["DEAD"].iloc[40], 129.0 * 0.7)
+        self.assertAlmostEqual(ex.price["DEAD"].iloc[29], 129.0)       # observed, untouched
+        self.assertAlmostEqual(ex.price["GAP"].iloc[22], 119.0)        # gap is plain carry-forward
+        fr = forward_returns(adj, np.array([10]), horizon=40, lag=1, exits=ex)
+        self.assertAlmostEqual(fr["DEAD"].iloc[0], 129.0 * 0.7 / 111.0 - 1.0)
+        self.assertAlmostEqual(fr["LIVE"].iloc[0], 151.0 / 111.0 - 1.0)
+
+    def test_default_matches_legacy_forward_fill(self):
+        adj = self._adj()
+        a = forward_returns(adj, np.array([10]), horizon=40, lag=1)
+        b = forward_returns(adj, np.array([10]), horizon=40, lag=1, exits=ExitModel().build(adj))
+        pd.testing.assert_frame_equal(a, b)
+
+    def test_event_counts(self):
+        adj = self._adj()
+        ex = ExitModel().build(adj)
+        e = exit_event_summary(adj, ex, np.array([10]), horizon=40, lag=1)   # exit row 51
+        self.assertEqual(e["observations"], 4)
+        self.assertEqual(e["terminal"], 1)
+        self.assertEqual(e["gap_filled"], 0)
+
+    def test_haircut_lowers_portfolio_return(self):
+        p = make_panel(n_days=500, n_tickers=60, seed=3)
+        p.close.iloc[300:, :20] = np.nan
+        p.adj_close.iloc[300:, :20] = np.nan
+        score = pd.DataFrame(0.0, p.index, p.close.columns)
+        score.iloc[:, :20] = 1.0               # the strategy holds the names that die
+        el, pos = all_eligible(p), month_end_positions(p.index)
+        base = simulate_top_n(p, score, el, pos, top_n=10, exits=ExitModel(0.0).build(p.adj_close))
+        hit = simulate_top_n(p, score, el, pos, top_n=10, exits=ExitModel(-0.5).build(p.adj_close))
+        self.assertLess(hit["gross"].sum(), base["gross"].sum())
+
+
+class TestPortfolioConventions(unittest.TestCase):
+    def test_adjusted_interval_is_wider_and_benchmark_excess_reported(self):
+        p = make_panel(n_days=900, n_tickers=120, seed=4)
+        sim = simulate_top_n(p, technical_score(p.close, p.volume), eligibility(p, 0, 0), month_end_positions(p.index),
+                             top_n=10, benchmark="T000")
+        one = summarize_portfolio(sim, n_boot=500, n_tests=1)
+        many = summarize_portfolio(sim, n_boot=500, n_tests=8)
+        self.assertLessEqual(many["excess_adj_lo"], one["excess_adj_lo"] + 1e-12)
+        self.assertGreaterEqual(many["excess_adj_hi"], one["excess_adj_hi"] - 1e-12)
+        self.assertIn("excess_bm_mean", one)
+        self.assertAlmostEqual(one["excess_bm_mean"], (sim["net"] - sim["bench_ticker"]).mean())
+        self.assertAlmostEqual(one["universe_minus_bm_mean"], (sim["bench_ew"] - sim["bench_ticker"]).mean())
+
+    def test_block_bootstrap_is_wider_than_iid_for_autocorrelated_series(self):
+        rng = np.random.default_rng(0)
+        e = rng.standard_normal(120)
+        x = np.convolve(e, np.ones(6) / 6, mode="valid")
+        (a, b), = block_bootstrap_ci(x, 1, 2000, (0.05,), 1)
+        (c, d), = block_bootstrap_ci(x, 6, 2000, (0.05,), 1)
+        self.assertGreater(d - c, b - a)
+
+
 class TestReport(unittest.TestCase):
     def test_intervals_are_withheld_when_there_are_too_few_independent_periods(self):
         from backtest_pit.run import build_report
@@ -238,6 +314,41 @@ class TestReport(unittest.TestCase):
                     min_dollar_volume=1e6, top_n=20, exit_rank=20, cost_bps=20)
         text = build_report(meta, summary, {}, 2, min_indep=12)
         self.assertEqual(text.count("[too few periods]"), 2)  # IC cell and top-universe cell of the 63d row only
+
+
+class TestEndToEnd(unittest.TestCase):
+    def test_csv_pipeline_with_benchmark_halves_and_holdings(self):
+        import contextlib
+        import io
+        import os
+        import tempfile
+
+        from backtest_pit.data import save_csv
+        from backtest_pit.run import main
+
+        p = make_panel(n_days=700, n_tickers=80, seed=5)
+        with tempfile.TemporaryDirectory() as d:
+            prices, out = os.path.join(d, "px"), os.path.join(d, "out")
+            os.makedirs(prices)
+            for t in p.close.columns:
+                df = pd.DataFrame({"Close": p.close[t], "Adj Close": p.adj_close[t], "Volume": p.volume[t]})
+                save_csv(df, os.path.join(prices, f"{t}.csv.gz"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = main(["--prices-dir", prices, "--format", "csv", "--horizons", "21", "--benchmark", "T000",
+                           "--min-names", "30", "--n-boot", "200", "--factors", "mom_12_1", "random",
+                           "--out-dir", out])
+            self.assertEqual(rc, 0)
+            with open(os.path.join(out, "report.md")) as fh:
+                report = fh.read()
+            self.assertIn("T000 total", report)
+            self.assertIn("by half of the sample", report)
+            sim = pd.read_csv(os.path.join(out, "portfolio_mom_12_1.csv"), index_col=0)
+            self.assertIn("holdings", sim.columns)
+            self.assertEqual(len(sim.iloc[0]["holdings"].split(";")), int(sim.iloc[0]["n_held"]))
+            self.assertIn("bench_ticker", sim.columns)
+            self.assertIn("## Exit assumptions", report)
+            self.assertIn("Benchmark gap", report)
+            self.assertIn("vs T000", report)
 
 
 if __name__ == "__main__":

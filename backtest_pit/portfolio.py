@@ -25,9 +25,9 @@ def _rank_desc_random_ties(s: pd.Series, rng: np.random.Generator) -> pd.Series:
 
 def simulate_top_n(panel: PricePanel, score: pd.DataFrame, elig: pd.DataFrame, positions: np.ndarray,
                    top_n: int = 20, exit_rank: int | None = None, lag: int = 1, cost_bps: float = 20.0,
-                   seed: int = 0, benchmark: str | None = None) -> pd.DataFrame:
+                   seed: int = 0, benchmark: str | None = None, exits=None) -> pd.DataFrame:
     adj = panel.adj_close
-    adj_exit = adj.ffill()
+    adj_exit = exits.price if exits is not None else adj.ffill()
     exit_rank = exit_rank or top_n
     rng = np.random.default_rng(seed)
     held: list = []
@@ -59,7 +59,8 @@ def simulate_top_n(panel: PricePanel, score: pd.DataFrame, elig: pd.DataFrame, p
         r_u = adj_exit.iloc[e1][univ] / adj.iloc[e0][univ] - 1.0
         bench_ew = float(r_u.mean())  # raw equal-weight universe: the expected return of a random pick
         row = {"signal_date": adj.index[p], "n_held": len(sel), "tied_at_top": float((s == s.max()).sum()),
-               "gross": gross, "turnover": turnover, "cost": cost, "net": gross - cost, "bench_ew": bench_ew}
+               "gross": gross, "turnover": turnover, "cost": cost, "net": gross - cost, "bench_ew": bench_ew,
+               "holdings": ";".join(sorted(map(str, sel)))}
         if benchmark and benchmark in adj.columns and pd.notna(adj.iloc[e0][benchmark]):
             row["bench_ticker"] = float(adj_exit.iloc[e1][benchmark] / adj.iloc[e0][benchmark] - 1.0)
         rows.append(row)
@@ -70,13 +71,23 @@ def simulate_top_n(panel: PricePanel, score: pd.DataFrame, elig: pd.DataFrame, p
     return pd.DataFrame(rows).set_index("signal_date") if rows else pd.DataFrame()
 
 
-def summarize_portfolio(sim: pd.DataFrame, n_boot: int = 5000, seed: int = 0) -> dict:
+def summarize_portfolio(sim: pd.DataFrame, n_boot: int = 5000, seed: int = 0, n_tests: int = 1,
+                        block: int = 3) -> dict:
+    """Portfolio summary.
+
+    Excess-return intervals use a moving-block bootstrap (``block`` months, default 3) because monthly excess
+    returns of a persistent tilt are autocorrelated, plus a Bonferroni-adjusted interval for ``n_tests``
+    portfolios. Excess is reported against the equal-weight universe (the like-for-like random-pick baseline) and,
+    when a benchmark ticker was given, against that ticker too.
+    """
     if sim.empty:
         return {"n_periods": 0}
     net = sim["net"]
     equity = (1 + net).cumprod()
     out = {
         "n_periods": int(len(net)),
+        "start": sim.index[0].date(),
+        "end": sim.index[-1].date(),
         "total_net": float(equity.iloc[-1] - 1),
         "total_universe": float((1 + sim["bench_ew"]).prod() - 1),
         "avg_turnover": float(sim["turnover"].mean()),
@@ -85,10 +96,27 @@ def summarize_portfolio(sim: pd.DataFrame, n_boot: int = 5000, seed: int = 0) ->
         "months_beating_universe": float((net > sim["bench_ew"]).mean()),
         "avg_tied_at_top": float(sim["tied_at_top"].mean()),
     }
+    alphas = (0.05, 0.05 / max(1, n_tests))
+
+    def _excess(prefix: str, ex: pd.Series) -> None:
+        ex = ex.dropna()
+        if len(ex) < 3:
+            out.update({f"{prefix}_mean": float("nan"), f"{prefix}_lo": float("nan"), f"{prefix}_hi": float("nan"),
+                        f"{prefix}_adj_lo": float("nan"), f"{prefix}_adj_hi": float("nan"),
+                        f"{prefix}_n": int(len(ex))})
+            return
+        (lo, hi), (alo, ahi) = block_bootstrap_ci(ex.values, block, n_boot, alphas, seed)
+        out.update({f"{prefix}_mean": float(ex.mean()), f"{prefix}_lo": lo, f"{prefix}_hi": hi,
+                    f"{prefix}_adj_lo": alo, f"{prefix}_adj_hi": ahi, f"{prefix}_n": int(len(ex))})
+
     excess = net - sim["bench_ew"]
-    lo, hi = block_bootstrap_ci(excess.values, 1, n_boot, (0.05,), seed)[0]
-    out.update({"mean_monthly_excess": float(excess.mean()), "excess_lo": lo, "excess_hi": hi,
-                "excess_se": float(excess.std(ddof=1) / np.sqrt(len(excess))) if len(excess) > 1 else float("nan")})
+    _excess("excess", excess)
+    # backwards-compatible names used by earlier reports
+    out["mean_monthly_excess"] = out["excess_mean"]
+    out["excess_se"] = float(excess.std(ddof=1) / np.sqrt(len(excess))) if len(excess) > 1 else float("nan")
     if "bench_ticker" in sim:
         out["total_benchmark_ticker"] = float((1 + sim["bench_ticker"]).prod() - 1)
+        _excess("excess_bm", net - sim["bench_ticker"])
+        gap = (sim["bench_ew"] - sim["bench_ticker"]).dropna()
+        out["universe_minus_bm_mean"] = float(gap.mean()) if len(gap) else float("nan")
     return out
