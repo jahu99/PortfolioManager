@@ -1642,19 +1642,18 @@ def _load_cached_etf_holdings(ticker, max_age_days=45):
             raise ValueError(f"Holdings evidence is stale (observation age {age_days} days; retrieval age {retrieval_age_days:.1f} days).")
 
         holdings = []
-        seen = set()
         total_weight = 0.0
         for row in rows:
             constituent = str(row.get("constituent_ticker", "")).strip().upper()
-            if not constituent or constituent in seen:
-                raise ValueError("Blank or duplicate constituent ticker detected.")
-            seen.add(constituent)
+            if not constituent:
+                raise ValueError("Blank constituent ticker detected.")
             weight = float(row.get("weight", ""))
             if not 0 < weight <= 1:
                 raise ValueError(f"Invalid weight for {constituent}; use decimal fractions between 0 and 1.")
             total_weight += weight
             holdings.append({
                 "ticker": constituent,
+                "name": str(row.get("constituent_name", row.get("name", ""))).strip(),
                 "weight": weight,
                 "sector": str(row.get("sector", "")).strip(),
                 "industry": str(row.get("industry", "")).strip(),
