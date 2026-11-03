@@ -1564,6 +1564,124 @@ def _build_macro_regime_assessment():
 
     return result
 
+# ============================================================
+# SHADOW ETF HOLDINGS LOOK-THROUGH — LOCAL ISSUER CSV CACHE
+# ============================================================
+
+def _load_cached_etf_holdings(ticker, max_age_days=45):
+    """Load and validate one issuer-sourced ETF holdings CSV.
+
+    File: data/cache/etf_holdings/{TICKER}.csv
+    Required columns: constituent_ticker, weight, sector, industry,
+    country, as_of_date, source, retrieved_at.
+    Weight must be a decimal fraction (for example 0.025 = 2.5%).
+    """
+    import csv
+    from datetime import date, datetime, timezone
+
+    ticker = str(ticker or "").strip().upper()
+    path = os.path.join(
+        "data", "cache", "etf_holdings", f"{ticker}.csv"
+    )
+    result = {
+        "ticker": ticker,
+        "status": "NOT_ASSESSED",
+        "source": None,
+        "as_of_date": None,
+        "retrieved_at": None,
+        "constituent_count": 0,
+        "weight_total": None,
+        "holdings": [],
+        "error": None,
+        "file": path,
+    }
+
+    if not ticker or not os.path.isfile(path):
+        result["error"] = "Issuer holdings CSV not found in local cache."
+        return result
+
+    required = {
+        "constituent_ticker", "weight", "sector", "industry",
+        "country", "as_of_date", "source", "retrieved_at",
+    }
+    try:
+        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fields = set(reader.fieldnames or [])
+            missing = sorted(required - fields)
+            if missing:
+                result["error"] = "Missing required columns: " + ", ".join(missing)
+                return result
+            rows = list(reader)
+
+        if not rows:
+            result["error"] = "Issuer holdings CSV contains no constituent rows."
+            return result
+
+        as_of_values = {str(row.get("as_of_date", "")).strip() for row in rows}
+        source_values = {str(row.get("source", "")).strip() for row in rows}
+        retrieved_values = {str(row.get("retrieved_at", "")).strip() for row in rows}
+        if len(as_of_values) != 1 or len(source_values) != 1 or len(retrieved_values) != 1:
+            result["error"] = "Source, observation date and retrieval timestamp must be consistent across rows."
+            return result
+
+        as_of_text = next(iter(as_of_values))
+        source = next(iter(source_values))
+        retrieved_text = next(iter(retrieved_values))
+        as_of = date.fromisoformat(as_of_text)
+        retrieved = datetime.fromisoformat(retrieved_text.replace("Z", "+00:00"))
+        if retrieved.tzinfo is None:
+            retrieved = retrieved.replace(tzinfo=timezone.utc)
+        age_days = (date.today() - as_of).days
+        retrieval_age_days = (datetime.now(timezone.utc) - retrieved.astimezone(timezone.utc)).total_seconds() / 86400
+        if not source:
+            raise ValueError("Source attribution is blank.")
+        if age_days < 0 or retrieval_age_days < 0:
+            raise ValueError("Future-dated holdings or retrieval timestamp.")
+        if age_days > max_age_days or retrieval_age_days > max_age_days:
+            raise ValueError(f"Holdings evidence is stale (observation age {age_days} days; retrieval age {retrieval_age_days:.1f} days).")
+
+        holdings = []
+        seen = set()
+        total_weight = 0.0
+        for row in rows:
+            constituent = str(row.get("constituent_ticker", "")).strip().upper()
+            if not constituent or constituent in seen:
+                raise ValueError("Blank or duplicate constituent ticker detected.")
+            seen.add(constituent)
+            weight = float(row.get("weight", ""))
+            if not 0 < weight <= 1:
+                raise ValueError(f"Invalid weight for {constituent}; use decimal fractions between 0 and 1.")
+            total_weight += weight
+            holdings.append({
+                "ticker": constituent,
+                "weight": weight,
+                "sector": str(row.get("sector", "")).strip(),
+                "industry": str(row.get("industry", "")).strip(),
+                "country": str(row.get("country", "")).strip(),
+            })
+
+        if not 0.95 <= total_weight <= 1.05:
+            raise ValueError(f"Constituent weights total {total_weight:.4f}; expected 0.95–1.05.")
+
+        result.update({
+            "status": "ASSESSED",
+            "source": source,
+            "as_of_date": as_of_text,
+            "retrieved_at": retrieved_text,
+            "constituent_count": len(holdings),
+            "weight_total": round(total_weight, 6),
+            "holdings": holdings,
+            "weight_coverage_percent": round(total_weight * 100, 2),
+            "observation_age_days": age_days,
+        })
+        return result
+    except (OSError, ValueError, TypeError, csv.Error) as exc:
+        result["status"] = "DATA QUALITY ISSUE"
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+
 def _build_market_risk_assessment(
     final_portfolio_decisions,
     portfolio_value,
@@ -4362,6 +4480,113 @@ def _build_market_risk_assessment(
 
             if tx_asset_type:
                 destination["asset_type"] = tx_asset_type
+
+    # --------------------------------------------------------
+    # ETF HOLDINGS LOOK-THROUGH — ISSUER CSV CACHE ONLY
+    # --------------------------------------------------------
+    # The same validated constituent weights are applied to current and
+    # proposed ETF values. Missing or invalid evidence remains unclassified.
+    _etf_lookthrough_cache = {}
+
+    def _apply_etf_lookthrough(position_map, state):
+        sector_totals = {}
+        country_totals = {}
+        industry_totals = {}
+        assessed_value = 0.0
+        unassessed_value = 0.0
+        for _ticker, _position in position_map.items():
+            _value = max(0.0, safe_float(_position.get("value", 0)))
+            if _value <= 0 or str(_position.get("asset_type", "")).strip().upper() != "ETF":
+                continue
+            if _ticker not in _etf_lookthrough_cache:
+                _etf_lookthrough_cache[_ticker] = _load_cached_etf_holdings(_ticker)
+            _evidence = _etf_lookthrough_cache[_ticker]
+            _record = next((item for item in assessment["known_etf_holdings"] if item.get("ticker") == _ticker), None)
+            if _record is None:
+                _record = {"ticker": _ticker, "current_value": 0.0, "sector_lookthrough_status": "NOT_ASSESSED", "country_lookthrough_status": "NOT_ASSESSED"}
+                assessment["known_etf_holdings"].append(_record)
+            if state == "CURRENT":
+                _record["current_value"] = round(_value, 2)
+            _record.update({
+                "holdings_source": _evidence.get("source"),
+                "holdings_as_of_date": _evidence.get("as_of_date"),
+                "holdings_retrieved_at": _evidence.get("retrieved_at"),
+                "constituent_count": _evidence.get("constituent_count", 0),
+                "weight_coverage_percent": _evidence.get("weight_coverage_percent"),
+                "holdings_file": _evidence.get("file"),
+                "evidence_status": _evidence.get("status"),
+                "evidence_error": _evidence.get("error"),
+                "advisory_only": True,
+            })
+            if _evidence.get("status") != "ASSESSED":
+                unassessed_value += _value
+                continue
+            assessed_value += _value
+            for _holding in _evidence["holdings"]:
+                _weighted_value = _value * _holding["weight"]
+                for _dimension, _label, _totals in (
+                    ("SECTOR", _normalise_economic_sector(_holding.get("sector")), sector_totals),
+                    ("COUNTRY", _normalise_text(_holding.get("country")), country_totals),
+                    ("INDUSTRY", _normalise_text(_holding.get("industry")), industry_totals),
+                ):
+                    if str(_label or "").strip().upper() in {"", "N/A", "NA", "UNKNOWN", "NONE", "NULL", "UNCLASSIFIED", "ETF", "ETP"}:
+                        continue
+                    _totals[_label] = _totals.get(_label, 0.0) + _weighted_value
+        return {
+            "assessed_etf_value": assessed_value,
+            "unassessed_etf_value": unassessed_value,
+            "sector": sector_totals,
+            "country": country_totals,
+            "industry": industry_totals,
+        }
+
+    _current_etf_exposure = _apply_etf_lookthrough(current_positions, "CURRENT")
+    _proposed_etf_exposure = _apply_etf_lookthrough(proposed_positions, "PROPOSED")
+
+    for _dimension, _current_totals, _proposed_totals in (
+        ("sector", sector_values, proposed_sector_values),
+        ("country", country_values, proposed_country_values),
+        ("industry", industry_values, proposed_industry_values),
+    ):
+        for _label, _value in _current_etf_exposure[_dimension].items():
+            _current_totals[_label] = _current_totals.get(_label, 0.0) + _value
+        for _label, _value in _proposed_etf_exposure[_dimension].items():
+            _proposed_totals[_label] = _proposed_totals.get(_label, 0.0) + _value
+
+    current_classified_sector_value += sum(_current_etf_exposure["sector"].values())
+    current_classified_country_value += sum(_current_etf_exposure["country"].values())
+    proposed_classified_sector_value += sum(_proposed_etf_exposure["sector"].values())
+    proposed_classified_country_value += sum(_proposed_etf_exposure["country"].values())
+
+    for _state, _exposure, _missing_sector, _missing_country, _missing_industry in (
+        ("CURRENT", _current_etf_exposure, missing_sector_tickers, missing_country_tickers, missing_industry_tickers),
+        ("PROPOSED", _proposed_etf_exposure, proposed_missing_sector_tickers, proposed_missing_country_tickers, proposed_missing_industry_tickers),
+    ):
+        _positions = current_positions if _state == "CURRENT" else proposed_positions
+        for _ticker, _position in _positions.items():
+            if str(_position.get("asset_type", "")).strip().upper() != "ETF":
+                continue
+            _evidence = _etf_lookthrough_cache.get(_ticker, {})
+            if _evidence.get("status") != "ASSESSED":
+                continue
+            for _missing in (_missing_sector, _missing_country, _missing_industry):
+                while _ticker in _missing:
+                    _missing.remove(_ticker)
+
+    assessment["etf_lookthrough_assessment"] = {
+        "status": "ASSESSED" if _current_etf_exposure["unassessed_etf_value"] == 0 and _proposed_etf_exposure["unassessed_etf_value"] == 0 else "PARTIALLY ASSESSED" if _current_etf_exposure["assessed_etf_value"] or _proposed_etf_exposure["assessed_etf_value"] else "NOT ASSESSED",
+        "current": _current_etf_exposure,
+        "proposed": _proposed_etf_exposure,
+        "source_policy": "Issuer-published CSV holdings only; local cache; no inferred constituents.",
+        "max_age_days": 45,
+        "advisory_only": True,
+    }
+    assessment["data_quality"]["etf_lookthrough_assessed"] = bool(
+        _current_etf_exposure["assessed_etf_value"] or _proposed_etf_exposure["assessed_etf_value"]
+    )
+    assessment["data_quality"]["etf_unassessed_portfolio_percent"] = round(
+        100.0 * _current_etf_exposure["unassessed_etf_value"] / current_holdings_value, 2
+    ) if current_holdings_value > 0 else 0.0
 
     # --------------------------------------------------------
     # SHADOW HOLDING MARKET SENSITIVITY AND CO-MOVEMENT
