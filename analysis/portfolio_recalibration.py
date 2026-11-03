@@ -1648,8 +1648,8 @@ def _load_cached_etf_holdings(ticker, max_age_days=45):
             if not constituent:
                 raise ValueError("Blank constituent ticker detected.")
             weight = float(row.get("weight", ""))
-            if not 0 < weight <= 1:
-                raise ValueError(f"Invalid weight for {constituent}; use decimal fractions between 0 and 1.")
+            if not 0 <= weight <= 1:
+                raise ValueError(f"Invalid weight for {constituent}; use decimal fractions between 0 and 1 inclusive.")
             total_weight += weight
             holdings.append({
                 "ticker": constituent,
