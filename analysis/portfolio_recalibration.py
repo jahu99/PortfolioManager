@@ -1481,7 +1481,7 @@ def _build_macro_regime_assessment():
         for item in regime_assessed
         if item["Observation Date"]
     ]
-    result["as_of"] = min(dates) if dates else None
+    result["as_of"] = max(dates) if dates else None
     result["oldest_observation_date"] = min(dates) if dates else None
     result["latest_observation_date"] = max(dates) if dates else None
     result["assessment_timestamp"] = pd.Timestamp.now(
@@ -2630,6 +2630,22 @@ def _build_market_risk_assessment(
             universe["effective to"].replace("", pd.NA),
             errors="coerce",
         ).dt.normalize()
+
+        # A blank end date means an open-ended membership interval.
+        # A non-blank but unparseable date is invalid and must not
+        # silently become an open-ended membership record.
+        effective_to_text = (
+            universe["effective to"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        universe["_effective_to_invalid"] = (
+            effective_to_text.ne("")
+            & universe["_effective_to"].isna()
+        )
+
         universe["_retrieved_at"] = pd.to_datetime(
             universe["retrieved at"],
             errors="coerce",
@@ -2640,6 +2656,7 @@ def _build_market_risk_assessment(
             universe["ticker"].ne("")
             & universe["source"].ne("")
             & universe["_effective_from"].notna()
+            & ~universe["_effective_to_invalid"]
             & universe["_retrieved_at"].notna()
             & (
                 universe["_effective_to"].isna()
@@ -2655,9 +2672,58 @@ def _build_market_risk_assessment(
 
         result["invalid_universe_rows"] = int((~valid_rows).sum())
 
+        # Preserve rejected records so potentially active membership
+        # omissions can be detected after establishing the SPY as-of date.
+        invalid_universe = universe.loc[~valid_rows].copy()
+
         universe = universe.loc[valid_rows].copy()
 
-        if universe.empty:
+        # Reject ambiguous historical membership intervals.
+        # Effective To is inclusive; a blank end date is open-ended.
+        overlap_tickers = []
+
+        for ticker, ticker_rows in universe.groupby("ticker"):
+            ticker_rows = ticker_rows.sort_values(
+                "_effective_from"
+            )
+
+            previous_max_end = None
+
+            for _, membership in ticker_rows.iterrows():
+                current_start = membership["_effective_from"]
+                current_end = membership["_effective_to"]
+
+                if (
+                    previous_max_end is not None
+                    and current_start <= previous_max_end
+                ):
+                    overlap_tickers.append(ticker)
+                    break
+
+                if pd.isna(current_end):
+                    previous_max_end = pd.Timestamp.max
+                elif previous_max_end is None:
+                    previous_max_end = current_end
+                else:
+                    previous_max_end = max(
+                        previous_max_end,
+                        current_end,
+                    )
+
+        if overlap_tickers:
+            overlap_tickers = sorted(set(overlap_tickers))
+
+            result["reason"] = (
+                "Ambiguous historical membership: overlapping "
+                "effective-date intervals found for "
+                + ", ".join(overlap_tickers[:20])
+            )
+            result["overlapping_membership_tickers"] = len(
+                overlap_tickers
+            )
+            return result, *empty
+
+        if universe.empty and invalid_universe.empty:
             result["reason"] = (
                 "No valid constituent records remain after validating "
                 "ticker, source, effective dates and retrieval timestamp."
@@ -2698,6 +2764,53 @@ def _build_market_risk_assessment(
         ).normalize()
 
         result["as_of"] = as_of.strftime("%Y-%m-%d")
+
+        # Fail closed if an invalid membership record could be active
+        # on the assessment date. A missing or malformed boundary is
+        # treated as unknown, not as evidence that the record is inactive.
+        if not invalid_universe.empty:
+            invalid_start = invalid_universe["_effective_from"]
+            invalid_end = invalid_universe["_effective_to"]
+
+            potentially_active = (
+                (invalid_start.isna() | invalid_start.le(as_of))
+                & (invalid_end.isna() | invalid_end.ge(as_of))
+            )
+
+            potentially_active_rows = invalid_universe.loc[
+                potentially_active
+            ]
+
+            result["potentially_active_invalid_rows"] = int(
+                len(potentially_active_rows)
+            )
+
+            if not potentially_active_rows.empty:
+                invalid_tickers = sorted(
+                    ticker
+                    for ticker in potentially_active_rows["ticker"]
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                    .unique()
+                    .tolist()
+                    if ticker
+                )
+
+                result["reason"] = (
+                    "Incomplete constituent universe: "
+                    f"{len(potentially_active_rows)} invalid membership "
+                    "record(s) could be effective on "
+                    f"{as_of:%Y-%m-%d}. Correct the membership data "
+                    "before assessing market breadth."
+                    + (
+                        " Affected tickers: "
+                        + ", ".join(invalid_tickers[:20])
+                        if invalid_tickers
+                        else ""
+                    )
+                )
+                return result, *empty
 
         universe["_retrieved_date"] = (
             universe["_retrieved_at"]
@@ -6443,6 +6556,66 @@ def _build_market_risk_assessment(
     # No resilience ratios or risk thresholds are inferred.
     # --------------------------------------------------------
 
+    def _financial_period_map(statement_rows):
+        period_rows = {}
+        invalid_period_rows = 0
+
+        if not isinstance(statement_rows, list):
+            return {}, invalid_period_rows, []
+
+        for statement_row in statement_rows:
+            if not isinstance(statement_row, dict):
+                invalid_period_rows += 1
+                continue
+
+            period_value = statement_row.get("period_end")
+            period_text = (
+                str(period_value).strip()
+                if period_value is not None
+                else ""
+            )
+            if period_text.upper() in {
+                "", "UNKNOWN", "N/A", "NA", "NONE", "NULL", "NAN"
+            }:
+                period_text = ""
+
+            period_date = pd.to_datetime(
+                period_text,
+                format="%Y-%m-%d",
+                errors="coerce",
+            )
+
+            if pd.isna(period_date):
+                invalid_period_rows += 1
+                continue
+
+            period_end = period_date.strftime("%Y-%m-%d")
+
+            period_rows.setdefault(
+                period_end, []
+            ).append(statement_row)
+
+        duplicate_periods = sorted(
+            period_end
+            for period_end, period_records in period_rows.items()
+            if len(period_records) > 1
+        )
+
+        duplicate_period_set = set(duplicate_periods)
+
+        # Exclude all records for duplicated periods.
+        period_map = {
+            period_end: period_records[0]
+            for period_end, period_records in period_rows.items()
+            if period_end not in duplicate_period_set
+        }
+
+        return (
+            period_map,
+            invalid_period_rows,
+            duplicate_periods,
+        )
+
     statement_mapping = (
         financial_statements_by_ticker
         if isinstance(financial_statements_by_ticker, dict)
@@ -6474,6 +6647,8 @@ def _build_market_risk_assessment(
 
         statement_periods = {}
         statement_row_counts = {}
+        statement_period_validation = {}
+        statement_period_maps = {}
 
         available_statement_count = 0
 
@@ -6496,14 +6671,62 @@ def _build_market_risk_assessment(
                 statement_rows
             )
 
-            statement_periods[statement_label] = sorted({
-                str(row.get("period_end"))
-                for row in statement_rows
-                if (
-                    isinstance(row, dict)
-                    and row.get("period_end")
-                )
-            }, reverse=True)
+            (
+                period_map,
+                invalid_period_rows,
+                duplicate_periods,
+            ) = _financial_period_map(statement_rows)
+
+            statement_period_maps[statement_key] = period_map
+
+            statement_periods[statement_label] = sorted(
+                period_map.keys(),
+                reverse=True,
+            )
+
+            statement_period_validation[statement_label] = {
+                "Invalid Period Rows": invalid_period_rows,
+                "Duplicate Period Count": len(duplicate_periods),
+                "Duplicate Periods": duplicate_periods,
+                "Usable Period Count": len(period_map),
+            }
+
+        statement_period_sets = [
+            set(statement_period_maps[key])
+            for key in statement_definitions
+        ]
+
+        common_periods = (
+            set.intersection(*statement_period_sets)
+            if len(statement_period_sets) == 3
+            else set()
+        )
+
+        all_periods_aligned = (
+            len(statement_period_sets) == 3
+            and all(statement_period_sets)
+            and all(
+                period_set == statement_period_sets[0]
+                for period_set in statement_period_sets[1:]
+            )
+        )
+
+        has_period_quality_issues = any(
+            item["Invalid Period Rows"] > 0
+            or item["Duplicate Period Count"] > 0
+            for item in statement_period_validation.values()
+        )
+
+        if all_periods_aligned and not has_period_quality_issues:
+            period_alignment_status = "ALIGNED"
+        elif common_periods:
+            period_alignment_status = (
+                "PARTIAL — PERIOD COVERAGE OR DATA QUALITY ISSUES"
+            )
+        else:
+            period_alignment_status = (
+                "UNAVAILABLE — NO COMMON VALID PERIOD"
+            )
 
         evidence_status = (
             "AVAILABLE"
@@ -6523,6 +6746,17 @@ def _build_market_risk_assessment(
             "Retrieved At": statement_record.get("Retrieved At"),
             "Statement Periods": statement_periods,
             "Statement Row Counts": statement_row_counts,
+            "Statement Period Validation": statement_period_validation,
+            "Common Valid Periods": sorted(
+                common_periods,
+                reverse=True,
+            ),
+            "Common Valid Period Count": len(common_periods),
+            "Period Alignment Status": period_alignment_status,
+            "Ingestion Period Validation": statement_record.get(
+                "Statement Period Validation",
+                {},
+            ),
             "Available Statement Types": available_statement_count,
             "Errors": statement_record.get("Errors", []),
             "Assessment Scope": (
@@ -6620,25 +6854,6 @@ def _build_market_risk_assessment(
                 return number
 
         return None
-
-    def _financial_period_map(statement_rows):
-        period_map = {}
-
-        if not isinstance(statement_rows, list):
-            return period_map
-
-        for statement_row in statement_rows:
-            if not isinstance(statement_row, dict):
-                continue
-
-            period_end = _financial_text(
-                statement_row.get("period_end")
-            )
-
-            if period_end:
-                period_map[period_end] = statement_row
-
-        return period_map
 
     def _financial_business_classification(ticker, statement_record):
         _metadata = metadata_by_ticker.get(ticker, {})
@@ -6781,13 +6996,25 @@ def _build_market_risk_assessment(
         if not isinstance(_annual, dict):
             continue
 
-        _balance_rows = _financial_period_map(
+        (
+            _balance_rows,
+            _balance_sheet_invalid_period_rows,
+            _balance_sheet_duplicate_periods,
+        ) = _financial_period_map(
             _annual.get("balance_sheet", [])
         )
-        _income_rows = _financial_period_map(
+        (
+            _income_rows,
+            _income_statement_invalid_period_rows,
+            _income_statement_duplicate_periods,
+        ) = _financial_period_map(
             _annual.get("income_statement", [])
         )
-        _cash_flow_rows = _financial_period_map(
+        (
+            _cash_flow_rows,
+            _cash_flow_invalid_period_rows,
+            _cash_flow_duplicate_periods,
+        ) = _financial_period_map(
             _annual.get("cash_flow", [])
         )
 
@@ -6993,6 +7220,45 @@ def _build_market_risk_assessment(
                     _gross_interest_coverage
                 ),
                 "Interest Coverage Status": _interest_status,
+                "Balance Sheet Invalid Period Rows": (
+                    _balance_sheet_invalid_period_rows
+                ),
+                "Balance Sheet Duplicate Period Count": len(
+                    _balance_sheet_duplicate_periods
+                ),
+                "Balance Sheet Duplicate Periods": (
+                    _balance_sheet_duplicate_periods
+                ),
+                "Income Statement Invalid Period Rows": (
+                    _income_statement_invalid_period_rows
+                ),
+                "Income Statement Duplicate Period Count": len(
+                    _income_statement_duplicate_periods
+                ),
+                "Income Statement Duplicate Periods": (
+                    _income_statement_duplicate_periods
+                ),
+                "Cash Flow Invalid Period Rows": (
+                    _cash_flow_invalid_period_rows
+                ),
+                "Cash Flow Duplicate Period Count": len(
+                    _cash_flow_duplicate_periods
+                ),
+                "Cash Flow Duplicate Periods": (
+                    _cash_flow_duplicate_periods
+                ),
+                "Statement Period Data Quality Status": (
+                    "ISSUES DETECTED"
+                    if (
+                        _balance_sheet_invalid_period_rows
+                        or _balance_sheet_duplicate_periods
+                        or _income_statement_invalid_period_rows
+                        or _income_statement_duplicate_periods
+                        or _cash_flow_invalid_period_rows
+                        or _cash_flow_duplicate_periods
+                    )
+                    else "CLEAN"
+                ),
                 "Financial Metric Status": _overall_metric_status,
                 "Advisory Only": True,
             })

@@ -191,23 +191,75 @@ FINANCIAL_STATEMENTS_CACHE_DIR = (
     "data/cache/financial_statements"
 )
 
-FINANCIAL_STATEMENTS_CACHE_VERSION = 1
+FINANCIAL_STATEMENTS_CACHE_VERSION = 2
 FINANCIAL_STATEMENTS_CACHE_MAX_AGE_DAYS = 7
+
+
+def _normalise_statement_period(period):
+
+    try:
+        if hasattr(period, "to_pydatetime"):
+            period = period.to_pydatetime()
+
+        if isinstance(period, datetime):
+            return period.date().isoformat()
+
+        period_text = str(period).strip()
+        parsed_period = datetime.strptime(
+            period_text,
+            "%Y-%m-%d",
+        )
+
+        return parsed_period.strftime("%Y-%m-%d")
+
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        return None
 
 
 def _statement_frame_to_records(statement):
 
     if statement is None or getattr(statement, "empty", True):
-        return []
+        return [], {
+            "Invalid Period Count": 0,
+            "Duplicate Period Count": 0,
+            "Duplicate Periods": [],
+            "Usable Record Count": 0,
+            "Excluded Period Rows": 0,
+        }
 
-    records = []
+    period_entries = []
+    invalid_period_count = 0
 
     for period in statement.columns:
+        period_end = _normalise_statement_period(period)
 
-        try:
-            period_end = period.strftime("%Y-%m-%d")
-        except (AttributeError, ValueError):
-            period_end = str(period)[:10]
+        if period_end is None:
+            invalid_period_count += 1
+            continue
+
+        period_entries.append((period, period_end))
+
+    period_counts = {}
+    for _, period_end in period_entries:
+        period_counts[period_end] = (
+            period_counts.get(period_end, 0) + 1
+        )
+
+    duplicate_periods = sorted(
+        period_end
+        for period_end, count in period_counts.items()
+        if count > 1
+    )
+
+    duplicate_period_set = set(duplicate_periods)
+    records = []
+
+    for period, period_end in period_entries:
+
+        # Exclude every row for a duplicated period.
+        # Never silently select one of the competing records.
+        if period_end in duplicate_period_set:
+            continue
 
         record = {
             "period_end": period_end
@@ -231,7 +283,18 @@ def _statement_frame_to_records(statement):
         if len(record) > 1:
             records.append(record)
 
-    return records
+    quality = {
+        "Invalid Period Count": invalid_period_count,
+        "Duplicate Period Count": len(duplicate_periods),
+        "Duplicate Periods": duplicate_periods,
+        "Usable Record Count": len(records),
+        "Excluded Period Rows": (
+            invalid_period_count
+            + sum(period_counts[p] for p in duplicate_periods)
+        ),
+    }
+
+    return records, quality
 
 
 def get_financial_statements(ticker):
@@ -314,6 +377,7 @@ def get_financial_statements(ticker):
     }
 
     annual = {}
+    statement_period_validation = {}
     errors = []
 
     for output_key, yfinance_attribute in statement_sources.items():
@@ -324,13 +388,21 @@ def get_financial_statements(ticker):
                 yfinance_attribute
             )
 
-            annual[output_key] = (
-                _statement_frame_to_records(statement)
-            )
+            (
+                annual[output_key],
+                statement_period_validation[output_key],
+            ) = _statement_frame_to_records(statement)
 
         except Exception as exc:
 
             annual[output_key] = []
+            statement_period_validation[output_key] = {
+                "Invalid Period Count": 0,
+                "Duplicate Period Count": 0,
+                "Duplicate Periods": [],
+                "Usable Record Count": 0,
+                "Excluded Period Rows": 0,
+            }
 
             errors.append(
                 f"{output_key}: {type(exc).__name__}: {exc}"
@@ -367,6 +439,9 @@ def get_financial_statements(ticker):
 
         "Annual":
             annual,
+
+        "Statement Period Validation":
+            statement_period_validation,
 
         "Errors":
             errors,
