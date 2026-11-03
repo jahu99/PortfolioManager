@@ -4597,8 +4597,9 @@ def _build_market_risk_assessment(
                     while _ticker in _missing:
                         _missing.remove(_ticker)
 
+    _has_etf_positions = bool(assessment["known_etf_holdings"])
     assessment["etf_lookthrough_assessment"] = {
-        "status": "ASSESSED" if _current_etf_exposure["unassessed_etf_value"] == 0 and _proposed_etf_exposure["unassessed_etf_value"] == 0 else "PARTIALLY ASSESSED" if _current_etf_exposure["assessed_etf_value"] or _proposed_etf_exposure["assessed_etf_value"] else "NOT ASSESSED",
+        "status": "NOT APPLICABLE" if not _has_etf_positions else "ASSESSED" if _current_etf_exposure["unassessed_etf_value"] == 0 and _proposed_etf_exposure["unassessed_etf_value"] == 0 else "PARTIALLY ASSESSED" if _current_etf_exposure["assessed_etf_value"] or _proposed_etf_exposure["assessed_etf_value"] else "NOT ASSESSED",
         "current": _current_etf_exposure,
         "proposed": _proposed_etf_exposure,
         "source_policy": "Issuer-published CSV holdings only; local cache; no inferred constituents.",
