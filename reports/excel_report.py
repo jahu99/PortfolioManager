@@ -6399,15 +6399,117 @@ def create_report(
         )
 
         write_risk_section(
-            "MARKET BREADTH AND RELATIVE STRENGTH",
+            "BROAD-MARKET STRESS INDICATORS",
+            market_risk_assessment.get("market_stress_indicators", []),
+            "No benchmark stress indicators supplied — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "CONSTITUENT-LEVEL MARKET BREADTH",
             market_risk_assessment.get("market_breadth_indicators", []),
-            "RSP/SPY relative strength unavailable — NOT ASSESSED",
+            "No constituent-level market breadth data supplied — NOT ASSESSED",
         )
 
         write_risk_section(
             "SECTOR BREADTH AND EQUAL-WEIGHTED ROTATION",
             market_risk_assessment.get("market_sector_breadth", []),
             "No constituent-level sector breadth or rotation data available — NOT ASSESSED",
+        )
+
+        leadership_rows = market_risk_assessment.get(
+            "market_leadership_indicators", []
+        )
+        if not isinstance(leadership_rows, list):
+            leadership_rows = []
+
+        write_risk_section(
+            "MARKET LEADERSHIP AND RELATIVE STRENGTH",
+            leadership_rows,
+            "No market-leadership or relative-strength records supplied — NOT ASSESSED",
+        )
+
+        macro_assessment = market_risk_assessment.get(
+            "macro_risk_assessment", {}
+        )
+        if not isinstance(macro_assessment, dict):
+            macro_assessment = {}
+
+        macro_overview = [{
+            "Assessment Status": macro_assessment.get("status", "UNASSESSED"),
+            "Summary": macro_assessment.get("summary"),
+            "Oldest Observation Date": macro_assessment.get(
+                "oldest_observation_date"
+            ),
+            "Latest Observation Date": macro_assessment.get(
+                "latest_observation_date"
+            ),
+            "Regime-Assessed Indicator Count": macro_assessment.get(
+                "regime_assessed_indicator_count"
+            ),
+            "Assessment Completeness": macro_assessment.get(
+                "assessment_completeness"
+            ),
+            "Coverage Percent": macro_assessment.get("coverage_percent"),
+            "Historical Pre-Trade Status": macro_assessment.get(
+                "historical_pre_trade_status", "NOT_ASSESSED"
+            ),
+            "Historical Pre-Trade Limitation": macro_assessment.get(
+                "historical_pre_trade_reason"
+            ),
+            "Advisory Only": True,
+        }]
+
+        write_risk_section(
+            "MACRO REGIME — STATUS AND OBSERVATION COVERAGE",
+            macro_overview,
+            "Macro regime assessment unavailable — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "MACRO REGIME — INDICATOR EVIDENCE",
+            macro_assessment.get("indicators", []),
+            "No macro proxy indicator evidence supplied — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "MACRO STRESS SCENARIO — EXPOSURE ASSESSMENT",
+            market_risk_assessment.get("macro_stress_scenarios", []),
+            "No macro stress scenario assessments supplied — NOT ASSESSED",
+        )
+
+        shadow_sensitivity = market_risk_assessment.get(
+            "shadow_allocation_sensitivity", {}
+        )
+        if not isinstance(shadow_sensitivity, dict):
+            shadow_sensitivity = {}
+
+        shadow_sensitivity_overview = [{
+            "Mode": shadow_sensitivity.get("mode", "NOT ASSESSED"),
+            "Macro Themes With Evidence": ", ".join(
+                shadow_sensitivity.get("macro_theme_evidence_available", [])
+            ),
+            "Unassessed Themes": ", ".join(
+                shadow_sensitivity.get("unassessed_themes", [])
+            ),
+            "Production Allocation Changed": shadow_sensitivity.get(
+                "production_allocation_changed", False
+            ),
+            "Limitations": "; ".join(
+                shadow_sensitivity.get("limitations", [])
+            ),
+            "Advisory Only": shadow_sensitivity.get("advisory_only", True),
+        }]
+
+        write_risk_section(
+            "SHADOW MACRO-ALLOCATION SENSITIVITY — GOVERNANCE",
+            shadow_sensitivity_overview,
+            "Shadow macro-allocation sensitivity unavailable — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "SHADOW MACRO-ALLOCATION SENSITIVITY — DESTINATIONS",
+            shadow_sensitivity.get("destinations", []),
+            "No destination-level macro sensitivity records supplied — NOT ASSESSED",
         )
 
         # -----------------------------------------------------
@@ -6448,15 +6550,8 @@ def create_report(
             "Stage 2 market-leadership data-quality counts unavailable — NOT ASSESSED",
         )
 
-        breadth_rows = market_risk_assessment.get(
-            "market_breadth_indicators", []
-        )
-
-        if not isinstance(breadth_rows, list):
-            breadth_rows = []
-
         mag7_coverage_rows = [
-            row for row in breadth_rows
+            row for row in leadership_rows
             if isinstance(row, dict)
             and "Constituent Coverage" in row
         ]
