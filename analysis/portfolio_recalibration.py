@@ -4481,6 +4481,63 @@ def _build_market_risk_assessment(
             if tx_asset_type:
                 destination["asset_type"] = tx_asset_type
 
+    proposed_sector_values = {}
+    proposed_country_values = {}
+    proposed_industry_values = {}
+    proposed_missing_industry_tickers = []
+    proposed_holdings_value = 0.0
+    proposed_classified_sector_value = 0.0
+    proposed_classified_country_value = 0.0
+    proposed_missing_sector_tickers = []
+    proposed_missing_country_tickers = []
+
+    for ticker, position in proposed_positions.items():
+        value = safe_float(position.get("value", 0))
+        if value <= 0:
+            continue
+        proposed_holdings_value += value
+        sector = _normalise_economic_sector(position.get("sector"))
+        country = _normalise_text(position.get("country"))
+        industry = _normalise_text(position.get("industry"))
+        if industry.upper() in {"", "N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"}:
+            industry = ""
+
+        if position.get("asset_type") == "ETF":
+            proposed_missing_industry_tickers.append(ticker)
+        elif industry:
+            proposed_industry_values[industry] = (
+                proposed_industry_values.get(industry, 0.0) + value
+            )
+        else:
+            proposed_missing_industry_tickers.append(ticker)
+
+        known_etf_tickers = {
+            str(item.get("ticker", "")).strip().upper()
+            for item in assessment.get("known_etf_holdings", [])
+        }
+
+        is_known_etf = str(ticker).strip().upper() in known_etf_tickers
+
+        if (
+            sector
+            and str(position.get("asset_type", "")).strip().upper() != "ETF"
+            and not is_known_etf
+        ):
+            proposed_sector_values[sector] = (
+                proposed_sector_values.get(sector, 0.0) + value
+            )
+            proposed_classified_sector_value += value
+        else:
+            proposed_missing_sector_tickers.append(ticker)
+        if country and position.get("asset_type", "").strip().upper() != "ETF" and not is_known_etf:
+            proposed_country_values[country] = proposed_country_values.get(country, 0.0) + value
+            proposed_classified_country_value += value
+        else:
+            # Keep known ETFs unclassified for country exposure until
+            # underlying geographic look-through is available.
+            proposed_missing_country_tickers.append(ticker)
+
+
     # --------------------------------------------------------
     # ETF HOLDINGS LOOK-THROUGH — ISSUER CSV CACHE ONLY
     # --------------------------------------------------------
@@ -5020,62 +5077,6 @@ def _build_market_risk_assessment(
     assessment["limitations"].append(
         "ETF correlations do not replace underlying ETF holdings look-through."
     )
-
-    proposed_sector_values = {}
-    proposed_country_values = {}
-    proposed_industry_values = {}
-    proposed_missing_industry_tickers = []
-    proposed_holdings_value = 0.0
-    proposed_classified_sector_value = 0.0
-    proposed_classified_country_value = 0.0
-    proposed_missing_sector_tickers = []
-    proposed_missing_country_tickers = []
-
-    for ticker, position in proposed_positions.items():
-        value = safe_float(position.get("value", 0))
-        if value <= 0:
-            continue
-        proposed_holdings_value += value
-        sector = _normalise_economic_sector(position.get("sector"))
-        country = _normalise_text(position.get("country"))
-        industry = _normalise_text(position.get("industry"))
-        if industry.upper() in {"", "N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"}:
-            industry = ""
-
-        if position.get("asset_type") == "ETF":
-            proposed_missing_industry_tickers.append(ticker)
-        elif industry:
-            proposed_industry_values[industry] = (
-                proposed_industry_values.get(industry, 0.0) + value
-            )
-        else:
-            proposed_missing_industry_tickers.append(ticker)
-
-        known_etf_tickers = {
-            str(item.get("ticker", "")).strip().upper()
-            for item in assessment.get("known_etf_holdings", [])
-        }
-
-        is_known_etf = str(ticker).strip().upper() in known_etf_tickers
-
-        if (
-            sector
-            and str(position.get("asset_type", "")).strip().upper() != "ETF"
-            and not is_known_etf
-        ):
-            proposed_sector_values[sector] = (
-                proposed_sector_values.get(sector, 0.0) + value
-            )
-            proposed_classified_sector_value += value
-        else:
-            proposed_missing_sector_tickers.append(ticker)
-        if country and position.get("asset_type", "").strip().upper() != "ETF" and not is_known_etf:
-            proposed_country_values[country] = proposed_country_values.get(country, 0.0) + value
-            proposed_classified_country_value += value
-        else:
-            # Keep known ETFs unclassified for country exposure until
-            # underlying geographic look-through is available.
-            proposed_missing_country_tickers.append(ticker)
 
     # Retain total portfolio values for cash reconciliation. Concentration
     # percentages use the separate owned-security-holdings denominators below.
