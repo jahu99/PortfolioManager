@@ -876,76 +876,242 @@ def build_reallocation_audit(
             ).sum()
         )
 
+    # ============================================================
+    # INDEPENDENT ACCOUNTING RECONCILIATION
+    # ============================================================
+
+    # Recalculate totals directly from the transaction ledger.
+    ledger_released = 0.0
+    ledger_reallocated = 0.0
+    missing_source_references = []
+    missing_destination_references = []
+    unrecognised_sources = set()
+    unrecognised_destinations = set()
+    invalid_amount_rows = []
+    mismatched_transaction_rows = []
+
+    known_sources = set(funding_lookup)
+    known_destinations = {
+        _clean_ticker(item.get("Ticker", ""))
+        for item in destinations
+        if _clean_ticker(item.get("Ticker", ""))
+    }
+
+    if not reallocation_df.empty:
+        for row_number, (_, transaction) in enumerate(
+            reallocation_df.iterrows(), start=1
+        ):
+            released = _safe_float(
+                transaction.get("Released Capital", 0)
+            )
+            reallocated = _safe_float(
+                transaction.get("Reallocated Capital", 0)
+            )
+
+            source_ticker = _clean_ticker(
+                transaction.get("Source Ticker", "")
+            )
+            destination_ticker = _clean_ticker(
+                transaction.get("Destination Ticker", "")
+            )
+
+            ledger_released += released
+            ledger_reallocated += reallocated
+
+            if released < -0.01 or reallocated < -0.01:
+                invalid_amount_rows.append(row_number)
+
+            if released > 0 and not source_ticker:
+                missing_source_references.append(row_number)
+
+            if reallocated > 0 and not destination_ticker:
+                missing_destination_references.append(row_number)
+
+            if released > 0 and source_ticker:
+                if source_ticker not in known_sources:
+                    unrecognised_sources.add(source_ticker)
+
+            if reallocated > 0 and destination_ticker:
+                if destination_ticker not in known_destinations:
+                    unrecognised_destinations.add(destination_ticker)
+
+            if abs(released - reallocated) > 0.01:
+                mismatched_transaction_rows.append(row_number)
+
+    ledger_released = round(ledger_released, 2)
+    ledger_reallocated = round(ledger_reallocated, 2)
+
+    # Independently aggregate the source and destination audit records.
+    source_audit_released = round(
+        sum(
+            _safe_float(row.get("Released Capital", 0))
+            for row in funding_rows
+        ),
+        2,
+    )
+
+    destination_audit_received = round(
+        sum(
+            _safe_float(row.get("Allocated Capital", 0))
+            for row in destination_rows
+        ),
+        2,
+    )
+
+    source_aggregation_variance = round(
+        ledger_released - source_audit_released, 2
+    )
+
+    destination_aggregation_variance = round(
+        ledger_reallocated - destination_audit_received, 2
+    )
+
+    ledger_balance_variance = round(
+        ledger_released - ledger_reallocated, 2
+    )
+
+    # Recalculate authorised capacity and excess releases from
+    # the independently constructed funding audit.
+    audited_funding_capacity = round(
+        sum(
+            _safe_float(row.get("Permitted Release Capital", 0))
+            for row in funding_rows
+        ),
+        2,
+    )
+
+    audited_unused_funding = round(
+        sum(
+            _safe_float(
+                row.get("Unused Permitted Release Capital", 0)
+            )
+            for row in funding_rows
+        ),
+        2,
+    )
+
+    audited_excess_release = round(
+        sum(
+            _safe_float(row.get("Excess Release", 0))
+            for row in funding_rows
+        ),
+        2,
+    )
+
+    audited_restricted_unused = round(
+        sum(
+            _safe_float(
+                row.get("Unused Permitted Release Capital", 0)
+            )
+            for row in funding_rows
+            if (
+                _normalise_action(row.get("Source Action", "")) == "HOLD"
+                and _clean_ticker(row.get("Authorised Destination", ""))
+            )
+        ),
+        2,
+    )
+
+    # Compare planned deployment with actual destination receipts.
+    audited_planned_allocation = round(
+        sum(
+            _safe_float(row.get("Planned Allocation", 0))
+            for row in destination_rows
+            if _safe_float(row.get("Planned Allocation", 0)) >= min_trade_value
+        ),
+        2,
+    )
+
+    audited_destination_variance = round(
+        audited_planned_allocation - destination_audit_received,
+        2,
+    )
+
+    independent_reconciliation_variance = ledger_balance_variance
+
+    if independent_reconciliation_variance < -0.01:
+        independent_reconciliation_status = "OVERALLOCATED"
+    elif independent_reconciliation_variance > 0.01:
+        independent_reconciliation_status = "UNDERALLOCATED"
+    else:
+        independent_reconciliation_status = "PASS"
+
+    audit_failures = any([
+        invalid_amount_rows,
+        missing_source_references,
+        missing_destination_references,
+        unrecognised_sources,
+        unrecognised_destinations,
+        audited_excess_release > 0.01,
+        independent_reconciliation_status == "OVERALLOCATED",
+    ])
+
+    audit_reviews = any([
+        mismatched_transaction_rows,
+        abs(source_aggregation_variance) > 0.01,
+        abs(destination_aggregation_variance) > 0.01,
+        abs(audited_destination_variance) > 0.01,
+        independent_reconciliation_status == "UNDERALLOCATED",
+        duplicate_destination_tickers,
+        duplicate_eligible_tickers,
+        duplicate_deployment_tickers,
+        duplicate_funding_tickers,
+        duplicate_destination_allocation_keys,
+    ])
+
+    if audit_failures:
+        independent_audit_status = "FAIL"
+    elif audit_reviews:
+        independent_audit_status = "REVIEW"
+    else:
+        independent_audit_status = "PASS"
+
+    # Retain the engine's own figures only as comparison diagnostics.
+    engine_released = round(
+        _safe_float(summary.get("Total Released", 0)), 2
+    )
+    engine_reallocated = round(
+        _safe_float(summary.get("Total Reallocated", 0)), 2
+    )
+
+    engine_released_variance = round(
+        ledger_released - engine_released, 2
+    )
+    engine_reallocated_variance = round(
+        ledger_reallocated - engine_reallocated, 2
+    )
+
     audit_summary = {
-        "Total Released": round(
-            _safe_float(
-                summary.get(
-                    "Total Released",
-                    0
-                )
-            ),
-            2
-        ),
-        "Total Reallocated": round(
-            _safe_float(
-                summary.get(
-                    "Total Reallocated",
-                    0
-                )
-            ),
-            2
-        ),
-        "Total Authorised Funding Capacity": round(
-            _safe_float(
-                summary.get(
-                    "Total Authorised Funding Capacity",
-                    summary.get("Total Released", 0)
-                )
-            ),
-            2
-        ),
-        "Unused Authorised Funding Capacity": round(
-            _safe_float(
-                summary.get(
-                    "Unused Authorised Funding Capacity",
-                    0
-                )
-            ),
-            2
-        ),
-        "Unused Destination-Restricted Funding": round(
-            _safe_float(
-                summary.get(
-                    "Unused Destination-Restricted Funding",
-                    0
-                )
-            ),
-            2
-        ),
+        "Total Released": ledger_released,
+        "Total Reallocated": ledger_reallocated,
+        "Total Authorised Funding Capacity": audited_funding_capacity,
+        "Unused Authorised Funding Capacity": audited_unused_funding,
+        "Unused Destination-Restricted Funding": audited_restricted_unused,
         "Unallocated Capital": round(
-            _safe_float(
-                summary.get(
-                    "Unallocated Capital",
-                    0
-                )
-            ),
-            2
+            max(0.0, ledger_balance_variance), 2
         ),
-        "Reconciliation Variance": round(
-            _safe_float(
-                summary.get(
-                    "Reconciliation Variance",
-                    0
-                )
-            ),
-            2
+        "Reconciliation Variance": ledger_balance_variance,
+        "Reconciliation Status": independent_reconciliation_status,
+        "Independent Audit Status": independent_audit_status,
+        "Source Audit Released": source_audit_released,
+        "Destination Audit Received": destination_audit_received,
+        "Source Aggregation Variance": source_aggregation_variance,
+        "Destination Aggregation Variance": destination_aggregation_variance,
+        "Destination Planned Allocation": audited_planned_allocation,
+        "Destination Planned Variance": audited_destination_variance,
+        "Excess Release Against Permitted Capacity": audited_excess_release,
+        "Transaction Amount Mismatch Count": len(mismatched_transaction_rows),
+        "Missing Source Reference Count": len(missing_source_references),
+        "Missing Destination Reference Count": len(missing_destination_references),
+        "Unrecognised Sources": "; ".join(sorted(unrecognised_sources)),
+        "Unrecognised Destinations": "; ".join(sorted(unrecognised_destinations)),
+        "Invalid Transaction Amount Rows": "; ".join(
+            str(value) for value in invalid_amount_rows
         ),
-        "Reconciliation Status": str(
-            summary.get(
-                "Reconciliation Status",
-                "UNAVAILABLE"
-            ) or "UNAVAILABLE"
-        ),
+        "Engine Total Released": engine_released,
+        "Engine Total Reallocated": engine_reallocated,
+        "Engine Released Comparison Variance": engine_released_variance,
+        "Engine Reallocated Comparison Variance": engine_reallocated_variance,
         "Exposure Denominator": round(
             _safe_float(
                 summary.get(

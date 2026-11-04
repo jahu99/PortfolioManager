@@ -51,6 +51,7 @@ Core principles
 """
 
 import os
+import math
 
 import pandas as pd
 
@@ -108,6 +109,2267 @@ ASSESSMENT_CASH_CONTRIBUTION = 15.0
 # challenged as a source of capital for a materially stronger
 # governed destination.
 MIN_REALLOCATION_SCORE_ADVANTAGE = 10.0
+
+# ============================================================
+# RISK EVIDENCE CONTRACT — STAGE 1
+# ============================================================
+
+RISK_EVIDENCE_STATUSES = {
+    "ASSESSED",
+    "PARTIALLY_ASSESSED",
+    "UNASSESSED",
+    "STALE",
+    "INVALID",
+}
+
+RISK_EVIDENCE_DIMENSIONS = {
+    "COMPANY",
+    "SECTOR",
+    "INDUSTRY",
+    "MACRO",
+    "MARKET",
+    "PORTFOLIO",
+}
+
+
+def normalise_risk_evidence(
+    dimension,
+    evidence=None,
+    max_age_days=None,
+):
+    """
+    Normalise risk evidence into a consistent advisory-only contract.
+
+    This function validates evidence only. It does not calculate
+    risk scores, rank candidates, or change allocation decisions.
+
+    Missing provenance or incomplete coverage is never treated
+    as evidence of low risk.
+    """
+
+    dimension = str(dimension or "").strip().upper()
+
+    result = {
+        "dimension": dimension,
+        "status": "UNASSESSED",
+        "value": None,
+        "source": None,
+        "as_of_date": None,
+        "retrieved_at": None,
+        "coverage_percent": None,
+        "missing_reason": "No usable evidence supplied",
+        "advisory_only": True,
+    }
+
+    if dimension not in RISK_EVIDENCE_DIMENSIONS:
+        result.update({
+            "status": "INVALID",
+            "missing_reason": "Unrecognised risk dimension",
+        })
+        return result
+
+    if max_age_days is not None:
+        try:
+            max_age_days = float(max_age_days)
+        except (TypeError, ValueError):
+            max_age_days = None
+            result.update({
+                "status": "INVALID",
+                "missing_reason": "Invalid maximum evidence age",
+            })
+            return result
+
+        if not math.isfinite(max_age_days) or max_age_days < 0:
+            result.update({
+                "status": "INVALID",
+                "missing_reason": "Maximum evidence age must be finite and non-negative",
+            })
+            return result
+
+    if not isinstance(evidence, dict):
+        return result
+
+    value = evidence.get("value")
+    source = evidence.get("source")
+    as_of_date = evidence.get("as_of_date")
+    retrieved_at = evidence.get("retrieved_at")
+    coverage = evidence.get("coverage_percent")
+
+    result.update({
+        "source": source,
+        "as_of_date": as_of_date,
+        "retrieved_at": retrieved_at,
+    })
+
+    supplied_status = str(
+        evidence.get("status", "")
+    ).strip().upper()
+
+    if supplied_status == "INVALID":
+        result.update({
+            "status": "INVALID",
+            "missing_reason": evidence.get(
+                "missing_reason",
+                "Evidence supplied as invalid",
+            ),
+        })
+        return result
+
+    if value is None:
+        result["missing_reason"] = evidence.get(
+            "missing_reason",
+            "No usable risk measurement",
+        )
+        return result
+
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        result.update({
+            "status": "INVALID",
+            "missing_reason": "Risk measurement is not numeric",
+        })
+        return result
+
+    if not math.isfinite(numeric_value):
+        result.update({
+            "status": "INVALID",
+            "missing_reason": "Risk measurement is not finite",
+        })
+        return result
+
+    numeric_coverage = None
+
+    if coverage is not None:
+        try:
+            numeric_coverage = float(coverage)
+        except (TypeError, ValueError, OverflowError):
+            result.update({
+                "status": "INVALID",
+                "missing_reason": "Coverage is not numeric",
+            })
+            return result
+
+        if (
+            not math.isfinite(numeric_coverage)
+            or not 0.0 <= numeric_coverage <= 100.0
+        ):
+            result.update({
+                "status": "INVALID",
+                "missing_reason": "Coverage outside valid 0-100 range",
+            })
+            return result
+
+    result.update({
+        "value": numeric_value,
+        "coverage_percent": numeric_coverage,
+    })
+
+    if not source or not as_of_date:
+        result.update({
+            "status": "PARTIALLY_ASSESSED",
+            "missing_reason": (
+                "Measurement exists but source or observation date "
+                "is missing"
+            ),
+        })
+        return result
+
+    try:
+        observation_date = pd.Timestamp(as_of_date)
+
+        if pd.isna(observation_date):
+            raise ValueError("Missing observation date")
+
+        if observation_date.tzinfo is None:
+            observation_date = observation_date.tz_localize("UTC")
+        else:
+            observation_date = observation_date.tz_convert("UTC")
+
+    except (TypeError, ValueError, OverflowError):
+        result.update({
+            "status": "INVALID",
+            "missing_reason": "Invalid observation date",
+        })
+        return result
+
+    if retrieved_at:
+        try:
+            retrieval_date = pd.Timestamp(retrieved_at)
+
+            if pd.isna(retrieval_date):
+                raise ValueError("Invalid retrieval timestamp")
+
+            if retrieval_date.tzinfo is None:
+                retrieval_date = retrieval_date.tz_localize("UTC")
+            else:
+                retrieval_date = retrieval_date.tz_convert("UTC")
+
+        except (TypeError, ValueError, OverflowError):
+            result.update({
+                "status": "INVALID",
+                "missing_reason": "Invalid retrieval timestamp",
+            })
+            return result
+
+    current_time = pd.Timestamp.now(tz="UTC")
+    age_days = (
+        current_time - observation_date
+    ).total_seconds() / 86400.0
+
+    if age_days < 0:
+        result.update({
+            "status": "INVALID",
+            "missing_reason": "Observation date is in the future",
+        })
+        return result
+
+    if (
+        max_age_days is not None
+        and age_days > max_age_days
+    ):
+        result.update({
+            "status": "STALE",
+            "missing_reason": (
+                f"Evidence age {age_days:.1f} days exceeds "
+                f"permitted age {max_age_days} days"
+            ),
+        })
+        return result
+
+    if numeric_coverage is None:
+        result.update({
+            "status": "PARTIALLY_ASSESSED",
+            "missing_reason": "Evidence coverage was not supplied",
+        })
+        return result
+
+    if numeric_coverage < 100.0:
+        result.update({
+            "status": "PARTIALLY_ASSESSED",
+            "missing_reason": "Evidence coverage is incomplete",
+        })
+        return result
+
+    result.update({
+        "status": "ASSESSED",
+        "missing_reason": None,
+    })
+
+    return result
+
+
+def summarise_risk_evidence(evidence_by_dimension):
+    """Summarise evidence completeness without calculating risk or rank."""
+
+    dimension_statuses = {}
+    dimension_coverage = {}
+    dimension_reasons = {}
+
+    for dimension in sorted(RISK_EVIDENCE_DIMENSIONS):
+        evidence = (
+            evidence_by_dimension.get(dimension)
+            if isinstance(evidence_by_dimension, dict)
+            else None
+        )
+
+        if not isinstance(evidence, dict):
+            status = "UNASSESSED"
+            coverage = None
+            reason = "No evidence record supplied for this dimension"
+        else:
+            status = str(evidence.get("status", "UNASSESSED")).strip().upper()
+            if status not in RISK_EVIDENCE_STATUSES:
+                status = "INVALID"
+                reason = "Evidence record contains an unrecognised status"
+            else:
+                reason = evidence.get("missing_reason")
+
+            coverage = evidence.get("coverage_percent")
+            if coverage is not None:
+                try:
+                    coverage = float(coverage)
+                except (TypeError, ValueError, OverflowError):
+                    status = "INVALID"
+                    coverage = None
+                    reason = "Evidence coverage is not numeric"
+                else:
+                    if not math.isfinite(coverage) or not 0.0 <= coverage <= 100.0:
+                        status = "INVALID"
+                        coverage = None
+                        reason = "Evidence coverage is outside the valid 0-100 range"
+
+        dimension_statuses[dimension] = status
+        dimension_coverage[dimension] = coverage
+        if reason:
+            dimension_reasons[dimension] = str(reason)
+
+    status_counts = {
+        status: sum(
+            item_status == status
+            for item_status in dimension_statuses.values()
+        )
+        for status in sorted(RISK_EVIDENCE_STATUSES)
+    }
+
+    total_dimensions = len(RISK_EVIDENCE_DIMENSIONS)
+    available_dimensions = (
+        status_counts["ASSESSED"]
+        + status_counts["PARTIALLY_ASSESSED"]
+    )
+    fully_assessed_dimensions = status_counts["ASSESSED"]
+
+    evidence_availability_percent = round(
+        available_dimensions / total_dimensions * 100.0,
+        2,
+    ) if total_dimensions else 0.0
+    fully_assessed_percent = round(
+        fully_assessed_dimensions / total_dimensions * 100.0,
+        2,
+    ) if total_dimensions else 0.0
+
+    # Do not invent confidence thresholds before empirical calibration.
+    # Completeness is reported explicitly; confidence remains uncalibrated.
+    confidence = "NOT_CALIBRATED"
+    confidence_basis = (
+        "Dimension status and coverage are descriptive. No empirically "
+        "validated mapping from evidence completeness to confidence exists."
+    )
+
+    return {
+        "dimension_count": total_dimensions,
+        "dimension_statuses": dimension_statuses,
+        "dimension_coverage_percent": dimension_coverage,
+        "dimension_missing_reasons": dimension_reasons,
+        "status_counts": status_counts,
+        "available_dimensions": available_dimensions,
+        "fully_assessed_dimensions": fully_assessed_dimensions,
+        "evidence_availability_percent": evidence_availability_percent,
+        "fully_assessed_percent": fully_assessed_percent,
+        "confidence": confidence,
+        "confidence_basis": confidence_basis,
+        "confidence_is_calibrated": False,
+        "advisory_only": True,
+        "risk_score_calculated": False,
+        "ranking_input": False,
+    }
+
+
+# ============================================================
+# REALLOCATION GOVERNANCE
+# ============================================================
+
+# Normal minimum transaction size.
+MIN_REALLOCATION_VALUE = 5.00
+
+# Cash added by the investor at each assessment.
+ASSESSMENT_CASH_CONTRIBUTION = 15.00
+
+
+# ------------------------------------------------------------
+# HOLD CHALLENGE GOVERNANCE
+# ------------------------------------------------------------
+
+# HOLD positions are not automatically funding sources.
+#
+# A HOLD may only be challenged when it is genuinely weak and
+# there is a materially stronger governed destination.
+
+HOLD_CHALLENGE_MAX_SCORE = 55.0
+
+# The destination must be materially stronger than the HOLD
+# position before capital can be reallocated.
+
+HOLD_CHALLENGE_MIN_SCORE_IMPROVEMENT = 15.0
+
+# Maximum proportion released from a challenged HOLD.
+
+HOLD_CHALLENGE_RELEASE_PCT = 25.0
+
+
+# ------------------------------------------------------------
+# CORE ASSET PROTECTION
+# ------------------------------------------------------------
+
+# Broad/core ETFs should not automatically be sold merely
+# because an individual stock has a higher Investment Score.
+
+PROTECT_ETF_HOLDINGS = True
+
+
+# ------------------------------------------------------------
+# DESTINATION CONCENTRATION GOVERNANCE
+# ------------------------------------------------------------
+
+# Prevent recalibration from pouring all available capital into
+# the first-ranked destination.
+
+MAX_DESTINATION_SHARE_OF_REALLOCATION = 0.35
+
+
+# ============================================================
+# DESTINATION ALLOCATION
+# ============================================================
+
+MAX_REALLOCATION_DESTINATIONS = 5
+
+MIN_REALLOCATION_TRADE_VALUE = 2.00
+
+# ============================================================
+# HOLD CHALLENGE GOVERNANCE
+# ============================================================
+
+# HOLD is the default portfolio decision.
+# Automatic capital recycling from HOLD positions is deliberately
+# restrictive and must never behave like implicit SELL governance.
+
+HOLD_CHALLENGE_MAX_SCORE = 50.0
+
+# A destination must be materially superior before a weak HOLD can
+# be challenged for capital recycling.
+MIN_HOLD_CHALLENGE_SCORE_ADVANTAGE = 25.0
+
+# Maximum automatic recycling from a HOLD position.
+MAX_WEAK_HOLD_REDUCTION_PERCENT = 10.0
+MAX_VERY_WEAK_HOLD_REDUCTION_PERCENT = 15.0
+
+# Avoid creating trivial portfolio churn.
+MIN_HOLD_CHALLENGE_RELEASE_VALUE = 3.00
+
+MIN_MEANINGFUL_DEPLOYMENT_VALUE = 7.5
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def safe_float(value, default=0.0):
+
+    try:
+
+        if value is None:
+            return default
+
+        if isinstance(value, (list, tuple)):
+            return default
+
+        if hasattr(value, "iloc"):
+
+            if len(value) == 0:
+                return default
+
+            value = value.iloc[0]
+
+        if pd.isna(value):
+            return default
+
+        return float(value)
+
+    except Exception:
+
+        return default
+
+
+def clean_ticker(value):
+
+    if value is None:
+        return ""
+
+    return str(value).strip().upper()
+
+
+def normalise_action(value):
+
+    if value is None:
+        return "HOLD"
+
+    return str(value).strip().upper()
+
+
+def get_score(row):
+
+    """
+    Return the allocation-relevant score.
+
+    Final Portfolio Decisions currently expose Investment Score
+    for reporting compatibility.
+
+    For ETFs this may represent the ETF allocation score.
+    """
+
+    return safe_float(
+
+        row.get(
+
+            "Investment Score",
+
+            row.get(
+
+                "investment_score",
+
+                row.get(
+
+                    "ETF Score",
+
+                    row.get(
+
+                        "etf_score",
+
+                        0
+
+                    )
+
+                )
+
+            )
+
+        )
+
+    )
+
+
+def load_actual_holdings():
+
+    """
+    Load actual portfolio holdings.
+
+    Quantity > 0 means owned.
+    """
+
+    if not os.path.exists(HOLDINGS_FILE):
+
+        print(
+            f"WARNING: {HOLDINGS_FILE} not found."
+        )
+
+        return pd.DataFrame()
+
+    try:
+
+        holdings = pd.read_csv(
+            HOLDINGS_FILE
+        )
+
+    except Exception as e:
+
+        print(
+            f"Unable to read holdings file: {e}"
+        )
+
+        return pd.DataFrame()
+
+    required_columns = [
+
+        "Ticker",
+
+        "Quantity",
+
+        "Market Value"
+
+    ]
+
+    missing = [
+
+        column
+
+        for column in required_columns
+
+        if column not in holdings.columns
+
+    ]
+
+    if missing:
+
+        print(
+            f"Holdings file missing columns: {missing}"
+        )
+
+        return pd.DataFrame()
+
+    holdings = holdings.copy()
+
+    holdings["Ticker"] = (
+
+        holdings["Ticker"]
+
+        .astype(str)
+
+        .str.strip()
+
+        .str.upper()
+
+    )
+
+    holdings["Quantity"] = pd.to_numeric(
+
+        holdings["Quantity"],
+
+        errors="coerce"
+
+    ).fillna(0)
+
+    holdings["Market Value"] = pd.to_numeric(
+
+        holdings["Market Value"],
+
+        errors="coerce"
+
+    ).fillna(0)
+
+    holdings = holdings.loc[
+        holdings["Ticker"] != "CASH"
+    ]
+
+    holdings = holdings.loc[
+        holdings["Quantity"] > 0
+    ]
+
+    return holdings
+
+
+def load_actual_cash_balance():
+    """
+    Read existing portfolio cash from holdings_raw.csv.
+
+    Cash is valued by Market Value, not Quantity. This is deliberately
+    separate from load_actual_holdings(), which excludes CASH from
+    security-position calculations.
+    """
+    if not os.path.exists(HOLDINGS_FILE):
+        return 0.0
+
+    try:
+        holdings = pd.read_csv(HOLDINGS_FILE)
+    except Exception as exc:
+        print(f"WARNING: Unable to read cash balance: {exc}")
+        return 0.0
+
+    required = {"Ticker", "Market Value"}
+    if not required.issubset(holdings.columns):
+        print(
+            "WARNING: Cannot read existing cash; holdings file "
+            "requires Ticker and Market Value columns."
+        )
+        return 0.0
+
+    cash_rows = holdings.loc[
+        holdings["Ticker"].astype(str).str.strip().str.upper() == "CASH"
+    ]
+
+    cash_values = pd.to_numeric(
+        cash_rows["Market Value"],
+        errors="coerce"
+    ).fillna(0.0)
+
+    return round(max(0.0, float(cash_values.sum())), 2)
+
+
+# ============================================================
+# DECISION NORMALISATION
+# ============================================================
+
+def normalise_final_decisions(final_portfolio_decisions):
+
+    """
+    Convert final decisions into a DataFrame.
+    """
+
+    if final_portfolio_decisions is None:
+
+        return pd.DataFrame()
+
+    if isinstance(
+        final_portfolio_decisions,
+        pd.DataFrame
+    ):
+
+        decisions = (
+            final_portfolio_decisions.copy()
+        )
+
+    elif isinstance(
+        final_portfolio_decisions,
+        list
+    ):
+
+        decisions = pd.DataFrame(
+            final_portfolio_decisions
+        )
+
+    else:
+
+        return pd.DataFrame()
+
+    if decisions.empty:
+
+        return decisions
+
+    if "Ticker" not in decisions.columns:
+
+        return pd.DataFrame()
+
+    decisions["Ticker"] = (
+
+        decisions["Ticker"]
+
+        .astype(str)
+
+        .str.strip()
+
+        .str.upper()
+
+    )
+
+    if "Final Decision" not in decisions.columns:
+
+        if "Action" in decisions.columns:
+
+            decisions["Final Decision"] = (
+                decisions["Action"]
+            )
+
+        elif "Proposed Action" in decisions.columns:
+
+            decisions["Final Decision"] = (
+                decisions["Proposed Action"]
+            )
+
+        else:
+
+            decisions["Final Decision"] = "HOLD"
+
+    decisions["Final Decision"] = (
+
+        decisions["Final Decision"]
+
+        .fillna("HOLD")
+
+        .astype(str)
+
+        .str.strip()
+
+        .str.upper()
+
+    )
+
+    return decisions
+
+
+# ============================================================
+# FUNDING PRIORITY
+# ============================================================
+
+def get_funding_priority(
+    final_decision,
+    score,
+    market_value
+):
+    """
+    Calculate how attractive an existing position is as a
+    source of capital.
+
+    Higher values mean stronger funding candidates.
+
+    Priority hierarchy is structurally enforced:
+
+    1. SELL
+    2. REDUCE
+    3. Weak HOLD
+
+    Investment quality and position size rank candidates
+    within their governance category but cannot cause a lower
+    governance category to outrank a higher one.
+    """
+
+    final_decision = normalise_action(
+        final_decision
+    )
+
+    score = safe_float(
+        score
+    )
+
+    market_value = safe_float(
+        market_value
+    )
+
+    # ====================================================
+    # GOVERNANCE PRIORITY BANDS
+    #
+    # These bands deliberately do not overlap.
+    # ====================================================
+
+    if final_decision == "SELL":
+
+        base_priority = 300.0
+
+    elif final_decision.startswith(
+        "REDUCE"
+    ):
+
+        base_priority = 200.0
+
+    else:
+
+        base_priority = 100.0
+
+    # ====================================================
+    # RELATIVE INVESTMENT QUALITY
+    #
+    # Used only to rank positions within their governance
+    # category.
+    # ====================================================
+
+    quality_priority = 0.0
+
+    if score < VERY_WEAK_HOLD_SCORE:
+
+        quality_priority = 50.0
+
+    elif score < WEAK_HOLD_SCORE:
+
+        quality_priority = 30.0
+
+    elif score < 75.0:
+
+        quality_priority = 15.0
+
+    elif score < 85.0:
+
+        quality_priority = 5.0
+
+    # ====================================================
+    # POSITION SIZE
+    #
+    # Used only as a secondary ranking factor.
+    # ====================================================
+
+    size_priority = min(
+        market_value / 10.0,
+        20.0
+    )
+
+    return round(
+        base_priority
+        + quality_priority
+        + size_priority,
+        2
+    )
+
+def get_position_capacity(
+    current_value,
+    total_portfolio_value
+):
+
+    """
+    Calculate how much additional capital can be allocated
+    to a position before reaching MAX_POSITION_PERCENT.
+    """
+
+    current_value = safe_float(
+        current_value
+    )
+
+    total_portfolio_value = safe_float(
+        total_portfolio_value
+    )
+
+    if total_portfolio_value <= 0:
+
+        return 0.0
+
+    maximum_position_value = (
+
+        total_portfolio_value
+
+        *
+
+        safe_float(
+            MAX_POSITION_PERCENT
+        )
+
+        /
+
+        100
+
+    )
+
+    capacity = (
+
+        maximum_position_value
+
+        -
+
+        current_value
+
+    )
+
+    return round(
+
+        max(
+            0.0,
+            capacity
+        ),
+
+        2
+
+    )
+
+
+def select_deployment_destinations(
+    eligible_destinations,
+    total_available_capital,
+    meaningful_deployment_value=MIN_MEANINGFUL_DEPLOYMENT_VALUE
+):
+    """
+    Select the number of destinations that can receive
+    meaningful capital deployment.
+
+    Capital is concentrated into the highest-priority governed
+    destinations when available capital is limited.
+    """
+
+    if not eligible_destinations:
+        return []
+
+    ranked_destinations = sorted(
+        eligible_destinations,
+        key=lambda destination: (
+            -safe_float(
+                destination.get(
+                    "Allocation Weight",
+                    0
+                )
+            ),
+            -safe_float(
+                destination.get(
+                    "Investment Score",
+                    0
+                )
+            ),
+            clean_ticker(
+                destination.get(
+                    "Ticker",
+                    ""
+                )
+            )
+        )
+    )
+
+    meaningful_deployment_value = max(
+        1.0,
+        safe_float(
+            meaningful_deployment_value
+        )
+    )
+
+    destination_count = max(
+        1,
+        int(
+            total_available_capital
+            // meaningful_deployment_value
+        )
+    )
+
+    destination_count = min(
+        destination_count,
+        MAX_REALLOCATION_DESTINATIONS,
+        len(ranked_destinations)
+    )
+
+    return ranked_destinations[
+        :destination_count
+    ]
+
+
+# ============================================================
+# DESTINATION PRIORITY
+# ============================================================
+
+def get_destination_priority(
+    final_decision,
+    score,
+    owned
+):
+    """
+    Calculate attractiveness as a destination for capital.
+
+    Portfolio recalibration does not make investment decisions.
+
+    Only authoritative Final Portfolio Decisions of BUY MORE
+    and BUY NEW are eligible destinations.
+
+    HOLD positions are protected and remain unchanged.
+    SELL and REDUCE positions are funding sources.
+    """
+
+    final_decision = normalise_action(
+        final_decision
+    )
+
+    score = safe_float(
+        score
+    )
+
+    if final_decision in {
+        "BUY MORE",
+        "BUY NEW"
+    }:
+        return score
+
+    return 0.0
+
+# ============================================================
+# HOLD CHALLENGE / FUNDING HELPERS
+# ============================================================
+
+def is_hold_funding_eligible(position):
+    """
+    Determine whether a HOLD position is structurally eligible
+    for a portfolio-level capital recycling challenge.
+
+    HOLD remains the default portfolio decision.
+
+    ETFs are protected automatically because they may represent
+    core, diversification, or strategic portfolio exposure.
+
+    Individual stocks may proceed to the stricter evidence test,
+    but eligibility alone does not authorise capital recycling.
+    """
+
+    final_decision = normalise_action(
+        position.get(
+            "Final Decision",
+            "HOLD"
+        )
+    )
+
+    asset_type = str(
+        position.get(
+            "Asset Type",
+            ""
+        )
+    ).strip().upper()
+
+    # This helper applies only to HOLD positions.
+    if final_decision != "HOLD":
+        return False
+
+    # ETFs are protected from automatic opportunity-based
+    # capital recycling.
+    if asset_type == "ETF":
+        return False
+
+    # Unknown asset types are protected by default.
+    if asset_type != "STOCK":
+        return False
+
+    return True
+
+
+def _normalise_economic_sector(value):
+    """Accept economic-sector labels, not instrument-type labels."""
+    sector = str(value or "").strip()
+    if not sector:
+        return ""
+
+    invalid_labels = {
+        "ETF", "STOCK", "EQUITY", "SHARE",
+        "CASH", "BOND", "FUND", "MUTUAL FUND", "INDEX FUND",
+    }
+    return "" if sector.upper() in invalid_labels else sector
+
+
+def _build_price_deterioration_assessment(ticker):
+    """Return advisory-only price-risk evidence; never alter trade decisions."""
+    result = {
+        "status": "UNASSESSED",
+        "source": "cache/prices/{TICKER}_1y.parquet (cache-only)",
+        "observation_date": None,
+        "freshness": "UNKNOWN",
+        "return_20_session_percent": None,
+        "return_60_session_percent": None,
+        "drawdown_from_52w_intraday_high_percent": None,
+        "severity": "UNKNOWN",
+        "reasons": [],
+    }
+
+    try:
+        from data import market_data
+
+        # SHADOW risk assessment must never trigger live market-data downloads.
+        cache_file = market_data._cache_file(ticker, "1y")
+
+        if not os.path.exists(cache_file):
+            result["reasons"].append(
+                "No cached historical price observations; "
+                "network refresh intentionally skipped."
+            )
+            return result
+
+        data = pd.read_parquet(cache_file)
+
+        if data is None or data.empty:
+            result["reasons"].append(
+                "No historical price observations returned."
+            )
+            return result
+
+        data = data.copy()
+        data.index = pd.to_datetime(data.index, errors="coerce")
+        data = data.loc[~data.index.isna()].sort_index()
+        data = data.loc[~data.index.duplicated(keep="last")]
+
+        if data.empty:
+            result["reasons"].append(
+                "Historical price dates are invalid."
+            )
+            return result
+
+        latest_date = pd.Timestamp(data.index[-1]).normalize()
+        result["observation_date"] = latest_date.strftime("%Y-%m-%d")
+
+        latest_session_fn = getattr(
+            market_data, "_latest_completed_us_trading_date", None
+        )
+
+        if callable(latest_session_fn):
+            expected_date = pd.Timestamp(
+                latest_session_fn()
+            ).normalize()
+            fresh = latest_date >= expected_date
+        else:
+            fresh = (
+                pd.Timestamp.now().normalize() - latest_date
+            ).days <= 5
+
+        result["freshness"] = "CURRENT" if fresh else "STALE"
+
+        if not fresh:
+            result["reasons"].append(
+                "Latest observation is older than the expected completed US "
+                "trading session; price risk remains unassessed."
+            )
+            return result
+
+        if "Close" not in data.columns:
+            result["reasons"].append(
+                "Historical data has no Close column."
+            )
+            return result
+
+        close = pd.to_numeric(
+            data["Close"], errors="coerce"
+        ).dropna()
+
+        if close.empty or float(close.iloc[-1]) <= 0:
+            result["reasons"].append(
+                "No valid latest closing price is available."
+            )
+            return result
+
+        latest_close = float(close.iloc[-1])
+
+        if len(close) >= 21 and float(close.iloc[-21]) > 0:
+            result["return_20_session_percent"] = round(
+                (latest_close / float(close.iloc[-21]) - 1) * 100,
+                2,
+            )
+        else:
+            result["reasons"].append(
+                "Insufficient data for a 20-session return."
+            )
+
+        if len(close) >= 61 and float(close.iloc[-61]) > 0:
+            result["return_60_session_percent"] = round(
+                (latest_close / float(close.iloc[-61]) - 1) * 100,
+                2,
+            )
+        else:
+            result["reasons"].append(
+                "Insufficient data for a 60-session return."
+            )
+
+        if "High" in data.columns:
+            high = pd.to_numeric(
+                data["High"], errors="coerce"
+            ).dropna().tail(252)
+
+            if not high.empty and float(high.max()) > 0:
+                result[
+                    "drawdown_from_52w_intraday_high_percent"
+                ] = round(
+                    (latest_close / float(high.max()) - 1) * 100,
+                    2,
+                )
+            else:
+                result["reasons"].append(
+                    "No valid daily highs available."
+                )
+        else:
+            result["reasons"].append(
+                "Historical data has no High column."
+            )
+
+        r20 = result["return_20_session_percent"]
+        r60 = result["return_60_session_percent"]
+        dd = result["drawdown_from_52w_intraday_high_percent"]
+
+        # Incomplete history must never be labelled assessed or low risk.
+        if r20 is None or r60 is None or dd is None:
+            result["severity"] = "UNKNOWN"
+            result["reasons"].append(
+                "Incomplete price history; full price-risk assessment unavailable."
+            )
+            return result
+
+        if r60 <= -25 or dd <= -40:
+            result["severity"] = "HIGH"
+            result["reasons"].append(
+                "Severe price deterioration review threshold breached."
+            )
+        elif r20 <= -10 or r60 <= -15 or dd <= -25:
+            result["severity"] = "REVIEW"
+            result["reasons"].append(
+                "Price deterioration review threshold breached."
+            )
+        else:
+            result["severity"] = "NO_THRESHOLD_BREACH"
+            result["reasons"].append(
+                "No configured price review threshold breached; this does not "
+                "establish that the stock is low risk."
+            )
+
+        result["status"] = "ASSESSED"
+        return result
+
+    except Exception as exc:
+        result["reasons"].append(
+            "Price-risk assessment failed: " + type(exc).__name__ + "."
+        )
+        return result
+
+def _build_macro_regime_assessment():
+    """Assess cache-only macro-risk proxies for SHADOW review.
+
+    The three original indicators determine the composite regime.
+    Additional yield and yield-curve indicators are diagnostic only.
+    Missing or stale inputs remain UNASSESSED; this function never
+    refreshes market data.
+    """
+    from data import market_data
+
+    result = {
+        "status": "UNASSESSED",
+        "regime": "UNASSESSED",
+        "as_of": None,
+        "indicators": [],
+        "historical_pre_trade_status": "NOT_ASSESSED",
+        "historical_pre_trade_reason": (
+            "The current assessment has no purchase date or point-in-time macro "
+            "snapshot. Current cached data cannot establish what was knowable "
+            "before a historical purchase."
+        ),
+        "advisory_only": True,
+    }
+
+    today = pd.Timestamp.now().normalize()
+    cache = {}
+
+    def load_closes(ticker):
+        if ticker in cache:
+            return cache[ticker]
+
+        path = market_data._cache_file(ticker, "1y")
+        if not os.path.exists(path):
+            cache[ticker] = (
+                None,
+                "No cached history; network refresh skipped.",
+            )
+            return cache[ticker]
+
+        try:
+            frame = pd.read_parquet(path)
+
+            if frame is None or frame.empty or "Close" not in frame.columns:
+                cache[ticker] = (
+                    None,
+                    "Cached history has no usable Close column.",
+                )
+                return cache[ticker]
+
+            frame = frame.copy()
+            frame.index = pd.to_datetime(frame.index, errors="coerce")
+            frame = frame.loc[~frame.index.isna()].sort_index()
+            frame = frame.loc[~frame.index.duplicated(keep="last")]
+
+            price_column = (
+                "Adj Close"
+                if ticker not in {"^TNX", "^IRX", "^FVX", "CL=F"}
+                and "Adj Close" in frame.columns
+                else "Close"
+            )
+
+            closes = pd.to_numeric(
+                frame[price_column],
+                errors="coerce",
+            ).dropna()
+
+            if closes.empty:
+                cache[ticker] = (
+                    None,
+                    "No valid cached closing observations.",
+                )
+                return cache[ticker]
+
+            latest_date = pd.Timestamp(closes.index[-1])
+            if latest_date.tzinfo is not None:
+                latest_date = latest_date.tz_localize(None)
+
+            observation_age_days = (
+                today - latest_date.normalize()
+            ).days
+
+            if observation_age_days < 0:
+                cache[ticker] = (
+                    None,
+                    f"Invalid future-dated observation: "
+                    f"{latest_date:%Y-%m-%d}.",
+                )
+                return cache[ticker]
+
+            if observation_age_days > 5:
+                cache[ticker] = (
+                    None,
+                    f"Cached data stale; latest observation "
+                    f"{latest_date:%Y-%m-%d}.",
+                )
+                return cache[ticker]
+
+            cache[ticker] = (closes, None)
+            return cache[ticker]
+
+        except Exception as exc:
+            cache[ticker] = (
+                None,
+                f"Cache read failed: {type(exc).__name__}.",
+            )
+            return cache[ticker]
+
+    def base_indicator(name, proxy, ticker_list, metric):
+        return {
+            "Indicator": name,
+            "Proxy": proxy,
+            "Tickers": ticker_list,
+            "Metric": metric,
+            "Status": "UNASSESSED",
+            "Observation Date": None,
+            "Value": None,
+            "Threshold Basis": "PROVISIONAL SHADOW REVIEW THRESHOLDS",
+            "Evidence": "",
+            "Advisory Only": True,
+            "Regime Contribution": True,
+            "Data Source": "Local cached market-price history",
+            "Retrieval Mode": "CACHE_ONLY",
+        }
+
+    # ------------------------------------------------------------
+    # COMPOSITE INDICATOR 1: US 10-YEAR TREASURY YIELD CHANGE
+    # ------------------------------------------------------------
+
+    row = base_indicator(
+        "US 10-year Treasury yield change",
+        "^TNX cached close; yield-change proxy, not a complete rate outlook",
+        "^TNX",
+        "20-session change (basis points)",
+    )
+
+    closes, error = load_closes("^TNX")
+
+    if closes is None:
+        row["Evidence"] = error
+
+    elif len(closes) < 21 or float(closes.iloc[-21]) <= 0:
+        row["Evidence"] = (
+            f"Insufficient cached history: {len(closes)} observations; "
+            "need 21."
+        )
+
+    else:
+        latest = float(closes.iloc[-1])
+        change_bps = (latest - float(closes.iloc[-21])) * 10.0
+
+        row["Observation Date"] = pd.Timestamp(
+            closes.index[-1]
+        ).strftime("%Y-%m-%d")
+        row["Value"] = round(change_bps, 1)
+
+        if change_bps >= 60:
+            row["Status"] = "HIGH RISK SIGNAL"
+        elif change_bps >= 35:
+            row["Status"] = "ELEVATED RISK SIGNAL"
+        else:
+            row["Status"] = "NO CONFIGURED THRESHOLD BREACH"
+
+        row["Evidence"] = (
+            f"20-session yield change {change_bps:+.1f} bps; provisional "
+            "review threshold +35 bps and high-risk threshold +60 bps."
+        )
+
+    result["indicators"].append(row)
+
+    # ------------------------------------------------------------
+    # COMPOSITE INDICATOR 2: CRUDE OIL PRICE CHANGE
+    # ------------------------------------------------------------
+
+    row = base_indicator(
+        "Crude oil price change",
+        "CL=F cached close; energy-price/inflation-pressure proxy",
+        "CL=F",
+        "20-session return (%)",
+    )
+
+    closes, error = load_closes("CL=F")
+
+    if closes is None:
+        row["Evidence"] = error
+
+    elif len(closes) < 21 or float(closes.iloc[-21]) <= 0:
+        row["Evidence"] = (
+            f"Insufficient cached history: {len(closes)} observations; "
+            "need 21."
+        )
+
+    else:
+        latest = float(closes.iloc[-1])
+        change_pct = (
+            latest / float(closes.iloc[-21]) - 1.0
+        ) * 100.0
+
+        row["Observation Date"] = pd.Timestamp(
+            closes.index[-1]
+        ).strftime("%Y-%m-%d")
+        row["Value"] = round(change_pct, 2)
+
+        if change_pct >= 20:
+            row["Status"] = "HIGH RISK SIGNAL"
+        elif change_pct >= 10:
+            row["Status"] = "ELEVATED RISK SIGNAL"
+        else:
+            row["Status"] = "NO CONFIGURED THRESHOLD BREACH"
+
+        row["Evidence"] = (
+            f"20-session crude-oil return {change_pct:+.2f}%; provisional "
+            "review threshold +10% and high-risk threshold +20%. An "
+            "oil-price rise can affect sectors differently."
+        )
+
+    result["indicators"].append(row)
+
+    # ------------------------------------------------------------
+    # COMPOSITE INDICATOR 3: CREDIT-RISK APPETITE PROXY
+    # HYG/LQD is not a direct credit-spread measurement.
+    # ------------------------------------------------------------
+
+    row = base_indicator(
+        "Credit-risk appetite proxy",
+        "HYG relative to LQD cached 20-session returns; not a measured credit spread",
+        "HYG; LQD",
+        "HYG return minus LQD return (percentage points)",
+    )
+
+    hyg, hyg_error = load_closes("HYG")
+    lqd, lqd_error = load_closes("LQD")
+
+    if hyg is None or lqd is None:
+        row["Evidence"] = "; ".join(
+            error for error in (hyg_error, lqd_error) if error
+        )
+    else:
+        # Align both series on identical observation dates.
+        hyg_series = hyg.copy()
+        lqd_series = lqd.copy()
+
+        hyg_index = pd.DatetimeIndex(
+            pd.to_datetime(hyg_series.index, errors="coerce")
+        )
+        lqd_index = pd.DatetimeIndex(
+            pd.to_datetime(lqd_series.index, errors="coerce")
+        )
+
+        if hyg_index.tz is not None:
+            hyg_index = hyg_index.tz_localize(None)
+        if lqd_index.tz is not None:
+            lqd_index = lqd_index.tz_localize(None)
+
+        hyg_series.index = hyg_index
+        lqd_series.index = lqd_index
+
+        hyg_series = hyg_series.loc[~hyg_series.index.isna()]
+        lqd_series = lqd_series.loc[~lqd_series.index.isna()]
+
+        # Recheck uniqueness after timezone normalisation.
+        hyg_series = hyg_series.loc[
+            ~hyg_series.index.duplicated(keep="last")
+        ].sort_index()
+        lqd_series = lqd_series.loc[
+            ~lqd_series.index.duplicated(keep="last")
+        ].sort_index()
+
+        common = pd.concat(
+            [
+                hyg_series.rename("HYG"),
+                lqd_series.rename("LQD"),
+            ],
+            axis=1,
+            join="inner",
+        ).dropna().sort_index()
+
+        if len(common) < 21:
+            row["Evidence"] = (
+                "Insufficient common-date history for HYG and LQD; "
+                "need at least 21 shared observations."
+            )
+        elif (
+            float(common["HYG"].iloc[-21]) <= 0
+            or float(common["LQD"].iloc[-21]) <= 0
+            or float(common["HYG"].iloc[-1]) <= 0
+            or float(common["LQD"].iloc[-1]) <= 0
+        ):
+            row["Evidence"] = (
+                "Invalid starting or ending price in the aligned HYG/LQD "
+                "history; relative performance not assessed."
+            )
+        else:
+            hyg_return = (
+                float(common["HYG"].iloc[-1])
+                / float(common["HYG"].iloc[-21]) - 1.0
+            ) * 100.0
+
+            lqd_return = (
+                float(common["LQD"].iloc[-1])
+                / float(common["LQD"].iloc[-21]) - 1.0
+            ) * 100.0
+
+            relative = hyg_return - lqd_return
+            observation_date = pd.Timestamp(common.index[-1])
+
+            row["Observation Date"] = observation_date.strftime("%Y-%m-%d")
+            row["Value"] = round(relative, 2)
+
+            if relative <= -6:
+                row["Status"] = "HIGH RISK SIGNAL"
+            elif relative <= -3:
+                row["Status"] = "ELEVATED RISK SIGNAL"
+            else:
+                row["Status"] = "NO CONFIGURED THRESHOLD BREACH"
+
+            row["Evidence"] = (
+                f"HYG 20-session return {hyg_return:+.2f}%; "
+                f"LQD {lqd_return:+.2f}%; relative performance "
+                f"{relative:+.2f} percentage points over common dates "
+                f"({pd.Timestamp(common.index[-21]):%Y-%m-%d} to "
+                f"{observation_date:%Y-%m-%d}). Provisional review "
+                "threshold -3 pp and high-risk threshold -6 pp; this "
+                "is not a direct credit-spread measurement."
+            )
+
+    result["indicators"].append(row)
+
+    # ------------------------------------------------------------
+    # COMPOSITE REGIME: ONLY THE THREE ORIGINAL INDICATORS
+    # ------------------------------------------------------------
+
+    regime_indicators = [
+        item
+        for item in result["indicators"]
+        if item.get("Regime Contribution", True)
+    ]
+
+    # --------------------------------------------------------
+    # DIAGNOSTIC-ONLY TREASURY INDICATORS
+    # --------------------------------------------------------
+    # These indicators are advisory-only and do not contribute
+    # to the composite regime classification.
+
+    def append_yield_change_diagnostic(name, ticker):
+        row = base_indicator(
+            name,
+            f"{ticker} cached close; diagnostic-only Treasury yield change",
+            ticker,
+            "20-session change (basis points)",
+        )
+        row["Regime Contribution"] = False
+        row["Threshold Basis"] = "DIAGNOSTIC ONLY — NO REGIME THRESHOLD"
+
+        closes, error = load_closes(ticker)
+
+        if closes is None:
+            row["Evidence"] = error
+        elif len(closes) < 21 or float(closes.iloc[-21]) <= 0:
+            row["Evidence"] = (
+                f"Insufficient cached history: {len(closes)} observations; "
+                "need 21."
+            )
+        else:
+            latest = float(closes.iloc[-1])
+            previous = float(closes.iloc[-21])
+            change_bps = (latest - previous) * 10.0
+
+            row["Observation Date"] = pd.Timestamp(
+                closes.index[-1]
+            ).strftime("%Y-%m-%d")
+            row["Value"] = round(change_bps, 1)
+            row["Status"] = "DIAGNOSTIC ONLY"
+            row["Evidence"] = (
+                f"20-session yield change {change_bps:+.1f} bps. "
+                "Informational only; excluded from regime classification."
+            )
+
+        result["indicators"].append(row)
+
+    append_yield_change_diagnostic(
+        "US 3-month Treasury yield change",
+        "^IRX",
+    )
+    append_yield_change_diagnostic(
+        "US 5-year Treasury yield change",
+        "^FVX",
+    )
+
+    # US 10-year minus 3-month Treasury yield spread.
+    # Yahoo yield tickers are quoted in tenths of a percentage point.
+    row = base_indicator(
+        "US 10-year minus 3-month Treasury yield curve",
+        "^TNX minus ^IRX cached closes; diagnostic-only yield-curve proxy",
+        "^TNX; ^IRX",
+        "Yield spread (percentage points)",
+    )
+    row["Regime Contribution"] = False
+    row["Threshold Basis"] = "DIAGNOSTIC ONLY — NO REGIME THRESHOLD"
+
+    ten_year, ten_year_error = load_closes("^TNX")
+    three_month, three_month_error = load_closes("^IRX")
+
+    if ten_year is None or three_month is None:
+        row["Evidence"] = "; ".join(
+            error
+            for error in (ten_year_error, three_month_error)
+            if error
+        )
+    elif ten_year.empty or three_month.empty:
+        row["Evidence"] = "No usable aligned Treasury yield observations."
+    else:
+        ten_date = pd.Timestamp(ten_year.index[-1])
+        three_date = pd.Timestamp(three_month.index[-1])
+
+        if ten_date.tzinfo is not None:
+            ten_date = ten_date.tz_localize(None)
+        if three_date.tzinfo is not None:
+            three_date = three_date.tz_localize(None)
+
+        if abs(
+            (ten_date.normalize() - three_date.normalize()).days
+        ) > 3:
+            row["Evidence"] = (
+                "Treasury yield observations are not date-aligned "
+                f"({ten_date:%Y-%m-%d} vs {three_date:%Y-%m-%d}); "
+                "yield spread not assessed."
+            )
+        else:
+            spread = (
+                float(ten_year.iloc[-1])
+                - float(three_month.iloc[-1])
+            ) / 10.0
+
+            row["Observation Date"] = min(
+                ten_date, three_date
+            ).strftime("%Y-%m-%d")
+            row["Value"] = round(spread, 3)
+            row["Status"] = "DIAGNOSTIC ONLY"
+            row["Evidence"] = (
+                f"10-year minus 3-month yield spread {spread:+.3f} "
+                "percentage points. Informational only; excluded from "
+                "regime classification."
+            )
+
+    result["indicators"].append(row)
+
+    assessed = [
+        item
+        for item in result["indicators"]
+        if item["Status"] != "UNASSESSED"
+    ]
+
+    regime_assessed = [
+        item
+        for item in regime_indicators
+        if item["Status"] != "UNASSESSED"
+    ]
+
+    high_count = sum(
+        item["Status"] == "HIGH RISK SIGNAL"
+        for item in regime_assessed
+    )
+    elevated_count = sum(
+        item["Status"] == "ELEVATED RISK SIGNAL"
+        for item in regime_assessed
+    )
+
+    result["assessed_indicator_count"] = len(assessed)
+    result["indicator_count"] = len(result["indicators"])
+    result["regime_indicator_count"] = len(regime_indicators)
+    result["regime_assessed_indicator_count"] = len(regime_assessed)
+    result["high_risk_signal_count"] = high_count
+    result["elevated_risk_signal_count"] = elevated_count
+
+    dates = [
+        item["Observation Date"]
+        for item in regime_assessed
+        if item["Observation Date"]
+    ]
+    result["as_of"] = max(dates) if dates else None
+    result["oldest_observation_date"] = min(dates) if dates else None
+    result["latest_observation_date"] = max(dates) if dates else None
+    result["assessment_timestamp"] = pd.Timestamp.now(
+        tz="UTC"
+    ).isoformat()
+
+    result["assessment_completeness"] = (
+        "COMPLETE"
+        if len(regime_assessed) == len(regime_indicators)
+        else "PARTIAL"
+    )
+    result["coverage_percent"] = round(
+        len(regime_assessed) / len(regime_indicators) * 100,
+        1,
+    ) if regime_indicators else 0.0
+    result["missing_indicator_count"] = (
+        len(regime_indicators) - len(regime_assessed)
+    )
+
+    if high_count or elevated_count >= 2:
+        result["status"] = "ADVERSE"
+        result["signal_status"] = "ADVERSE"
+        result["regime"] = (
+            "ADVERSE"
+            if result["assessment_completeness"] == "COMPLETE"
+            else "ADVERSE — PARTIALLY ASSESSED"
+        )
+        result["summary"] = (
+            f"Macro-risk proxy review signals detected: {high_count} high "
+            f"and {elevated_count} elevated among the three composite "
+            f"proxies. Coverage: {len(regime_assessed)}/"
+            f"{len(regime_indicators)}. Review candidate sensitivity and "
+            "sizing; incomplete coverage limits confidence."
+        )
+
+    elif elevated_count == 1:
+        result["status"] = "CAUTION"
+        result["signal_status"] = "CAUTION"
+        result["regime"] = (
+            "CAUTION"
+            if result["assessment_completeness"] == "COMPLETE"
+            else "CAUTION — PARTIALLY ASSESSED"
+        )
+        result["summary"] = (
+            "One configured macro proxy has an elevated-risk signal. "
+            f"{len(regime_assessed)} of {len(regime_indicators)} "
+            "composite proxies were assessed. Review sensitive candidates; "
+            "incomplete coverage limits confidence."
+        )
+
+    elif result["assessment_completeness"] == "COMPLETE":
+        result["status"] = "NEUTRAL"
+        result["signal_status"] = "NO CONFIGURED THRESHOLD BREACH"
+        result["regime"] = "NEUTRAL"
+        result["summary"] = (
+            "All three configured composite macro proxies were assessed "
+            "without a configured risk threshold breach. This is not a "
+            "forecast or proof that macro risk is low."
+        )
+
+    else:
+        result["status"] = "UNASSESSED"
+        result["signal_status"] = "UNASSESSED"
+        result["regime"] = "PARTIALLY ASSESSED — NO COMPLETE REGIME"
+        result["summary"] = (
+            f"Only {len(regime_assessed)} of {len(regime_indicators)} "
+            "composite macro proxies were assessed. A complete macro "
+            "regime cannot be assigned; missing inputs are not treated "
+            "as low risk."
+        )
+
+    result["limitations"] = [
+        "This is a limited macro-proxy screen, not a full macroeconomic regime model.",
+        "The configured thresholds are provisional and require validation before use beyond SHADOW review.",
+        "No CPI/inflation-release surprises, central-bank expectations, real yields, FX, or economic-growth surprises are directly assessed.",
+        "HYG/LQD relative performance is a credit-risk-appetite proxy, not a measured credit spread.",
+        "The 3-month and 5-year yield changes and 10-year-minus-3-month curve are diagnostic only and do not affect the composite regime until calibrated.",
+        "No purchase-date or point-in-time macro snapshots were supplied; historical pre-purchase warnings remain unassessed.",
+    ]
+
+    return result
+
+# ============================================================
+# SHADOW ETF HOLDINGS LOOK-THROUGH — LOCAL ISSUER CSV CACHE
+# ============================================================
+
+"""
+Portfolio Reallocation Engine
+
+Purpose
+-------
+
+Perform whole-portfolio capital reallocation downstream from the
+Final Portfolio Decision layer.
+
+The Final Portfolio Decision answers:
+
+    "What is the appropriate decision for this asset individually?"
+
+The Portfolio Reallocation Engine answers:
+
+    "Given the entire portfolio, where should capital be allocated
+    to maximise portfolio growth subject to diversification and
+    governance constraints?"
+
+Core principles
+---------------
+
+- Review the entire portfolio, not only explicit REDUCE / SELL decisions.
+
+- HOLD does not mean permanently untouchable.
+
+- A HOLD position may become a funding candidate when a materially
+  stronger opportunity exists elsewhere.
+
+- Explicit SELL decisions remain strong funding candidates.
+
+- Explicit REDUCE decisions remain preferred funding candidates.
+
+- Strong BUY NEW and BUY MORE opportunities compete for capital.
+
+- Existing holdings compete with new opportunities.
+
+- Capital should move only when the destination represents a
+  meaningful improvement over the source.
+
+- Avoid unnecessary turnover.
+
+- Preserve diversification.
+
+- Respect maximum position sizing.
+
+- CASH is not an investment candidate.
+
+- The engine produces recommendations and a proposed reallocation plan.
+  It does not execute trades.
+"""
+
+import os
+import math
+
+import pandas as pd
+
+
+from config.investment_config import (
+    MAX_POSITION_PERCENT
+)
+
+from analysis.structural_risk import (
+        assess_structural_risk,
+)
+
+from analysis.portfolio_reallocation_audit import (
+    build_reallocation_audit,
+)
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+HOLDINGS_FILE = "portfolio/holdings_raw.csv"
+
+
+# Minimum portfolio movement required before recommending a trade.
+MIN_REALLOCATION_VALUE = 5.00
+
+
+# HOLD positions below this score become potential funding candidates
+# if stronger opportunities exist.
+WEAK_HOLD_SCORE = 60.0
+
+
+# HOLD positions below this score are stronger funding candidates.
+VERY_WEAK_HOLD_SCORE = 45.0
+
+
+# Strong opportunities eligible to receive capital.
+MIN_DESTINATION_SCORE = 75.0
+
+
+# Maximum percentage of a portfolio position that can be reduced
+# by this engine in a single run unless the upstream final decision
+# explicitly says SELL.
+MAX_OPPORTUNITY_REDUCTION_PERCENT = 50.0
+
+
+# Cash added to the portfolio at each assessment.
+# This mirrors the discretionary cash contribution used by the
+# original capital allocation process.
+ASSESSMENT_CASH_CONTRIBUTION = 15.0
+
+
+# Minimum score advantage required before a HOLD position may be
+# challenged as a source of capital for a materially stronger
+# governed destination.
+MIN_REALLOCATION_SCORE_ADVANTAGE = 10.0
+
+# ============================================================
+# RISK EVIDENCE CONTRACT — STAGE 1
+# ============================================================
+
+RISK_EVIDENCE_STATUSES = {
+    "ASSESSED",
+    "PARTIALLY_ASSESSED",
+    "UNASSESSED",
+    "STALE",
+    "INVALID",
+}
+
+RISK_EVIDENCE_DIMENSIONS = {
+    "COMPANY",
+    "SECTOR",
+    "INDUSTRY",
+    "MACRO",
+    "MARKET",
+    "PORTFOLIO",
+}
+
+
+def normalise_risk_evidence(
+    dimension,
+    evidence=None,
+    max_age_days=None,
+):
+    """
+    Normalise risk evidence into a consistent advisory-only contract.
+
+    This function validates evidence only. It does not calculate
+    risk scores, rank candidates, or change allocation decisions.
+
+    Missing provenance or incomplete coverage is never treated
+    as evidence of low risk.
+    """
+
+    dimension = str(dimension or "").strip().upper()
+
+    result = {
+        "dimension": dimension,
+        "status": "UNASSESSED",
+        "value": None,
+        "source": None,
+        "as_of_date": None,
+        "retrieved_at": None,
+        "coverage_percent": None,
+        "missing_reason": "No usable evidence supplied",
+        "advisory_only": True,
+    }
+
+    if dimension not in RISK_EVIDENCE_DIMENSIONS:
+        result.update({
+            "status": "INVALID",
+            "missing_reason": "Unrecognised risk dimension",
+        })
+        return result
+
+    if max_age_days is not None:
+        try:
+            max_age_days = float(max_age_days)
+        except (TypeError, ValueError):
+            max_age_days = None
+            result.update({
+                "status": "INVALID",
+                "missing_reason": "Invalid maximum evidence age",
+            })
+            return result
+
+        if not math.isfinite(max_age_days) or max_age_days < 0:
+            result.update({
+                "status": "INVALID",
+                "missing_reason": "Maximum evidence age must be finite and non-negative",
+            })
+            return result
+
+    if not isinstance(evidence, dict):
+        return result
+
+    value = evidence.get("value")
+    source = evidence.get("source")
+    as_of_date = evidence.get("as_of_date")
+    retrieved_at = evidence.get("retrieved_at")
+    coverage = evidence.get("coverage_percent")
+
+    result.update({
+        "source": source,
+        "as_of_date": as_of_date,
+        "retrieved_at": retrieved_at,
+    })
+
+    supplied_status = str(
+        evidence.get("status", "")
+    ).strip().upper()
+
+    if supplied_status == "INVALID":
+        result.update({
+            "status": "INVALID",
+            "missing_reason": evidence.get(
+                "missing_reason",
+                "Evidence supplied as invalid",
+            ),
+        })
+        return result
+
+    if value is None:
+        result["missing_reason"] = evidence.get(
+            "missing_reason",
+            "No usable risk measurement",
+        )
+        return result
+
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        result.update({
+            "status": "INVALID",
+            "missing_reason": "Risk measurement is not numeric",
+        })
+        return result
+
+    if not math.isfinite(numeric_value):
+        result.update({
+            "status": "INVALID",
+            "missing_reason": "Risk measurement is not finite",
+        })
+        return result
+
+    numeric_coverage = None
+
+    if coverage is not None:
+        try:
+            numeric_coverage = float(coverage)
+        except (TypeError, ValueError, OverflowError):
+            result.update({
+                "status": "INVALID",
+                "missing_reason": "Coverage is not numeric",
+            })
+            return result
+
+        if (
+            not math.isfinite(numeric_coverage)
+            or not 0.0 <= numeric_coverage <= 100.0
+        ):
+            result.update({
+                "status": "INVALID",
+                "missing_reason": "Coverage outside valid 0-100 range",
+            })
+            return result
+
+    result.update({
+        "value": numeric_value,
+        "coverage_percent": numeric_coverage,
+    })
+
+    if not source or not as_of_date:
+        result.update({
+            "status": "PARTIALLY_ASSESSED",
+            "missing_reason": (
+                "Measurement exists but source or observation date "
+                "is missing"
+            ),
+        })
+        return result
+
+    try:
+        observation_date = pd.Timestamp(as_of_date)
+
+        if pd.isna(observation_date):
+            raise ValueError("Missing observation date")
+
+        if observation_date.tzinfo is None:
+            observation_date = observation_date.tz_localize("UTC")
+        else:
+            observation_date = observation_date.tz_convert("UTC")
+
+    except (TypeError, ValueError, OverflowError):
+        result.update({
+            "status": "INVALID",
+            "missing_reason": "Invalid observation date",
+        })
+        return result
+
+    if retrieved_at:
+        try:
+            retrieval_date = pd.Timestamp(retrieved_at)
+
+            if pd.isna(retrieval_date):
+                raise ValueError("Invalid retrieval timestamp")
+
+            if retrieval_date.tzinfo is None:
+                retrieval_date = retrieval_date.tz_localize("UTC")
+            else:
+                retrieval_date = retrieval_date.tz_convert("UTC")
+
+        except (TypeError, ValueError, OverflowError):
+            result.update({
+                "status": "INVALID",
+                "missing_reason": "Invalid retrieval timestamp",
+            })
+            return result
+
+    current_time = pd.Timestamp.now(tz="UTC")
+    age_days = (
+        current_time - observation_date
+    ).total_seconds() / 86400.0
+
+    if age_days < 0:
+        result.update({
+            "status": "INVALID",
+            "missing_reason": "Observation date is in the future",
+        })
+        return result
+
+    if (
+        max_age_days is not None
+        and age_days > max_age_days
+    ):
+        result.update({
+            "status": "STALE",
+            "missing_reason": (
+                f"Evidence age {age_days:.1f} days exceeds "
+                f"permitted age {max_age_days} days"
+            ),
+        })
+        return result
+
+    if numeric_coverage is None:
+        result.update({
+            "status": "PARTIALLY_ASSESSED",
+            "missing_reason": "Evidence coverage was not supplied",
+        })
+        return result
+
+    if numeric_coverage < 100.0:
+        result.update({
+            "status": "PARTIALLY_ASSESSED",
+            "missing_reason": "Evidence coverage is incomplete",
+        })
+        return result
+
+    result.update({
+        "status": "ASSESSED",
+        "missing_reason": None,
+    })
+
+    return result
+
+
+def summarise_risk_evidence(evidence_by_dimension):
+    """Summarise evidence completeness without calculating risk or rank."""
+
+    dimension_statuses = {}
+    dimension_coverage = {}
+    dimension_reasons = {}
+
+    for dimension in sorted(RISK_EVIDENCE_DIMENSIONS):
+        evidence = (
+            evidence_by_dimension.get(dimension)
+            if isinstance(evidence_by_dimension, dict)
+            else None
+        )
+
+        if not isinstance(evidence, dict):
+            status = "UNASSESSED"
+            coverage = None
+            reason = "No evidence record supplied for this dimension"
+        else:
+            status = str(evidence.get("status", "UNASSESSED")).strip().upper()
+            if status not in RISK_EVIDENCE_STATUSES:
+                status = "INVALID"
+                reason = "Evidence record contains an unrecognised status"
+            else:
+                reason = evidence.get("missing_reason")
+
+            coverage = evidence.get("coverage_percent")
+            if coverage is not None:
+                try:
+                    coverage = float(coverage)
+                except (TypeError, ValueError, OverflowError):
+                    status = "INVALID"
+                    coverage = None
+                    reason = "Evidence coverage is not numeric"
+                else:
+                    if not math.isfinite(coverage) or not 0.0 <= coverage <= 100.0:
+                        status = "INVALID"
+                        coverage = None
+                        reason = "Evidence coverage is outside the valid 0-100 range"
+
+        dimension_statuses[dimension] = status
+        dimension_coverage[dimension] = coverage
+        if reason:
+            dimension_reasons[dimension] = str(reason)
+
+    status_counts = {
+        status: sum(
+            item_status == status
+            for item_status in dimension_statuses.values()
+        )
+        for status in sorted(RISK_EVIDENCE_STATUSES)
+    }
+
+    total_dimensions = len(RISK_EVIDENCE_DIMENSIONS)
+    available_dimensions = (
+        status_counts["ASSESSED"]
+        + status_counts["PARTIALLY_ASSESSED"]
+    )
+    fully_assessed_dimensions = status_counts["ASSESSED"]
+
+    evidence_availability_percent = round(
+        available_dimensions / total_dimensions * 100.0,
+        2,
+    ) if total_dimensions else 0.0
+    fully_assessed_percent = round(
+        fully_assessed_dimensions / total_dimensions * 100.0,
+        2,
+    ) if total_dimensions else 0.0
+
+    # Do not invent confidence thresholds before empirical calibration.
+    # Completeness is reported explicitly; confidence remains uncalibrated.
+    confidence = "NOT_CALIBRATED"
+    confidence_basis = (
+        "Dimension status and coverage are descriptive. No empirically "
+        "validated mapping from evidence completeness to confidence exists."
+    )
+
+    return {
+        "dimension_count": total_dimensions,
+        "dimension_statuses": dimension_statuses,
+        "dimension_coverage_percent": dimension_coverage,
+        "dimension_missing_reasons": dimension_reasons,
+        "status_counts": status_counts,
+        "available_dimensions": available_dimensions,
+        "fully_assessed_dimensions": fully_assessed_dimensions,
+        "evidence_availability_percent": evidence_availability_percent,
+        "fully_assessed_percent": fully_assessed_percent,
+        "confidence": confidence,
+        "confidence_basis": confidence_basis,
+        "confidence_is_calibrated": False,
+        "advisory_only": True,
+        "risk_score_calculated": False,
+        "ranking_input": False,
+    }
+
 
 # ============================================================
 # REALLOCATION GOVERNANCE
@@ -1643,17 +3905,76 @@ def _load_cached_etf_holdings(ticker, max_age_days=45):
 
         holdings = []
         total_weight = 0.0
-        for row in rows:
-            constituent = str(row.get("constituent_ticker", "")).strip().upper()
+        asset_class_weights = {
+            "EQUITY": 0.0,
+            "CASH": 0.0,
+            "FUND": 0.0,
+            "FUTURE": 0.0,
+        }
+
+        for row_number, row in enumerate(rows, start=1):
+            asset_class = str(
+                row.get("asset_class", "EQUITY") or "EQUITY"
+            ).strip().upper()
+
+            if asset_class not in asset_class_weights:
+                raise ValueError(
+                    f"Unsupported constituent asset class: {asset_class}"
+                )
+
+            constituent_id = str(
+                row.get(
+                    "constituent_id",
+                    row.get("isin", row.get("constituent_ticker", ""))
+                )
+            ).strip().upper()
+
+            constituent = str(
+                row.get("constituent_ticker", "") or constituent_id
+            ).strip().upper()
+
+            name = str(
+                row.get("constituent_name", row.get("name", ""))
+            ).strip()
+
+            # Amundi may publish cash rows without an ISIN or name.
+            # Preserve these rows with a deterministic row identifier.
             if not constituent:
-                raise ValueError("Blank constituent ticker detected.")
-            weight = float(row.get("weight", ""))
-            if not 0 <= weight <= 1:
-                raise ValueError(f"Invalid weight for {constituent}; use decimal fractions between 0 and 1 inclusive.")
+                if asset_class in {"CASH", "FUTURE"}:
+                    constituent = f"{asset_class}_ROW_{row_number}"
+                else:
+                    raise ValueError(
+                        f"Blank constituent identifier for {asset_class} row "
+                        f"{row_number}."
+                    )
+
+            try:
+                weight = float(row.get("weight", ""))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Invalid weight for constituent {constituent}."
+                )
+
+            if abs(weight) > 1:
+                raise ValueError(
+                    f"Invalid weight for {constituent}; "
+                    "absolute decimal weight must not exceed 1."
+                )
+
+            if weight < 0 and asset_class not in {"CASH", "FUTURE"}:
+                raise ValueError(
+                    f"Negative weight is not permitted for {asset_class}: "
+                    f"{constituent}."
+                )
+
             total_weight += weight
+            asset_class_weights[asset_class] += weight
+
             holdings.append({
                 "ticker": constituent,
-                "name": str(row.get("constituent_name", row.get("name", ""))).strip(),
+                "constituent_id": constituent_id or constituent,
+                "name": name,
+                "asset_class": asset_class,
                 "weight": weight,
                 "sector": str(row.get("sector", "")).strip(),
                 "industry": str(row.get("industry", "")).strip(),
@@ -1672,6 +3993,10 @@ def _load_cached_etf_holdings(ticker, max_age_days=45):
             "weight_total": round(total_weight, 6),
             "holdings": holdings,
             "weight_coverage_percent": round(total_weight * 100, 2),
+            "asset_class_weights": {
+                key: round(value, 8)
+                for key, value in asset_class_weights.items()
+            },
             "observation_age_days": age_days,
         })
         return result
@@ -1681,137 +4006,66 @@ def _load_cached_etf_holdings(ticker, max_age_days=45):
         return result
 
 
-def _build_market_risk_assessment(
-    final_portfolio_decisions,
-    portfolio_value,
-    market_intelligence=None,
-    reallocation=None,
-    financial_statements_by_ticker=None,
-):
+
+
+def _load_cached_market_prices(ticker):
     """
-    Build an advisory-only market and portfolio risk assessment.
+    Read existing local price history only.
 
-    This function does not change production decisions,
-    allocation eligibility, trade sizing, or reallocation.
+    SHADOW risk assessment must not trigger network retrieval.
+    Returns (prices, reason); reason is populated when unavailable.
     """
+    from data import market_data
 
-    from analysis.security_classifier import classify_security
+    try:
+        cache_errors = []
 
-    # --------------------------------------------------------
-    assessment = {
-        "mode": "SHADOW",
-        "macro_risk_status": "UNASSESSED",
-        "macro_news_assessment": {
-            "status": "UNASSESSED",
-            "summary": "Macro news has not been screened.",
-            "as_of": None,
-            "items": [],
-            "limitations": [],
-            "advisory_only": True,
-        },
-        "portfolio_concentration": [],
-        "proposed_portfolio_concentration": [],
-        "portfolio_exposure_comparison": [],
-        "exposure_validation": [],
-        "classification_coverage": [],
-        "known_etf_holdings": [],
-        "company_risk_flags": [],
-        "individual_stock_assessments": [],
-        "financial_resilience_evidence": [],
-        "transaction_risk_reviews": [],
-        "common_theme_exposure": [],
-        "explicit_investment_theme_assessment": [],
-        "recommendations": [],
-        "macro_stress_scenarios": [],
-        "data_quality": {
-            "portfolio_data_available": False,
-            "market_intelligence_available": False,
-            "financial_statements_received": 0,
-            "financial_statements_with_data": 0,
-            "financial_statements_unavailable": 0,
-            "transaction_data_available": False,
-            "sector_country_classification_available": False,
-            "instrument_type_classification_available": False,
-            "known_etf_holdings_count": 0,
-            "known_etf_holdings_value": 0.0,
-            "etf_lookthrough_assessed": False,
-            "current_sector_classification_complete": False,
-            "current_country_classification_complete": False,
-            "proposed_exposure_calculated": False,
-            "macro_risk_assessed": False,
-            "correlated_theme_assessed": False,
-        },
-        "limitations": [
-            "Macro risk is screened using a limited cache-only proxy set; a complete macroeconomic regime is not assessed.",
-            "Company news headlines are not independently sentiment-scored.",
-            "Analyst target upside is an indicator, not a reliable forecast.",
-            "Earnings risk requires a reliable event date and current date.",
-            "Correlated investment themes require explicit sector, industry, "
-            "or theme data.",
-            "Proposed exposure is an estimate based on the supplied holdings "
-            "and transaction records; it is not an execution or live-price forecast.",
-            "This assessment does not change reallocation decisions.",
-        ],
-    }
+        # Prefer the longer history, but use an existing one-year
+        # cache when the two-year cache is absent or unusable.
+        for period in ("2y", "1y"):
+            cache_file = market_data._cache_file(ticker, period)
 
-    # --------------------------------------------------------
-    # SHADOW BROAD-MARKET STRESS INDICATORS
-    # --------------------------------------------------------
-    # These indicators provide market context only.
-    # They do not change production decisions or trade sizing.
+            if not os.path.exists(cache_file):
+                continue
 
+            try:
+                prices = pd.read_parquet(cache_file)
+            except Exception as exc:
+                cache_errors.append(
+                    f"{period} cache read failed ({type(exc).__name__})."
+                )
+                continue
+
+            if not isinstance(prices, pd.DataFrame):
+                cache_errors.append(
+                    f"{period} cache is not a DataFrame."
+                )
+                continue
+
+            if prices.empty:
+                cache_errors.append(
+                    f"{period} cache is empty."
+                )
+                continue
+
+            return prices, None
+
+        if cache_errors:
+            return None, "No usable local cached price history. " + " ".join(
+                cache_errors
+            )
+
+        return None, "No local cached price history (checked 2y and 1y caches)."
+
+    except Exception as exc:
+        return None, f"Cache lookup failed ({type(exc).__name__})."
+
+
+def _build_market_context_assessment(assessment):
+    """Populate reusable cache-only macro and market SHADOW evidence."""
     from datetime import datetime
     from data import market_data
 
-    def _load_cached_market_prices(ticker):
-        """
-        Read existing local price history only.
-
-        SHADOW risk assessment must not trigger network retrieval.
-        Returns (prices, reason); reason is populated when unavailable.
-        """
-        try:
-            cache_errors = []
-
-            # Prefer the longer history, but use an existing one-year
-            # cache when the two-year cache is absent or unusable.
-            for period in ("2y", "1y"):
-                cache_file = market_data._cache_file(ticker, period)
-
-                if not os.path.exists(cache_file):
-                    continue
-
-                try:
-                    prices = pd.read_parquet(cache_file)
-                except Exception as exc:
-                    cache_errors.append(
-                        f"{period} cache read failed ({type(exc).__name__})."
-                    )
-                    continue
-
-                if not isinstance(prices, pd.DataFrame):
-                    cache_errors.append(
-                        f"{period} cache is not a DataFrame."
-                    )
-                    continue
-
-                if prices.empty:
-                    cache_errors.append(
-                        f"{period} cache is empty."
-                    )
-                    continue
-
-                return prices, None
-
-            if cache_errors:
-                return None, "No usable local cached price history. " + " ".join(
-                    cache_errors
-                )
-
-            return None, "No local cached price history (checked 2y and 1y caches)."
-
-        except Exception as exc:
-            return None, f"Cache lookup failed ({type(exc).__name__})."
     assessment["market_stress_indicators"] = []
     assessment["market_breadth_indicators"] = []
 
@@ -3758,6 +6012,103 @@ def _build_market_risk_assessment(
         })
 
     # --------------------------------------------------------
+    return assessment
+
+def _build_market_risk_assessment(
+    final_portfolio_decisions,
+    portfolio_value,
+    market_intelligence=None,
+    reallocation=None,
+    financial_statements_by_ticker=None,
+    market_context=None,
+):
+    """
+    Build an advisory-only market and portfolio risk assessment.
+
+    This function does not change production decisions,
+    allocation eligibility, trade sizing, or reallocation.
+    """
+
+    from analysis.security_classifier import classify_security
+
+    # --------------------------------------------------------
+    assessment = {
+        "mode": "SHADOW",
+        "macro_risk_status": "UNASSESSED",
+        "macro_news_assessment": {
+            "status": "UNASSESSED",
+            "summary": "Macro news has not been screened.",
+            "as_of": None,
+            "items": [],
+            "limitations": [],
+            "advisory_only": True,
+        },
+        "portfolio_concentration": [],
+        "proposed_portfolio_concentration": [],
+        "portfolio_exposure_comparison": [],
+        "exposure_validation": [],
+        "classification_coverage": [],
+        "known_etf_holdings": [],
+        "company_risk_flags": [],
+        "individual_stock_assessments": [],
+        "financial_resilience_evidence": [],
+        "transaction_risk_reviews": [],
+        "common_theme_exposure": [],
+        "explicit_investment_theme_assessment": [],
+        "recommendations": [],
+        "macro_stress_scenarios": [],
+        "data_quality": {
+            "portfolio_data_available": False,
+            "market_intelligence_available": False,
+            "financial_statements_received": 0,
+            "financial_statements_with_data": 0,
+            "financial_statements_unavailable": 0,
+            "transaction_data_available": False,
+            "sector_country_classification_available": False,
+            "instrument_type_classification_available": False,
+            "known_etf_holdings_count": 0,
+            "known_etf_holdings_value": 0.0,
+            "etf_lookthrough_assessed": False,
+            "current_sector_classification_complete": False,
+            "current_country_classification_complete": False,
+            "proposed_exposure_calculated": False,
+            "macro_risk_assessed": False,
+            "correlated_theme_assessed": False,
+        },
+        "limitations": [
+            "Macro risk is screened using a limited cache-only proxy set; a complete macroeconomic regime is not assessed.",
+            "Company news headlines are not independently sentiment-scored.",
+            "Analyst target upside is an indicator, not a reliable forecast.",
+            "Earnings risk requires a reliable event date and current date.",
+            "Correlated investment themes require explicit sector, industry, "
+            "or theme data.",
+            "Proposed exposure is an estimate based on the supplied holdings "
+            "and transaction records; it is not an execution or live-price forecast.",
+            "This assessment does not change reallocation decisions.",
+        ],
+    }
+
+    # Reuse pre-allocation market context when supplied.
+    # Otherwise build it once for standalone assessment calls.
+    if isinstance(market_context, dict):
+        for _context_key, _context_value in market_context.items():
+            if _context_key == "data_quality":
+                assessment["data_quality"].update(
+                    _context_value
+                    if isinstance(_context_value, dict)
+                    else {}
+                )
+            elif _context_key == "recommendations":
+                assessment["recommendations"].extend(
+                    _context_value
+                    if isinstance(_context_value, list)
+                    else []
+                )
+            else:
+                assessment[_context_key] = _context_value
+    else:
+        _build_market_context_assessment(assessment)
+
     # READ-ONLY SECURITY METADATA FOR SHADOW EXPOSURE
     # --------------------------------------------------------
     import json
@@ -4280,13 +6631,14 @@ def _build_market_risk_assessment(
             "asset_type": asset_type,
         }
 
-        # Industry concentration is measured only for non-ETF holdings.
-        # ETF look-through remains unassessed; record the gap explicitly.
+        # Only equity securities contribute to company-level industry exposure.
+        # ETFs are assessed separately through issuer holdings look-through.
+        _is_equity = asset_type in {"STOCK", "EQUITY"}
         if asset_type == "ETF":
             missing_industry_tickers.append(ticker)
-        elif industry:
+        elif _is_equity and industry:
             industry_values[industry] = industry_values.get(industry, 0.0) + current_value
-        else:
+        elif _is_equity:
             missing_industry_tickers.append(ticker)
 
         if asset_type == "ETF":
@@ -4297,15 +6649,16 @@ def _build_market_risk_assessment(
                 "country_lookthrough_status": "NOT_ASSESSED",
             })
 
-        if sector and asset_type != "ETF":
+        if _is_equity and sector:
             sector_values[sector] = sector_values.get(sector, 0.0) + current_value
             current_classified_sector_value += current_value
-        else:
+        elif _is_equity or asset_type == "ETF":
             missing_sector_tickers.append(ticker)
-        if country and asset_type != "ETF":
+
+        if _is_equity and country:
             country_values[country] = country_values.get(country, 0.0) + current_value
             current_classified_country_value += current_value
-        else:
+        elif _is_equity or asset_type == "ETF":
             # ETF listing/domicile is not underlying geographic exposure.
             # Keep ETF country look-through unclassified until assessed.
             missing_country_tickers.append(ticker)
@@ -4501,13 +6854,15 @@ def _build_market_risk_assessment(
         if industry.upper() in {"", "N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"}:
             industry = ""
 
-        if position.get("asset_type") == "ETF":
+        _asset_type = str(position.get("asset_type", "") or "").strip().upper()
+        _is_equity = _asset_type in {"STOCK", "EQUITY"}
+        if _asset_type == "ETF":
             proposed_missing_industry_tickers.append(ticker)
-        elif industry:
+        elif _is_equity and industry:
             proposed_industry_values[industry] = (
                 proposed_industry_values.get(industry, 0.0) + value
             )
-        else:
+        elif _is_equity:
             proposed_missing_industry_tickers.append(ticker)
 
         known_etf_tickers = {
@@ -4517,21 +6872,18 @@ def _build_market_risk_assessment(
 
         is_known_etf = str(ticker).strip().upper() in known_etf_tickers
 
-        if (
-            sector
-            and str(position.get("asset_type", "")).strip().upper() != "ETF"
-            and not is_known_etf
-        ):
+        if _is_equity and sector and not is_known_etf:
             proposed_sector_values[sector] = (
                 proposed_sector_values.get(sector, 0.0) + value
             )
             proposed_classified_sector_value += value
-        else:
+        elif _is_equity or is_known_etf:
             proposed_missing_sector_tickers.append(ticker)
-        if country and position.get("asset_type", "").strip().upper() != "ETF" and not is_known_etf:
+
+        if _is_equity and country and not is_known_etf:
             proposed_country_values[country] = proposed_country_values.get(country, 0.0) + value
             proposed_classified_country_value += value
-        else:
+        elif _is_equity or is_known_etf:
             # Keep known ETFs unclassified for country exposure until
             # underlying geographic look-through is available.
             proposed_missing_country_tickers.append(ticker)
@@ -4548,21 +6900,49 @@ def _build_market_risk_assessment(
         sector_totals = {}
         country_totals = {}
         industry_totals = {}
+
         assessed_value = 0.0
         unassessed_value = 0.0
+
+        equity_exposure_value = 0.0
+        cash_exposure_value = 0.0
+        fund_exposure_value = 0.0
+        futures_exposure_value = 0.0
+
         for _ticker, _position in position_map.items():
             _value = max(0.0, safe_float(_position.get("value", 0)))
-            if _value <= 0 or str(_position.get("asset_type", "")).strip().upper() != "ETF":
+
+            if (
+                _value <= 0
+                or str(_position.get("asset_type", "")).strip().upper() != "ETF"
+            ):
                 continue
+
             if _ticker not in _etf_lookthrough_cache:
                 _etf_lookthrough_cache[_ticker] = _load_cached_etf_holdings(_ticker)
+
             _evidence = _etf_lookthrough_cache[_ticker]
-            _record = next((item for item in assessment["known_etf_holdings"] if item.get("ticker") == _ticker), None)
+
+            _record = next(
+                (
+                    item for item in assessment["known_etf_holdings"]
+                    if item.get("ticker") == _ticker
+                ),
+                None
+            )
+
             if _record is None:
-                _record = {"ticker": _ticker, "current_value": 0.0, "sector_lookthrough_status": "NOT_ASSESSED", "country_lookthrough_status": "NOT_ASSESSED"}
+                _record = {
+                    "ticker": _ticker,
+                    "current_value": 0.0,
+                    "sector_lookthrough_status": "NOT_ASSESSED",
+                    "country_lookthrough_status": "NOT_ASSESSED",
+                }
                 assessment["known_etf_holdings"].append(_record)
+
             if state == "CURRENT":
                 _record["current_value"] = round(_value, 2)
+
             _record.update({
                 "holdings_source": _evidence.get("source"),
                 "holdings_as_of_date": _evidence.get("as_of_date"),
@@ -4574,31 +6954,148 @@ def _build_market_risk_assessment(
                 "evidence_error": _evidence.get("error"),
                 "advisory_only": True,
             })
+
             if _evidence.get("status") != "ASSESSED":
                 unassessed_value += _value
                 continue
+
             assessed_value += _value
-            _dimension_weights = {"sector": 0.0, "country": 0.0, "industry": 0.0}
+
+            _dimension_weights = {
+                "sector": 0.0,
+                "country": 0.0,
+                "industry": 0.0,
+            }
+
+            _class_weights = {
+                "EQUITY": 0.0,
+                "CASH": 0.0,
+                "FUND": 0.0,
+                "FUTURE": 0.0,
+            }
+
             for _holding in _evidence["holdings"]:
-                _weighted_value = _value * _holding["weight"]
+                _asset_class = str(
+                    _holding.get("asset_class", "EQUITY") or "EQUITY"
+                ).strip().upper()
+
+                _weight = _holding["weight"]
+                _weighted_value = _value * _weight
+
+                if _asset_class not in _class_weights:
+                    continue
+
+                _class_weights[_asset_class] += _weight
+
+                if _asset_class == "CASH":
+                    cash_exposure_value += _weighted_value
+                    continue
+
+                if _asset_class == "FUND":
+                    fund_exposure_value += _weighted_value
+                    continue
+
+                if _asset_class == "FUTURE":
+                    futures_exposure_value += _weighted_value
+                    continue
+
+                # Only underlying equity securities contribute to
+                # sector, country and industry classifications.
+                equity_exposure_value += _weighted_value
+
                 for _dimension, _label, _totals in (
-                    ("SECTOR", _normalise_economic_sector(_holding.get("sector")), sector_totals),
-                    ("COUNTRY", _normalise_text(_holding.get("country")), country_totals),
-                    ("INDUSTRY", _normalise_text(_holding.get("industry")), industry_totals),
+                    (
+                        "SECTOR",
+                        _normalise_economic_sector(_holding.get("sector")),
+                        sector_totals,
+                    ),
+                    (
+                        "COUNTRY",
+                        _normalise_text(_holding.get("country")),
+                        country_totals,
+                    ),
+                    (
+                        "INDUSTRY",
+                        _normalise_text(_holding.get("industry")),
+                        industry_totals,
+                    ),
                 ):
-                    if str(_label or "").strip().upper() in {"", "N/A", "NA", "UNKNOWN", "NONE", "NULL", "UNCLASSIFIED", "ETF", "ETP"}:
+                    if str(_label or "").strip().upper() in {
+                        "", "N/A", "NA", "UNKNOWN", "NONE", "NULL",
+                        "UNCLASSIFIED", "ETF", "ETP"
+                    }:
                         continue
+
                     _totals[_label] = _totals.get(_label, 0.0) + _weighted_value
-                    _dimension_weights[_dimension.lower()] += _holding["weight"]
-            _record["sector_lookthrough_status"] = "ASSESSED" if _dimension_weights["sector"] >= 0.95 else "PARTIAL — CLASSIFICATION GAPS"
-            _record["country_lookthrough_status"] = "ASSESSED" if _dimension_weights["country"] >= 0.95 else "PARTIAL — CLASSIFICATION GAPS"
-            _record["industry_lookthrough_status"] = "ASSESSED" if _dimension_weights["industry"] >= 0.95 else "PARTIAL — CLASSIFICATION GAPS"
-            _record["sector_classified_weight_percent"] = round(_dimension_weights["sector"] * 100, 2)
-            _record["country_classified_weight_percent"] = round(_dimension_weights["country"] * 100, 2)
-            _record["industry_classified_weight_percent"] = round(_dimension_weights["industry"] * 100, 2)
+                    _dimension_weights[_dimension.lower()] += _weight
+
+            _equity_weight = _class_weights["EQUITY"]
+
+            _record.update({
+                "equity_weight_percent": round(_equity_weight * 100, 4),
+                "cash_weight_percent": round(_class_weights["CASH"] * 100, 4),
+                "fund_weight_percent": round(_class_weights["FUND"] * 100, 4),
+                "signed_futures_weight_percent": round(
+                    _class_weights["FUTURE"] * 100, 4
+                ),
+                "non_equity_weight_percent": round(
+                    (
+                        _class_weights["CASH"]
+                        + _class_weights["FUND"]
+                        + _class_weights["FUTURE"]
+                    ) * 100,
+                    4
+                ),
+                "sector_lookthrough_status": (
+                    "ASSESSED"
+                    if _dimension_weights["sector"] >= _equity_weight * 0.95
+                    else "PARTIAL — CLASSIFICATION GAPS"
+                ),
+                "country_lookthrough_status": (
+                    "ASSESSED"
+                    if _dimension_weights["country"] >= _equity_weight * 0.95
+                    else "PARTIAL — CLASSIFICATION GAPS"
+                ),
+                "industry_lookthrough_status": (
+                    "ASSESSED"
+                    if _dimension_weights["industry"] >= _equity_weight * 0.95
+                    else "PARTIAL — CLASSIFICATION GAPS"
+                ),
+                "sector_classified_weight_percent": round(
+                    _dimension_weights["sector"] * 100, 4
+                ),
+                "country_classified_weight_percent": round(
+                    _dimension_weights["country"] * 100, 4
+                ),
+                "industry_classified_weight_percent": round(
+                    _dimension_weights["industry"] * 100, 4
+                ),
+                "unclassified_sector_weight_percent": round(
+                    max(0.0, _equity_weight - _dimension_weights["sector"]) * 100,
+                    4
+                ),
+                "unclassified_country_weight_percent": round(
+                    max(0.0, _equity_weight - _dimension_weights["country"]) * 100,
+                    4
+                ),
+                "unclassified_industry_weight_percent": round(
+                    max(0.0, _equity_weight - _dimension_weights["industry"]) * 100,
+                    4
+                ),
+                # Backward-compatible alias for sector classification gaps.
+                "unclassified_equity_weight_percent": round(
+                    max(0.0, _equity_weight - _dimension_weights["sector"]) * 100,
+                    4
+                ),
+            })
+
         return {
             "assessed_etf_value": assessed_value,
             "unassessed_etf_value": unassessed_value,
+            "equity_exposure_value": equity_exposure_value,
+            "cash_exposure_value": cash_exposure_value,
+            "fund_exposure_value": fund_exposure_value,
+            "signed_futures_exposure_value": futures_exposure_value,
             "sector": sector_totals,
             "country": country_totals,
             "industry": industry_totals,
@@ -4644,10 +7141,20 @@ def _build_market_risk_assessment(
                 ("industry", _missing_industry),
             ):
                 _field = "sector" if _dimension == "sector" else _dimension
-                _complete = all(
-                    str(_holding.get(_field, "")).strip().upper()
-                    not in {"", "N/A", "NA", "UNKNOWN", "NONE", "NULL", "UNCLASSIFIED", "ETF", "ETP"}
+                _equity_holdings = [
+                    _holding
                     for _holding in _dimension_status[_dimension]
+                    if str(
+                        _holding.get("asset_class", "EQUITY") or "EQUITY"
+                    ).strip().upper() == "EQUITY"
+                ]
+                _complete = bool(_equity_holdings) and all(
+                    str(_holding.get(_field, "")).strip().upper()
+                    not in {
+                        "", "N/A", "NA", "UNKNOWN", "NONE", "NULL",
+                        "UNCLASSIFIED", "ETF", "ETP"
+                    }
+                    for _holding in _equity_holdings
                 )
                 if _complete:
                     while _ticker in _missing:
@@ -6236,16 +8743,38 @@ def _build_market_risk_assessment(
             )
 
             if is_etf:
+                _etf_record = next(
+                    (
+                        item for item in assessment.get("known_etf_holdings", [])
+                        if item.get("ticker") == ticker
+                    ),
+                    None
+                )
+                _lookthrough_assessed = bool(
+                    _etf_record
+                    and _etf_record.get("evidence_status") == "ASSESSED"
+                )
                 assessment["recommendations"].append({
                     "action": "REVIEW_DATA_GAP",
                     "subject": ticker,
                     "reason": (
                         "ETF market intelligence is unavailable. "
-                        "Underlying holdings, sector exposure and country "
-                        "exposure have not been assessed."
+                        + (
+                            "Issuer holdings look-through has been assessed "
+                            "separately; company-level market intelligence "
+                            "remains unavailable."
+                            if _lookthrough_assessed
+                            else
+                            "Underlying holdings, sector exposure and country "
+                            "exposure have not been assessed."
+                        )
                     ),
                     "confidence": "LOW",
-                    "evidence_type": "ETF_LOOKTHROUGH_UNASSESSED",
+                    "evidence_type": (
+                        "ETF_MARKET_INTELLIGENCE_UNAVAILABLE"
+                        if _lookthrough_assessed
+                        else "ETF_LOOKTHROUGH_UNASSESSED"
+                    ),
                     "portfolio_roles": roles,
                     "advisory_only": True,
                 })
@@ -6472,12 +9001,31 @@ def _build_market_risk_assessment(
             confidence = "LOW"
 
             if is_etf:
-                action = "REVIEW_ETF_LOOKTHROUGH"
-                reasons.append(
-                    "ETF underlying holdings and look-through sector/country "
-                    "exposures have not been assessed. This is not a company-level "
-                    "risk assessment."
+                _etf_record = next(
+                    (
+                        item for item in assessment.get("known_etf_holdings", [])
+                        if item.get("ticker") == ticker
+                    ),
+                    None
                 )
+                _lookthrough_assessed = bool(
+                    _etf_record
+                    and _etf_record.get("evidence_status") == "ASSESSED"
+                )
+                if _lookthrough_assessed:
+                    action = "REVIEW_MISSING_RISK_DATA"
+                    reasons.append(
+                        "ETF holdings look-through has been assessed separately, "
+                        "but company-level market-intelligence evidence is "
+                        "unavailable. This is not a company-level risk assessment."
+                    )
+                else:
+                    action = "REVIEW_ETF_LOOKTHROUGH"
+                    reasons.append(
+                        "ETF underlying holdings and look-through sector/country "
+                        "exposures have not been assessed. This is not a "
+                        "company-level risk assessment."
+                    )
             else:
                 action = (
                     "COMPLETE_RISK_REVIEW_BEFORE_ENTRY"
@@ -8463,12 +11011,26 @@ def generate_portfolio_reallocation(
             )
         ).strip()
 
+        industry = str(
+            row.get("Industry") or row.get("industry") or ""
+        ).strip()
+        if industry.upper() in {
+            "N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"
+        }:
+            industry = ""
+
         asset_type = str(
             row.get(
                 "Asset Type",
                 "STOCK"
             )
         ).strip().upper()
+
+        # Preserve uncertainty: missing asset type is not proof of equity.
+        exposure_asset_type = (
+            str(row.get("Asset Type") or "").strip().upper()
+            or "UNKNOWN"
+        )
 
         score = safe_float(
             row.get(
@@ -8509,7 +11071,9 @@ def generate_portfolio_reallocation(
                     2
                 ),
                 "Sector": sector,
+                "Industry": industry,
                 "Asset Type": asset_type,
+                "Exposure Classification Type": exposure_asset_type,
                 "Country": str(
                     row.get(
                         "Country",
@@ -8538,34 +11102,10 @@ def generate_portfolio_reallocation(
     # position sizing and portfolio-level capacity limits.
     # ========================================================
 
-    sector_values = {}
+    # The denominator includes all positive owned positions. Classified
+    # sector, industry and country numerators include equities only.
+    # ETFs remain unclassified until underlying look-through is available.
 
-    for position in current_positions:
-
-        sector = str(
-            position.get(
-                "Sector",
-                ""
-            ) or ""
-        ).strip()
-
-        current_value = safe_float(
-            position.get(
-                "Current Value",
-                0
-            )
-        )
-
-        sector_values[sector] = (
-            sector_values.get(
-                sector,
-                0.0
-            )
-            + current_value
-        )
-
-    # Use the same owned-position population for the exposure denominator
-    # and numerator. Keep portfolio_value for overall position-sizing rules.
     exposure_portfolio_value = round(
         sum(
             safe_float(position.get("Current Value", 0))
@@ -8575,68 +11115,245 @@ def generate_portfolio_reallocation(
         2,
     )
 
-    sector_exposure_percent = {}
-
-    if exposure_portfolio_value > 0:
-
-        for sector, value in sector_values.items():
-
-            sector_exposure_percent[sector] = round(
-                value
-                / exposure_portfolio_value
-                * 100.0,
-                2
-            )
-
-    # ========================================================
-    # CALCULATE COUNTRY EXPOSURE
-    #
-    # Diagnostic only at this stage.
-    # Do not use this as an additional allocation penalty yet.
-    # ========================================================
-
+    sector_values = {}
+    industry_values = {}
     country_values = {}
 
     for position in current_positions:
+        asset_type = str(
+            position.get("Exposure Classification Type", "UNKNOWN")
+        ).strip().upper()
 
-        country = str(
-            position.get(
-                "Country",
-                ""
-            )
-        ).strip()
-
-        if not country:
+        if asset_type not in {"STOCK", "EQUITY"}:
             continue
 
-        current_value = safe_float(
-            position.get(
-                "Current Value",
-                0
-            )
-        )
+        current_value = safe_float(position.get("Current Value", 0))
+        if current_value <= 0:
+            continue
 
-        country_values[country] = (
-            country_values.get(
-                country,
-                0.0
+        sector = str(position.get("Sector", "") or "").strip()
+        if sector and sector.upper() not in {
+            "N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"
+        }:
+            sector_values[sector] = (
+                sector_values.get(sector, 0.0) + current_value
             )
-            + current_value
-        )
 
+        industry = str(position.get("Industry", "") or "").strip()
+        if industry and industry.upper() not in {
+            "N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"
+        }:
+            industry_values[industry] = (
+                industry_values.get(industry, 0.0) + current_value
+            )
+
+        country = str(position.get("Country", "") or "").strip()
+        if country and country.upper() not in {
+            "N/A", "NA", "UNKNOWN", "NONE", "NULL"
+        }:
+            country_values[country] = (
+                country_values.get(country, 0.0) + current_value
+            )
+
+    sector_exposure_percent = {}
+    industry_exposure_percent = {}
     country_exposure_percent = {}
 
     if exposure_portfolio_value > 0:
+        for sector, value in sector_values.items():
+            sector_exposure_percent[sector] = round(
+                value / exposure_portfolio_value * 100.0, 2
+            )
+
+        for industry, value in industry_values.items():
+            industry_exposure_percent[industry] = round(
+                value / exposure_portfolio_value * 100.0, 2
+            )
 
         for country, value in country_values.items():
-
             country_exposure_percent[country] = round(
-                value
-                / exposure_portfolio_value
-                * 100.0,
-                2
+                value / exposure_portfolio_value * 100.0, 2
             )
+
+    sector_classified_value = round(sum(sector_values.values()), 2)
+    industry_classified_value = round(sum(industry_values.values()), 2)
+    country_classified_value = round(sum(country_values.values()), 2)
+
+    sector_classification_coverage_percent = (
+        round(sector_classified_value / exposure_portfolio_value * 100.0, 2)
+        if exposure_portfolio_value > 0 else 0.0
+    )
+    industry_classification_coverage_percent = (
+        round(industry_classified_value / exposure_portfolio_value * 100.0, 2)
+        if exposure_portfolio_value > 0 else 0.0
+    )
+    country_classification_coverage_percent = (
+        round(country_classified_value / exposure_portfolio_value * 100.0, 2)
+        if exposure_portfolio_value > 0 else 0.0
+    )
+
     # ========================================================
+    # PORTFOLIO RISK EVIDENCE — CURRENT OWNED HOLDINGS ONLY
+    # ========================================================
+    # This is a structured portfolio profile, not a scalar risk score.
+    # The source rows do not carry an independently validated holdings
+    # snapshot timestamp, so the evidence cannot be fully assessed.
+    # Proposed transactions and cash are deliberately excluded.
+
+    def _build_portfolio_risk_evidence():
+        _positive_positions = [
+            position for position in current_positions
+            if safe_float(position.get("Current Value", 0)) > 0
+        ]
+        _holdings_value = sum(
+            safe_float(position.get("Current Value", 0))
+            for position in _positive_positions
+        )
+
+        _position_rows = []
+        if _holdings_value > 0:
+            for _position in _positive_positions:
+                _value = safe_float(_position.get("Current Value", 0))
+                _position_rows.append({
+                    "ticker": clean_ticker(_position.get("Ticker", "")),
+                    "current_value": round(_value, 2),
+                    "weight_percent": round(
+                        _value / _holdings_value * 100.0, 2
+                    ),
+                })
+
+        _position_rows.sort(
+            key=lambda item: (-item["current_value"], item["ticker"])
+        )
+
+        def _top_classifications(_values):
+            return [
+                {
+                    "classification": str(_name),
+                    "value": round(safe_float(_value), 2),
+                    "percent_of_total_holdings": round(
+                        safe_float(_value) / _holdings_value * 100.0, 2
+                    ) if _holdings_value > 0 else None,
+                }
+                for _name, _value in sorted(
+                    _values.items(),
+                    key=lambda item: (-safe_float(item[1]), str(item[0]))
+                )[:5]
+            ]
+
+        _coverage = {
+            "SECTOR": {
+                "coverage_percent": sector_classification_coverage_percent,
+                "classified_value": sector_classified_value,
+            },
+            "INDUSTRY": {
+                "coverage_percent": industry_classification_coverage_percent,
+                "classified_value": industry_classified_value,
+            },
+            "COUNTRY": {
+                "coverage_percent": country_classification_coverage_percent,
+                "classified_value": country_classified_value,
+            },
+        }
+
+        for _dimension, _item in _coverage.items():
+            _item["unclassified_value"] = round(
+                max(0.0, _holdings_value - safe_float(
+                    _item.get("classified_value", 0)
+                )),
+                2,
+            )
+
+        _coverage_values = [
+            safe_float(item.get("coverage_percent"))
+            for item in _coverage.values()
+        ]
+        _overall_coverage = (
+            min(_coverage_values)
+            if _coverage_values and _holdings_value > 0
+            else 0.0
+        )
+
+        _assessment_timestamp = pd.Timestamp.now(
+            tz="UTC"
+        ).isoformat()
+
+        if _holdings_value <= 0:
+            _status = "UNASSESSED"
+            _missing_reason = (
+                "No positive-value owned security holdings are available "
+                "for a portfolio profile."
+            )
+        else:
+            _status = "PARTIALLY_ASSESSED"
+            _missing_reason = (
+                "The current holdings source has no independently validated "
+                "observation timestamp. Concentration and classification "
+                "coverage are descriptive; freshness and full portfolio risk "
+                "cannot be established."
+            )
+
+        return {
+            "dimension": "PORTFOLIO",
+            "status": _status,
+            "value": None,
+            "source": "FINAL_PORTFOLIO_DECISIONS_CURRENT_OWNED_POSITIONS",
+            "as_of_date": None,
+            "retrieved_at": None,
+            "assessment_timestamp": _assessment_timestamp,
+            "coverage_percent": round(_overall_coverage, 2),
+            "coverage_basis": (
+                "Minimum of sector, industry and country classified-value "
+                "coverage; each numerator is measured against all positive "
+                "owned security holdings."
+            ),
+            "profile": {
+                "current_security_holdings_value": round(
+                    _holdings_value, 2
+                ),
+                "positive_owned_position_count": len(_positive_positions),
+                "largest_position_percent": (
+                    _position_rows[0]["weight_percent"]
+                    if _position_rows else None
+                ),
+                "top_five_positions_percent": round(
+                    sum(item["current_value"] for item in _position_rows[:5])
+                    / _holdings_value * 100.0,
+                    2,
+                ) if _holdings_value > 0 else None,
+                "position_hhi": round(
+                    sum(
+                        (
+                            safe_float(position.get("Current Value", 0))
+                            / _holdings_value * 100.0
+                        ) ** 2
+                        for position in _positive_positions
+                    ),
+                    2,
+                ) if _holdings_value > 0 else None,
+                "top_positions": _position_rows[:5],
+                "top_sector_exposures": _top_classifications(sector_values),
+                "top_industry_exposures": _top_classifications(industry_values),
+                "top_country_exposures": _top_classifications(country_values),
+                "classification_coverage": _coverage,
+                "cash_included": False,
+                "proposed_transactions_included": False,
+                "denominator_basis": (
+                    "All positive-value owned security positions; cash excluded."
+                ),
+                "classification_basis": (
+                    "Equity-only sector, industry and country numerators. "
+                    "ETF, non-equity and unknown asset-type values remain in "
+                    "the denominator but are not assumed classified."
+                ),
+                "observation_timestamp_available": False,
+            },
+            "missing_reason": _missing_reason,
+            "advisory_only": True,
+        }
+
+    portfolio_candidate_evidence = _build_portfolio_risk_evidence()
+
     # BUILD DESTINATIONS
     # ========================================================
 
@@ -8703,6 +11420,26 @@ def generate_portfolio_reallocation(
             and risk_score > 0
         )
 
+        legacy_risk_evidence = normalise_risk_evidence(
+            "COMPANY",
+            {
+                "value": (
+                    risk_score
+                    if risk_score_available
+                    else None
+                ),
+                "source": row.get("Risk Score Source"),
+                "as_of_date": row.get("Risk Score As Of Date"),
+                "retrieved_at": row.get("Risk Score Retrieved At"),
+                "coverage_percent": row.get(
+                    "Risk Score Coverage Percent"
+                ),
+                "missing_reason": (
+                    "Existing risk score lacks evidence provenance"
+                ),
+            },
+        )
+
         current_value = safe_float(
             row.get(
                 "Current Value",
@@ -8727,6 +11464,14 @@ def generate_portfolio_reallocation(
             )
         ).strip()
 
+        industry = str(
+            row.get("Industry") or row.get("industry") or ""
+        ).strip()
+        if industry.upper() in {
+            "N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"
+        }:
+            industry = ""
+
         asset_type = str(
             row.get(
                 "Asset Type",
@@ -8745,6 +11490,92 @@ def generate_portfolio_reallocation(
             portfolio_value
         )
 
+        # Candidate classification is distinct from current portfolio exposure.
+        candidate_sector_key = str(sector or "").strip()
+        candidate_industry_key = str(industry or "").strip()
+        candidate_country_key = str(
+            row.get("Country", row.get("country", "")) or ""
+        ).strip()
+
+        invalid_classifications = {
+            "N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"
+        }
+
+        sector_classified = (
+            bool(candidate_sector_key)
+            and candidate_sector_key.upper() not in invalid_classifications
+        )
+        industry_classified = (
+            bool(candidate_industry_key)
+            and candidate_industry_key.upper() not in invalid_classifications
+        )
+        country_classified = (
+            bool(candidate_country_key)
+            and candidate_country_key.upper() not in invalid_classifications
+        )
+
+        # Zero means no currently classified holdings in that category.
+        # It is not evidence of zero exposure where the portfolio is
+        # incompletely classified.
+        sector_evidence_value = (
+            sector_exposure_percent.get(candidate_sector_key, 0.0)
+            if sector_classified and exposure_portfolio_value > 0
+            else None
+        )
+        industry_evidence_value = (
+            industry_exposure_percent.get(candidate_industry_key, 0.0)
+            if industry_classified and exposure_portfolio_value > 0
+            else None
+        )
+
+        sector_risk_evidence = normalise_risk_evidence(
+            "SECTOR",
+            {
+                "value": sector_evidence_value,
+                "source": "CURRENT_OWNED_POSITION_EXPOSURE",
+                "as_of_date": None,
+                "retrieved_at": None,
+                "coverage_percent": sector_classification_coverage_percent,
+                "status": (
+                    "PARTIALLY_ASSESSED"
+                    if sector_evidence_value is not None
+                    else "UNASSESSED"
+                ),
+                "missing_reason": (
+                    "Current holdings snapshot has no independent "
+                    "observation timestamp; unclassified holdings may "
+                    "understate sector exposure."
+                    if sector_evidence_value is not None
+                    else "Candidate sector classification or portfolio "
+                    "exposure denominator is unavailable."
+                ),
+            },
+        )
+
+        industry_risk_evidence = normalise_risk_evidence(
+            "INDUSTRY",
+            {
+                "value": industry_evidence_value,
+                "source": "CURRENT_OWNED_POSITION_EXPOSURE",
+                "as_of_date": None,
+                "retrieved_at": None,
+                "coverage_percent": industry_classification_coverage_percent,
+                "status": (
+                    "PARTIALLY_ASSESSED"
+                    if industry_evidence_value is not None
+                    else "UNASSESSED"
+                ),
+                "missing_reason": (
+                    "Current holdings snapshot has no independent "
+                    "observation timestamp; unclassified holdings may "
+                    "understate industry exposure."
+                    if industry_evidence_value is not None
+                    else "Candidate industry classification or portfolio "
+                    "exposure denominator is unavailable."
+                ),
+            },
+        )
+
         destinations.append(
             {
                 "Ticker": ticker,
@@ -8761,6 +11592,11 @@ def generate_portfolio_reallocation(
                     if risk_score_available
                     else "UNKNOWN / NOT SCORED"
                 ),
+                "Risk Evidence": {
+                    "COMPANY": legacy_risk_evidence,
+                    "SECTOR": sector_risk_evidence,
+                    "INDUSTRY": industry_risk_evidence,
+                },
                 "Destination Priority": (
                     destination_priority
                 ),
@@ -8769,7 +11605,38 @@ def generate_portfolio_reallocation(
                 "Owned": owned,
                 "Final Decision": final_decision,
                 "Sector": sector,
+                "Industry": industry,
                 "Asset Type": asset_type,
+                "Current Sector Exposure %": sector_evidence_value,
+                "Current Industry Exposure %": industry_evidence_value,
+                "Current Country Exposure %": (
+                    country_exposure_percent.get(
+                        candidate_country_key,
+                        0.0
+                    )
+                    if country_classified and exposure_portfolio_value > 0
+                    else None
+                ),
+                "Sector Classification Coverage %": (
+                    sector_classification_coverage_percent
+                ),
+                "Industry Classification Coverage %": (
+                    industry_classification_coverage_percent
+                ),
+                "Country Classification Coverage %": (
+                    country_classification_coverage_percent
+                ),
+                "Exposure Classification Status": {
+                    "SECTOR": (
+                        "CLASSIFIED" if sector_classified else "UNKNOWN"
+                    ),
+                    "INDUSTRY": (
+                        "CLASSIFIED" if industry_classified else "UNKNOWN"
+                    ),
+                    "COUNTRY": (
+                        "CLASSIFIED" if country_classified else "UNKNOWN"
+                    ),
+                },
                 "Country": str(
                     row.get(
                         "Country",
@@ -8843,6 +11710,125 @@ def generate_portfolio_reallocation(
     # ========================================================
     # APPLY DESTINATION ALLOCATION WEIGHTS
     # ========================================================
+
+    # Build macro and market context once, before candidate assessment.
+    market_context = _build_market_context_assessment({
+        "recommendations": [],
+        "data_quality": {},
+    })
+
+    # MACRO evidence: reuse the existing composite regime assessment.
+    _macro_context = market_context.get(
+        "macro_risk_assessment", {}
+    )
+
+    _macro_context_status = _macro_context.get(
+        "status", "UNASSESSED"
+    )
+
+    _macro_context_coverage = _macro_context.get(
+        "coverage_percent", 0.0
+    )
+
+    _macro_context_value = {
+        "ADVERSE": 2.0,
+        "CAUTION": 1.0,
+        "NEUTRAL": 0.0,
+    }.get(_macro_context_status)
+
+    macro_candidate_evidence = normalise_risk_evidence(
+        "MACRO",
+        {
+            "value": _macro_context_value,
+            "source": (
+                "Existing three-indicator composite macro regime"
+            ),
+            "as_of_date": _macro_context.get("as_of"),
+            "retrieved_at": _macro_context.get(
+                "assessment_timestamp"
+            ),
+            "coverage_percent": _macro_context_coverage,
+            "missing_reason": (
+                _macro_context.get("summary")
+                or "Macro regime is unassessed"
+            ),
+        },
+    )
+
+    # MARKET evidence: preserve stress signals while measuring
+    # coverage using fully complete benchmark assessments only.
+    _market_context_indicators = market_context.get(
+        "market_stress_indicators", []
+    )
+
+    _market_context_assessed = [
+        item for item in _market_context_indicators
+        if isinstance(item, dict)
+        and item.get("Status") != "UNASSESSED"
+    ]
+
+    _market_context_complete = [
+        item for item in _market_context_indicators
+        if isinstance(item, dict)
+        and item.get("Status") != "UNASSESSED"
+        and item.get("Assessment Completeness") == "COMPLETE"
+    ]
+
+    _market_context_signal_count = sum(
+        item.get("Status") in {
+            "HIGH STRESS",
+            "ELEVATED STRESS",
+        }
+        for item in _market_context_assessed
+    )
+
+    _market_context_dates = [
+        str(item.get("Latest Observation"))
+        for item in _market_context_assessed
+        if item.get("Latest Observation")
+    ]
+
+    _market_context_expected = market_context.get(
+        "data_quality", {}
+    ).get(
+        "market_benchmarks_expected",
+        len(_market_context_indicators),
+    )
+
+    _market_context_coverage = (
+        len(_market_context_complete)
+        / _market_context_expected
+        * 100.0
+        if _market_context_expected
+        else 0.0
+    )
+
+    market_candidate_evidence = (
+        normalise_risk_evidence(
+            "MARKET",
+            {
+                "value": float(_market_context_signal_count),
+                "source": (
+                    "Count of assessed broad-market stress signals; "
+                    "coverage based on complete benchmark assessments"
+                ),
+                "as_of_date": (
+                    max(_market_context_dates)
+                    if _market_context_dates
+                    else None
+                ),
+                "retrieved_at": (
+                    pd.Timestamp.now(tz="UTC").isoformat()
+                ),
+                "coverage_percent": _market_context_coverage,
+                "missing_reason": (
+                    "No complete broad-market benchmark assessments"
+                ),
+            },
+        )
+        if _market_context_assessed
+        else normalise_risk_evidence("MARKET")
+    )
 
     eligible_destinations = []
 
@@ -8992,6 +11978,26 @@ def generate_portfolio_reallocation(
         )
 
         destination_copy = destination.copy()
+
+        _candidate_risk_evidence = dict(
+            destination_copy.get("Risk Evidence") or {}
+        )
+        _candidate_risk_evidence["MACRO"] = (
+            macro_candidate_evidence.copy()
+        )
+        _candidate_risk_evidence["MARKET"] = (
+            market_candidate_evidence.copy()
+        )
+        _candidate_risk_evidence["PORTFOLIO"] = (
+            portfolio_candidate_evidence.copy()
+        )
+        destination_copy["Risk Evidence"] = (
+            _candidate_risk_evidence
+        )
+
+        destination_copy["Risk Evidence Summary"] = (
+            summarise_risk_evidence(_candidate_risk_evidence)
+        )
 
         destination_copy[
             "Allocation Weight"
@@ -10542,6 +13548,7 @@ def generate_portfolio_reallocation(
         market_intelligence=market_intelligence,
         financial_statements_by_ticker=financial_statements_by_ticker,
         reallocation=reallocation_df,
+        market_context=market_context,
     )
 
     # --------------------------------------------------------
