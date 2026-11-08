@@ -31,6 +31,7 @@ All explanations are based on values already calculated by the
 Portfolio Reallocation Engine.
 """
 
+import math
 import pandas as pd
 
 
@@ -522,9 +523,138 @@ def build_reallocation_audit(
                     "capacity"
                 )
 
+        # Flatten the six-dimension evidence for the report.
+        # Completeness is descriptive; it is not a risk score.
+        risk_summary = audit_destination.get(
+            "Risk Evidence Summary"
+        )
+        if not isinstance(risk_summary, dict):
+            risk_summary = {}
+
+        risk_evidence = audit_destination.get("Risk Evidence")
+        if not isinstance(risk_evidence, dict):
+            risk_evidence = {}
+
+        summary_statuses = risk_summary.get("dimension_statuses", {})
+        summary_coverage = risk_summary.get("dimension_coverage_percent", {})
+        summary_reasons = risk_summary.get("dimension_missing_reasons", {})
+
+        if not isinstance(summary_statuses, dict):
+            summary_statuses = {}
+        if not isinstance(summary_coverage, dict):
+            summary_coverage = {}
+        if not isinstance(summary_reasons, dict):
+            summary_reasons = {}
+
+        risk_dimensions = (
+            "COMPANY", "INDUSTRY", "SECTOR",
+            "MACRO", "MARKET", "PORTFOLIO",
+        )
+        risk_audit_fields = {}
+        risk_missing_reasons = []
+        assessed_dimensions = 0
+        partially_assessed_dimensions = 0
+        fully_assessed_dimensions = 0
+
+        for dimension in risk_dimensions:
+            evidence_record = risk_evidence.get(dimension, {})
+            if not isinstance(evidence_record, dict):
+                evidence_record = {}
+
+            dimension_status = str(
+                summary_statuses.get(
+                    dimension,
+                    evidence_record.get("status", "UNASSESSED"),
+                ) or "UNASSESSED"
+            ).strip().upper()
+
+            dimension_coverage = summary_coverage.get(
+                dimension,
+                evidence_record.get("coverage_percent"),
+            )
+            try:
+                dimension_coverage = float(dimension_coverage)
+                if (
+                    not math.isfinite(dimension_coverage)
+                    or not 0.0 <= dimension_coverage <= 100.0
+                ):
+                    dimension_coverage = None
+            except (TypeError, ValueError, OverflowError):
+                dimension_coverage = None
+
+            missing_reason = (
+                summary_reasons.get(dimension)
+                or evidence_record.get("missing_reason")
+            )
+
+            risk_audit_fields[
+                f"{dimension} Evidence Status"
+            ] = dimension_status
+
+            risk_audit_fields[
+                f"{dimension} Evidence Coverage %"
+            ] = dimension_coverage
+
+            if dimension_status in ("ASSESSED", "PARTIALLY_ASSESSED"):
+                assessed_dimensions += 1
+            if dimension_status == "ASSESSED":
+                fully_assessed_dimensions += 1
+            elif dimension_status == "PARTIALLY_ASSESSED":
+                partially_assessed_dimensions += 1
+
+            if missing_reason:
+                risk_missing_reasons.append(
+                    f"{dimension}: {missing_reason}"
+                )
+            elif dimension_status == "UNASSESSED":
+                risk_missing_reasons.append(
+                    f"{dimension}: No evidence record supplied"
+                )
+
+        evidence_availability = risk_summary.get(
+            "evidence_availability_percent"
+        )
+        fully_assessed_percent = risk_summary.get(
+            "fully_assessed_percent"
+        )
+
+        if evidence_availability is None:
+            evidence_availability = round(
+                assessed_dimensions / len(risk_dimensions) * 100.0,
+                2,
+            )
+
+        if fully_assessed_percent is None:
+            fully_assessed_percent = round(
+                fully_assessed_dimensions / len(risk_dimensions) * 100.0,
+                2,
+            )
+
+        risk_audit_fields.update({
+            "Risk Evidence Availability %": evidence_availability,
+            "Risk Fully Assessed %": fully_assessed_percent,
+            "Risk Evidence Missing Reasons": " | ".join(
+                risk_missing_reasons
+            ),
+            "Risk-Adjusted Shadow Priority": (
+                "NOT CALIBRATED — NO RANK ADJUSTMENT"
+            ),
+            "Risk Overlay Explanation": (
+                "SHADOW ONLY. Evidence completeness is displayed for "
+                "review; no calibrated risk-to-priority mapping exists. "
+                "No effect on eligibility, allocation weight, capacity "
+                "or transactions."
+            ),
+        })
+
         destination_rows.append(
             {
                 "Ticker": ticker,
+                "Base Destination Priority": audit_destination.get(
+                    "Destination Priority",
+                    destination.get("Destination Priority"),
+                ),
+                **risk_audit_fields,
                 "Name": destination.get(
                     "Name",
                     ticker
@@ -534,18 +664,34 @@ def build_reallocation_audit(
                     score,
                     2
                 ),
-                "Risk Score": destination.get(
+                "Technical Trend Component": destination.get(
                     "Risk Score"
                 ),
-                "Risk Score Available": bool(
+                "Technical Trend Component Present": bool(
                     destination.get(
                         "Risk Score Available",
                         False
                     )
                 ),
-                "Risk Score Status": destination.get(
+                "Technical Trend Component Status": destination.get(
                     "Risk Score Status",
-                    "UNKNOWN / NOT SCORED"
+                    "NO NUMERIC COMPONENT"
+                ),
+                "Technical Trend Component Provenance Status": destination.get(
+                    "Risk Score Provenance Status",
+                    "NOT DOCUMENTED"
+                ),
+                "Technical Trend Component Provenance": destination.get(
+                    "Risk Score Provenance",
+                    ""
+                ),
+                "Company Evidence Coverage Basis": destination.get(
+                    "Company Evidence Coverage Basis",
+                    ""
+                ),
+                "Company Evidence Summary": destination.get(
+                    "Company Evidence Summary",
+                    ""
                 ),
                 "Sector": destination.get(
                     "Sector",

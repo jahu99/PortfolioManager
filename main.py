@@ -2489,6 +2489,78 @@ def main():
             str(exc),
         )
 
+    # ------------------------------------------------------------
+    # SHADOW MACRO / MARKET RISK EVIDENCE PRICE REFRESH
+    #
+    # Refresh source caches here. The risk assessment itself remains
+    # cache-only and does not perform network retrieval.
+    # ------------------------------------------------------------
+
+    print("\\nREFRESHING SHADOW RISK EVIDENCE PRICE HISTORY")
+
+    try:
+        from data import market_data
+
+        risk_evidence_refresh_groups = {
+            # The macro composite reads these exact 1y cache files.
+            "1y": ["^TNX", "CL=F", "HYG", "LQD"],
+
+            # Broad-market stress assessment needs longer history.
+            "2y": ["^GSPC", "QQQ", "^VIX"],
+        }
+
+        risk_refresh_current = 0
+        risk_refresh_non_current = 0
+        risk_refresh_unavailable = 0
+
+        for period, tickers in risk_evidence_refresh_groups.items():
+            for ticker in tickers:
+                try:
+                    prices = market_data.get_stock_data(
+                        ticker,
+                        period=period,
+                        force_refresh=(ticker == "^VIX"),
+                    )
+
+                    if (
+                        isinstance(prices, pd.DataFrame)
+                        and not prices.empty
+                        and market_data._cache_is_current(prices)
+                    ):
+                        risk_refresh_current += 1
+
+                    elif isinstance(prices, pd.DataFrame) and not prices.empty:
+                        risk_refresh_non_current += 1
+
+                    else:
+                        risk_refresh_unavailable += 1
+
+                except Exception as exc:
+                    risk_refresh_unavailable += 1
+                    print(
+                        "SHADOW RISK PRICE REFRESH FAILED:",
+                        ticker,
+                        type(exc).__name__,
+                        str(exc),
+                    )
+
+        print(
+            "SHADOW RISK EVIDENCE PRICE REFRESH:",
+            risk_refresh_current,
+            "usable (date-current, OHLC-valid);",
+            risk_refresh_non_current,
+            "non-current;",
+            risk_refresh_unavailable,
+            "unavailable or failed.",
+        )
+
+    except Exception as exc:
+        print(
+            "SHADOW RISK EVIDENCE REFRESH ERROR — continuing:",
+            type(exc).__name__,
+            str(exc),
+        )
+
     print(
         "\nGENERATING PORTFOLIO REALLOCATION"
     )

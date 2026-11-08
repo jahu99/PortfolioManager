@@ -52,8 +52,10 @@ Core principles
 
 import os
 import math
-
+from pathlib import Path
 import pandas as pd
+import json
+
 
 
 from config.investment_config import (
@@ -1968,8 +1970,9 @@ Core principles
 
 import os
 import math
-
+import sqlite3
 import pandas as pd
+from pathlib import Path
 
 
 from config.investment_config import (
@@ -4158,8 +4161,27 @@ def _build_market_context_assessment(assessment):
                 continue
             prices = prices.copy()
             prices.index = pd.to_datetime(prices.index)
+
+            if prices.index.tz is not None:
+                prices.index = prices.index.tz_localize(None)
+
             prices = prices.sort_index()
 
+            # Use completed sessions only. Do not let an intraday
+            # observation enter the SHADOW closing-price assessment.
+            if latest_expected_market_session is not None:
+                prices = prices.loc[
+                    prices.index.normalize()
+                    <= latest_expected_market_session
+                ]
+
+            if prices.empty:
+                indicator["Evidence"] = (
+                    "No observations available through the latest "
+                    "expected completed market session."
+                )
+                assessment["market_stress_indicators"].append(indicator)
+                continue
             price_column = (
                 "Adj Close"
                 if ticker != "^VIX" and "Adj Close" in prices.columns
@@ -4930,7 +4952,7 @@ def _build_market_context_assessment(assessment):
             "advisory_only": True,
         }
 
-        empty = [], []
+        empty = [], [], []
 
         if not os.path.isfile(universe_path):
             result["reason"] = (
@@ -5235,6 +5257,126 @@ def _build_market_context_assessment(assessment):
             )
             return result, *empty
 
+        # ------------------------------------------------------------
+        # INDUSTRY CLASSIFICATION — LOCAL CACHE, THEN DATABASE FALLBACK
+        # ------------------------------------------------------------
+        # The membership CSV remains authoritative for active membership
+        # and sector. Industry is sourced separately.
+        #
+        # Cache file mtime is recorded as file provenance only. It is not
+        # treated as the date on which the industry classification was
+        # observed or verified.
+        industry_classifications = {}
+        industry_cache_dir = Path("data/cache/fundamentals")
+
+        def _valid_industry(value):
+            value = str(value or "").strip()
+            if value.upper() in {
+                "", "N/A", "NA", "UNKNOWN", "NONE", "NULL", "ETF", "ETP"
+            }:
+                return ""
+            return value
+
+        # Primary source: existing fundamentals JSON cache.
+        for ticker in active["ticker"].astype(str).str.upper():
+            cache_file = industry_cache_dir / f"{ticker}.json"
+            if not cache_file.is_file():
+                continue
+            try:
+                with cache_file.open("r", encoding="utf-8") as handle:
+                    cached = json.load(handle)
+                industry = _valid_industry(cached.get("Industry"))
+                if industry:
+                    industry_classifications[ticker] = {
+                        "industry": industry,
+                        "source": "FUNDAMENTALS_CACHE",
+                        "cache_file_modified_at": datetime.fromtimestamp(
+                            cache_file.stat().st_mtime
+                        ).isoformat(timespec="seconds"),
+                        "classification_observation_date": None,
+                    }
+            except (OSError, ValueError, TypeError):
+                continue
+
+        # Fallback: latest non-empty industry value per ticker from the
+        # existing recommendation evidence table.
+        missing_industry_tickers = (
+            set(active["ticker"].astype(str).str.upper())
+            - set(industry_classifications)
+        )
+        if missing_industry_tickers:
+            database_path = Path("data/portfolio_manager.db")
+            if database_path.is_file():
+                try:
+                    with sqlite3.connect(
+                        f"file:{database_path.resolve()}?mode=ro",
+                        uri=True,
+                    ) as connection:
+                        placeholders = ",".join(
+                            "?" for _ in missing_industry_tickers
+                        )
+                        query = (
+                            "SELECT ticker, industry "
+                            "FROM recommendation_evidence "
+                            "WHERE ticker IS NOT NULL "
+                            "AND TRIM(ticker) <> '' "
+                            "AND industry IS NOT NULL "
+                            "AND TRIM(industry) <> '' "
+                            f"AND UPPER(TRIM(ticker)) IN ({placeholders}) "
+                            "ORDER BY capture_date DESC, id DESC"
+                        )
+                        rows = connection.execute(
+                            query,
+                            sorted(missing_industry_tickers),
+                        ).fetchall()
+
+                    for ticker, raw_industry in rows:
+                        ticker = str(ticker or "").strip().upper()
+                        industry = _valid_industry(raw_industry)
+                        if ticker and industry and ticker not in industry_classifications:
+                            industry_classifications[ticker] = {
+                                "industry": industry,
+                                "source": "RECOMMENDATION_EVIDENCE",
+                                "cache_file_modified_at": None,
+                                "classification_observation_date": None,
+                            }
+                except sqlite3.Error:
+                    # Missing or unavailable fallback data must remain
+                    # visible as unclassified, not abort market breadth.
+                    pass
+
+        result["industry_classification_coverage"] = {
+            "active_constituents_expected": int(len(active)),
+            "classified_constituents": int(len(industry_classifications)),
+            "unclassified_constituents": int(
+                len(active) - len(industry_classifications)
+            ),
+            "coverage_percent": round(
+                len(industry_classifications) / len(active) * 100.0, 2
+            ) if len(active) else None,
+            "fundamentals_cache_classifications": sum(
+                item["source"] == "FUNDAMENTALS_CACHE"
+                for item in industry_classifications.values()
+            ),
+            "database_fallback_classifications": sum(
+                item["source"] == "RECOMMENDATION_EVIDENCE"
+                for item in industry_classifications.values()
+            ),
+            "classification_observation_date": None,
+            "advisory_only": True,
+        }
+
+        result["industry_classification_provenance"] = [
+            {
+                "Ticker": ticker,
+                "Industry": details["industry"],
+                "Classification Source": details["source"],
+                "Cache File Modified At": details["cache_file_modified_at"],
+                "Classification Observation Date": None,
+            }
+            for ticker, details in sorted(industry_classifications.items())
+        ]
+
         result["active_constituents_expected"] = int(len(active))
         result["universe_source"] = sorted(
             active["source"].dropna().astype(str).unique().tolist()
@@ -5258,12 +5400,18 @@ def _build_market_context_assessment(assessment):
         for record in active.itertuples(index=False):
             ticker = str(getattr(record, "ticker")).strip().upper()
             sector = str(getattr(record, "sector") or "UNCLASSIFIED").strip()
+            industry_details = industry_classifications.get(ticker, {})
+            industry = industry_details.get("industry") or "UNCLASSIFIED"
+            industry_source = industry_details.get("source", "UNCLASSIFIED")
+
 
             closes, error, provenance = _leadership_series(ticker)
 
             provenance_row = dict(provenance)
             provenance_row["Ticker"] = ticker
             provenance_row["Sector"] = sector
+            provenance_row["Industry"] = industry
+            provenance_row["Industry Classification Source"] = industry_source
 
             if closes is None:
                 provenance_row["Breadth Eligibility"] = "UNAVAILABLE"
@@ -5356,6 +5504,8 @@ def _build_market_context_assessment(assessment):
             constituent_rows.append({
                 "Ticker": ticker,
                 "Sector": sector or "UNCLASSIFIED",
+                "Industry": industry,
+                "Industry Classification Source": industry_source,
                 "Price Available": True,
                 "Advance State": advance_state,
                 "Above 50D MA": above_50,
@@ -5515,6 +5665,112 @@ def _build_market_context_assessment(assessment):
             },
         )
 
+        # ------------------------------------------------------------
+        # INDUSTRY BREADTH — SAME CONSTITUENT PRICE OBSERVATIONS
+        # ------------------------------------------------------------
+        # Expected industry population comes from all active classified
+        # constituents, including those without usable prices.
+        industry_expected = {}
+        for ticker in active["ticker"].astype(str).str.upper():
+            details = industry_classifications.get(ticker, {})
+            industry = details.get("industry") or "UNCLASSIFIED"
+            industry_expected[industry] = (
+                industry_expected.get(industry, 0) + 1
+            )
+
+        industry_groups = {}
+        for row in constituent_rows:
+            industry = row.get("Industry") or "UNCLASSIFIED"
+            industry_groups.setdefault(industry, []).append(row)
+
+        industry_rows = []
+        for industry, expected_count in sorted(industry_expected.items()):
+            rows = industry_groups.get(industry, [])
+            ad_rows = [
+                row for row in rows
+                if row.get("Advance State") is not None
+            ]
+            above_50_rows = [
+                row for row in rows
+                if row.get("Above 50D MA") is not None
+            ]
+            above_200_rows = [
+                row for row in rows
+                if row.get("Above 200D MA") is not None
+            ]
+            returns_20 = [
+                row["Return 20 Sessions %"] for row in rows
+                if row.get("Return 20 Sessions %") is not None
+            ]
+            returns_60 = [
+                row["Return 60 Sessions %"] for row in rows
+                if row.get("Return 60 Sessions %") is not None
+            ]
+
+            advances = sum(
+                row["Advance State"] == "ADVANCE" for row in ad_rows
+            )
+            declines = sum(
+                row["Advance State"] == "DECLINE" for row in ad_rows
+            )
+            above_50_count = sum(
+                row["Above 50D MA"] is True for row in above_50_rows
+            )
+            above_200_count = sum(
+                row["Above 200D MA"] is True for row in above_200_rows
+            )
+
+            industry_classified_count = (
+                expected_count if industry != "UNCLASSIFIED" else 0
+            )
+            price_available = len(rows)
+
+            industry_rows.append({
+                "Industry": industry,
+                "As Of": as_of.strftime("%Y-%m-%d"),
+                "Active Constituents": int(expected_count),
+                "Classified Constituents": int(industry_classified_count),
+                "Price History Available": int(price_available),
+                "Price History Missing": int(
+                    max(0, expected_count - price_available)
+                ),
+                "Price Coverage %": round(
+                    price_available / expected_count * 100.0, 2
+                ) if expected_count else None,
+                "Advancers": advances,
+                "Decliners": declines,
+                "Net Advances": (
+                    advances - declines if ad_rows else None
+                ),
+                "Above 50D MA %": round(
+                    above_50_count / len(above_50_rows) * 100.0, 2
+                ) if above_50_rows else None,
+                "Above 50D MA Coverage": len(above_50_rows),
+                "Above 200D MA %": round(
+                    above_200_count / len(above_200_rows) * 100.0, 2
+                ) if above_200_rows else None,
+                "Above 200D MA Coverage": len(above_200_rows),
+                "Equal-Weight Return 20 Sessions %": round(
+                    sum(returns_20) / len(returns_20), 2
+                ) if returns_20 else None,
+                "Return 20 Sessions Coverage": len(returns_20),
+                "Equal-Weight Return 60 Sessions %": round(
+                    sum(returns_60) / len(returns_60), 2
+                ) if returns_60 else None,
+                "Return 60 Sessions Coverage": len(returns_60),
+                "Status": (
+                    "ASSESSED — FULL PRICE COVERAGE"
+                    if expected_count > 0
+                    and price_available == expected_count
+                    else (
+                        "ASSESSED — PARTIAL PRICE COVERAGE"
+                        if price_available > 0
+                        else "UNASSESSED — NO USABLE PRICES"
+                    )
+                ),
+                "Advisory Only": True,
+            })
+
         sector_rows = []
         sector_groups = {}
 
@@ -5655,8 +5911,8 @@ def _build_market_context_assessment(assessment):
                 "Return 60 Sessions Coverage": len(returns_60),
                 "Status": (
                     "ASSESSED — FULL PRICE COVERAGE"
-                    if len(sector_price_rows) == sector_expected
-                    and result["invalid_universe_rows"] == 0
+                    if sector_expected > 0
+                    and len(sector_price_rows) == sector_expected
                     else "ASSESSED — PARTIAL PRICE COVERAGE"
                 ),
                 "Advisory Only": True,
@@ -5690,15 +5946,22 @@ def _build_market_context_assessment(assessment):
                 "is reported separately."
             )
 
-        return result, breadth_rows, sector_rows
+        return result, breadth_rows, sector_rows, industry_rows
 
-    breadth_assessment, breadth_rows, sector_rows = (
+    breadth_assessment, breadth_rows, sector_rows, industry_rows = (
         _build_constituent_market_breadth()
     )
 
     assessment["market_breadth_assessment"] = breadth_assessment
     assessment["market_breadth_indicators"] = breadth_rows
     assessment["market_sector_breadth"] = sector_rows
+    assessment["market_industry_breadth"] = industry_rows
+    assessment["industry_classification_coverage"] = (
+        breadth_assessment.get("industry_classification_coverage", {})
+    )
+    assessment["industry_classification_provenance"] = (
+        breadth_assessment.get("industry_classification_provenance", [])
+    )
 
     assessment["data_quality"]["market_breadth_assessed"] = (
         breadth_assessment["status"].startswith("ASSESSED")
@@ -5774,6 +6037,159 @@ def _build_market_context_assessment(assessment):
     macro_assessment = _build_macro_regime_assessment()
     assessment["macro_risk_assessment"] = macro_assessment
     assessment["macro_risk_status"] = macro_assessment["status"]
+
+    # --------------------------------------------------------
+    # EQUITY MARKET RISK OVERLAY — SHADOW / ADVISORY ONLY
+    # Uses existing benchmark stress classifications.
+    # --------------------------------------------------------
+
+    _equity_benchmark_status = assessment.get(
+        "market_stress_status", "UNASSESSED"
+    )
+    if not isinstance(_equity_benchmark_status, str):
+        _equity_benchmark_status = "UNASSESSED"
+    _equity_benchmark_status = _equity_benchmark_status.strip()
+
+    _equity_breadth = assessment.get("market_breadth_assessment", {})
+    if not isinstance(_equity_breadth, dict):
+        _equity_breadth = {}
+
+    _equity_breadth_rows = assessment.get("market_breadth_indicators", [])
+    if not isinstance(_equity_breadth_rows, list):
+        _equity_breadth_rows = []
+
+    _equity_sector_rows = assessment.get("market_sector_breadth", [])
+    if not isinstance(_equity_sector_rows, list):
+        _equity_sector_rows = []
+
+    _equity_leadership_rows = assessment.get(
+        "market_leadership_indicators", []
+    )
+    if not isinstance(_equity_leadership_rows, list):
+        _equity_leadership_rows = []
+
+    _equity_data_quality = assessment.get("data_quality", {})
+    if not isinstance(_equity_data_quality, dict):
+        _equity_data_quality = {}
+
+    _equity_benchmark_coverage = _equity_data_quality.get(
+        "market_stress_coverage_status", "UNAVAILABLE"
+    )
+
+    if _equity_benchmark_status.startswith("STRESS SIGNAL DETECTED"):
+        _equity_risk_status = "STRESS SIGNAL DETECTED"
+    elif _equity_benchmark_status == "NO PROVISIONAL STRESS THRESHOLD BREACH":
+        _equity_risk_status = "NO PROVISIONAL STRESS THRESHOLD BREACH"
+    elif _equity_benchmark_status.startswith("PARTIALLY ASSESSED"):
+        _equity_risk_status = (
+            "PARTIALLY ASSESSED — NO BREACH IN AVAILABLE BENCHMARKS"
+        )
+    else:
+        _equity_risk_status = "UNASSESSED"
+
+    _equity_evidence = [
+        {
+            "Evidence Category": "Benchmark stress",
+            "Assessment": _equity_benchmark_status,
+            "Coverage": _equity_benchmark_coverage,
+            "Detail": (
+                "Existing S&P 500, Nasdaq-100 and VIX stress "
+                "assessments and thresholds."
+            ),
+        },
+        {
+            "Evidence Category": "Market breadth",
+            "Assessment": _equity_breadth.get("status", "UNASSESSED"),
+            "Coverage": f"{len(_equity_breadth_rows)} indicators supplied",
+            "Detail": _equity_breadth.get("reason"),
+        },
+        {
+            "Evidence Category": "Sector breadth and rotation",
+            "Assessment": (
+                "DIAGNOSTIC — NO ADDITIONAL STRESS THRESHOLDS APPLIED"
+                if _equity_sector_rows else "UNASSESSED"
+            ),
+            "Coverage": f"{len(_equity_sector_rows)} sector records supplied",
+            "Detail": (
+                "Sector advances, declines, moving-average breadth "
+                "and price coverage are supporting evidence."
+            ),
+        },
+        {
+            "Evidence Category": "Market leadership",
+            "Assessment": (
+                "DIAGNOSTIC — NO ADDITIONAL STRESS THRESHOLDS APPLIED"
+                if _equity_leadership_rows else "UNASSESSED"
+            ),
+            "Coverage": f"{len(_equity_leadership_rows)} leadership records supplied",
+            "Detail": "Relative-strength observations are diagnostic only.",
+        },
+    ]
+
+    _equity_coverage = {
+        "Benchmark Coverage": _equity_benchmark_coverage,
+        "Breadth Assessment": _equity_breadth.get("status", "UNASSESSED"),
+        "Breadth Indicator Count": len(_equity_breadth_rows),
+        "Sector Record Count": len(_equity_sector_rows),
+        "Leadership Record Count": len(_equity_leadership_rows),
+        "Advisory Only": True,
+    }
+
+    _macro_status = assessment.get("macro_risk_status", "UNASSESSED")
+    if not isinstance(_macro_status, str):
+        _macro_status = "UNASSESSED"
+
+    _equity_supporting_context = (
+        f" Constituent breadth is "
+        f"{_equity_breadth.get('status', 'UNASSESSED')}; "
+        f"{len(_equity_sector_rows)} sector and "
+        f"{len(_equity_leadership_rows)} leadership records provide "
+        "supporting evidence on market participation and rotation. "
+        "These diagnostics do not change the benchmark classification."
+    )
+
+    if (
+        _macro_status.strip().upper() == "NEUTRAL"
+        and _equity_risk_status == "STRESS SIGNAL DETECTED"
+    ):
+        _overall_risk_interpretation = (
+            "EQUITY MARKET STRESS DESPITE NEUTRAL MACRO REGIME — "
+            "macro proxies are neutral, but existing equity benchmark "
+            "stress thresholds have been breached."
+            + _equity_supporting_context
+        )
+    elif _equity_risk_status == "STRESS SIGNAL DETECTED":
+        _overall_risk_interpretation = (
+            "EQUITY MARKET STRESS DETECTED — existing benchmark "
+            "stress thresholds have been breached."
+            + _equity_supporting_context
+        )
+    elif _equity_risk_status.startswith("PARTIALLY ASSESSED"):
+        _overall_risk_interpretation = (
+            "EQUITY MARKET RISK PARTIALLY ASSESSED — coverage is "
+            "incomplete; absence of a detected breach is inconclusive."
+        )
+    elif _equity_risk_status == "NO PROVISIONAL STRESS THRESHOLD BREACH":
+        _overall_risk_interpretation = (
+            "NO PROVISIONAL EQUITY BENCHMARK STRESS THRESHOLD BREACH — "
+            "this does not mean market risk is absent."
+        )
+    else:
+        _overall_risk_interpretation = (
+            "EQUITY MARKET RISK UNASSESSED — insufficient benchmark "
+            "evidence for a reliable classification."
+        )
+
+    assessment["equity_market_risk_status"] = _equity_risk_status
+    assessment["equity_market_risk_evidence"] = _equity_evidence
+    assessment["equity_market_risk_coverage"] = _equity_coverage
+    assessment["overall_risk_interpretation"] = (
+        _overall_risk_interpretation
+    )
+    assessment.setdefault("data_quality", {})[
+        "equity_market_risk_assessed"
+    ] = _equity_risk_status != "UNASSESSED"
+
     assessment["data_quality"]["macro_risk_assessed"] = (
         macro_assessment["status"] != "UNASSESSED"
     )
@@ -9073,9 +9489,11 @@ def _build_market_risk_assessment(
         )
         assessment["individual_stock_assessments"].append({
             "ticker": ticker,
+            "is_current_position": ticker in current_positions,
             "portfolio_roles": ", ".join(roles),
             "final_decision": decision,
             "current_value": round(safe_float(position.get("value", 0)), 2),
+            "industry": str(position.get("industry") or "").strip(),
             "risk_status": status,
             "risk_severity": severity,
             "recommended_action": action,
@@ -9131,6 +9549,47 @@ def _build_market_risk_assessment(
 
             price_risk = flag.get("price_risk") or {}
             price_severity = price_risk.get("severity")
+
+            price_status = str(
+                price_risk.get("status") or "UNASSESSED"
+            ).strip().upper()
+
+            if price_status != "ASSESSED":
+                price_context = []
+
+                freshness = price_risk.get("freshness")
+                observation_date = price_risk.get("observation_date")
+
+                if freshness:
+                    price_context.append(f"freshness: {freshness}")
+
+                if observation_date:
+                    price_context.append(
+                        f"latest observation: {observation_date}"
+                    )
+
+                price_detail = "; ".join(
+                    str(reason)
+                    for reason in (price_risk.get("reasons") or [])
+                )
+
+                assessment_reason = (
+                    f"{role} {ticker} price-risk evidence is "
+                    f"{price_status}"
+                )
+
+                if price_context:
+                    assessment_reason += (
+                        " (" + ", ".join(price_context) + ")"
+                    )
+
+                if price_detail:
+                    assessment_reason += ": " + price_detail
+
+                assessment_required_reasons.append(
+                    assessment_reason
+                )
+
             if (
                 price_risk.get("status") == "ASSESSED"
                 and price_severity in {"REVIEW", "HIGH"}
@@ -10149,6 +10608,296 @@ def _build_market_risk_assessment(
         "currency. No FX conversion, composite resilience score, "
         "production scoring or portfolio decision change is made."
     )
+
+
+    # ------------------------------------------------------------
+    # INDUSTRY BREADTH AND PORTFOLIO INDUSTRY RISK
+    # SHADOW / ADVISORY ONLY
+    # ------------------------------------------------------------
+
+    _industry_classification_by_ticker = {}
+
+    for _classification in assessment.get(
+        "industry_classification_provenance", []
+    ):
+        if not isinstance(_classification, dict):
+            continue
+
+        _classification_lookup = {
+            str(key).strip().lower(): value
+            for key, value in _classification.items()
+        }
+
+        _classification_ticker = clean_ticker(
+            _classification_lookup.get("ticker", "")
+        )
+
+        _classification_industry = str(
+            _classification_lookup.get("industry") or ""
+        ).strip()
+
+        if _classification_ticker and _classification_industry:
+            if _classification_industry.upper() not in (
+                "UNKNOWN", "N/A", "NA", "NONE", "NULL",
+                "UNCLASSIFIED",
+            ):
+                _industry_classification_by_ticker[
+                    _classification_ticker
+                ] = _classification_industry
+
+    _portfolio_industry_groups = {}
+
+    _industry_assessed_value = 0.0
+    _industry_classified_value = 0.0
+    _industry_unclassified_value = 0.0
+
+    for _stock_assessment in assessment.get(
+        "individual_stock_assessments", []
+    ):
+        if not isinstance(_stock_assessment, dict):
+            continue
+
+        _stock_ticker = clean_ticker(
+            _stock_assessment.get("ticker", "")
+        )
+
+        if not _stock_ticker:
+            continue
+
+        # Portfolio industry risk includes current holdings only.
+        # Non-held recommendation candidates remain in the
+        # individual stock assessments but are excluded here.
+        if not _stock_assessment.get("is_current_position", False):
+            continue
+
+        _stock_value = max(
+            0.0,
+            safe_float(
+                _stock_assessment.get("current_value", 0)
+            ),
+        )
+
+        _industry_assessed_value += _stock_value
+
+        _stock_industry = str(
+            _stock_assessment.get("industry")
+            or _industry_classification_by_ticker.get(_stock_ticker, "")
+            or ""
+        ).strip()
+
+        if _stock_industry.upper() in {
+            "", "UNKNOWN", "UNCLASSIFIED", "N/A", "NONE"
+        }:
+            _stock_industry = "UNCLASSIFIED"
+
+        if _stock_industry == "UNCLASSIFIED":
+            _industry_unclassified_value += _stock_value
+        else:
+            _industry_classified_value += _stock_value
+
+        _group = _portfolio_industry_groups.setdefault(
+            _stock_industry,
+            {
+                "Industry": _stock_industry,
+                "Assessed Holdings": 0,
+                "Assessed Value": 0.0,
+                "Review Required": 0,
+                "High Severity": 0,
+                "Medium Severity": 0,
+                "Other Risk Status": 0,
+                "Tickers": [],
+            },
+        )
+
+        _group["Assessed Holdings"] += 1
+        _group["Assessed Value"] += _stock_value
+        _group["Tickers"].append(_stock_ticker)
+
+        _risk_status = str(
+            _stock_assessment.get("risk_status") or ""
+        ).upper()
+
+        _risk_severity = str(
+            _stock_assessment.get("risk_severity") or ""
+        ).upper()
+
+        if _risk_status == "REVIEW_REQUIRED":
+            _group["Review Required"] += 1
+        else:
+            _group["Other Risk Status"] += 1
+
+        if _risk_severity == "HIGH":
+            _group["High Severity"] += 1
+        elif _risk_severity == "MEDIUM":
+            _group["Medium Severity"] += 1
+
+    _portfolio_industry_rows = []
+
+    for _industry_name, _group in sorted(
+        _portfolio_industry_groups.items(),
+        key=lambda item: item[1]["Assessed Value"],
+        reverse=True,
+    ):
+        _group_value = _group["Assessed Value"]
+
+        _group["Assessed Value"] = round(_group_value, 2)
+
+        _group["Share of Assessed Holdings %"] = (
+            round(
+                _group_value / _industry_assessed_value * 100,
+                2,
+            )
+            if _industry_assessed_value > 0
+            else None
+        )
+
+        _group["Advisory Only"] = True
+        _group["Assessment Basis"] = (
+            "Individual stock risk assessments only; "
+            "not total portfolio exposure."
+        )
+
+        _group["Tickers"] = ", ".join(
+            sorted(_group["Tickers"])
+        )
+
+        _portfolio_industry_rows.append(_group)
+
+    _industry_classification_coverage = (
+        round(
+            _industry_classified_value
+            / _industry_assessed_value * 100,
+            2,
+        )
+        if _industry_assessed_value > 0
+        else None
+    )
+
+
+    # ------------------------------------------------------------
+    # CURRENT-POSITION ASSESSMENT COVERAGE (SHADOW / ADVISORY)
+    # ------------------------------------------------------------
+    _current_position_tickers = {
+        clean_ticker(ticker)
+        for ticker in current_positions
+        if clean_ticker(ticker)
+    }
+
+    _assessed_position_tickers = {
+        clean_ticker(row.get("ticker", ""))
+        for row in assessment.get("individual_stock_assessments", [])
+        if isinstance(row, dict)
+        and row.get("is_current_position", False)
+        and clean_ticker(row.get("ticker", ""))
+    }
+
+    _missing_assessment_tickers = (
+        _current_position_tickers - _assessed_position_tickers
+    )
+
+    _current_position_value = sum(
+        max(0.0, safe_float(position.get("value", 0)))
+        for position in current_positions.values()
+        if isinstance(position, dict)
+    )
+
+    _missing_assessment_value = sum(
+        max(
+            0.0,
+            safe_float(
+                current_positions.get(ticker, {}).get("value", 0)
+            ),
+        )
+        for ticker in _missing_assessment_tickers
+    )
+
+    _assessed_position_count = len(
+        _current_position_tickers & _assessed_position_tickers
+    )
+
+    _current_position_count = len(_current_position_tickers)
+
+    _assessment_count_coverage = (
+        round(
+            _assessed_position_count / _current_position_count * 100,
+            2,
+        )
+        if _current_position_count else None
+    )
+
+    _assessment_value_coverage = (
+        round(
+            (
+                _current_position_value - _missing_assessment_value
+            ) / _current_position_value * 100,
+            2,
+        )
+        if _current_position_value > 0 else None
+    )
+
+    _position_assessment_coverage = {
+        "Current Positions": _current_position_count,
+        "Assessed Current Positions": _assessed_position_count,
+        "Missing Assessment Positions": len(_missing_assessment_tickers),
+        "Current Positions Value": round(_current_position_value, 2),
+        "Missing Assessment Value": round(_missing_assessment_value, 2),
+        "Position Count Coverage %": _assessment_count_coverage,
+        "Position Value Coverage %": _assessment_value_coverage,
+        "Missing Assessment Tickers": ", ".join(
+            sorted(_missing_assessment_tickers)
+        ),
+        "Advisory Only": True,
+    }
+
+
+    _industry_risk_rows = []
+
+    for _market_industry in assessment.get(
+        "market_industry_breadth", []
+    ):
+        if isinstance(_market_industry, dict):
+            _industry_risk_rows.append({
+                **_market_industry,
+                "Assessment Component": "MARKET INDUSTRY BREADTH",
+                "Advisory Only": True,
+            })
+
+    for _portfolio_industry in _portfolio_industry_rows:
+        _industry_risk_rows.append({
+            **_portfolio_industry,
+            "Assessment Component": "PORTFOLIO INDUSTRY RISK",
+            "Advisory Only": True,
+        })
+
+    assessment["portfolio_industry_risk"] = (
+        _portfolio_industry_rows
+    )
+
+    assessment["industry_risk_assessment"] = (
+        _industry_risk_rows
+    )
+
+    assessment["portfolio_industry_risk_coverage"] = {
+        "Assessed Holdings Value": round(
+            _industry_assessed_value, 2
+        ),
+        "Classified Holdings Value": round(
+            _industry_classified_value, 2
+        ),
+        "Unclassified Holdings Value": round(
+            _industry_unclassified_value, 2
+        ),
+        "Industry Classification Coverage %": (
+            _industry_classification_coverage
+        ),
+        "Advisory Only": True,
+        "Basis": (
+            "Holdings represented in individual_stock_assessments; "
+            "not a complete portfolio exposure denominator."
+        ),
+        "Position Assessment Coverage": _position_assessment_coverage,
+    }
+
 
     return assessment
 
@@ -11420,22 +12169,23 @@ def generate_portfolio_reallocation(
             and risk_score > 0
         )
 
+        # The legacy Risk Score is not company-risk evidence.
+        # analysis/scorer.py awards 10 points when Close > SMA200
+        # and 2 otherwise. Preserve the numeric component and its
+        # existing allocation use, but do not classify it as COMPANY risk.
         legacy_risk_evidence = normalise_risk_evidence(
             "COMPANY",
             {
-                "value": (
-                    risk_score
-                    if risk_score_available
-                    else None
-                ),
-                "source": row.get("Risk Score Source"),
-                "as_of_date": row.get("Risk Score As Of Date"),
-                "retrieved_at": row.get("Risk Score Retrieved At"),
-                "coverage_percent": row.get(
-                    "Risk Score Coverage Percent"
-                ),
+                "value": None,
+                "source": "analysis/scorer.py",
+                "as_of_date": None,
+                "retrieved_at": None,
+                "coverage_percent": None,
                 "missing_reason": (
-                    "Existing risk score lacks evidence provenance"
+                    "The legacy Risk Score is a technical trend component "
+                    "based on Close versus SMA200, not company-risk evidence. "
+                    "Company evidence is assessed separately using financial "
+                    "resilience metrics."
                 ),
             },
         )
@@ -11542,9 +12292,13 @@ def generate_portfolio_reallocation(
                     else "UNASSESSED"
                 ),
                 "missing_reason": (
-                    "Current holdings snapshot has no independent "
-                    "observation timestamp; unclassified holdings may "
-                    "understate sector exposure."
+                    "Sector exposure is derived from current owned-position "
+                    "values and available sector classifications. The "
+                    "classification source and effective date are not "
+                    "propagated into this aggregation, and the holdings "
+                    "snapshot has no independently validated observation "
+                    "timestamp. Reported classification coverage is "
+                    "descriptive, not proof of complete or current exposure."
                     if sector_evidence_value is not None
                     else "Candidate sector classification or portfolio "
                     "exposure denominator is unavailable."
@@ -11566,9 +12320,13 @@ def generate_portfolio_reallocation(
                     else "UNASSESSED"
                 ),
                 "missing_reason": (
-                    "Current holdings snapshot has no independent "
-                    "observation timestamp; unclassified holdings may "
-                    "understate industry exposure."
+                    "Industry exposure is derived from current owned-position "
+                    "values and available industry classifications. The "
+                    "classification source and effective date are not "
+                    "propagated into this aggregation, and the holdings "
+                    "snapshot has no independently validated observation "
+                    "timestamp. Reported classification coverage is "
+                    "descriptive, not proof of complete or current exposure."
                     if industry_evidence_value is not None
                     else "Candidate industry classification or portfolio "
                     "exposure denominator is unavailable."
@@ -11588,9 +12346,20 @@ def generate_portfolio_reallocation(
                 "Risk Score": risk_score,
                 "Risk Score Available": risk_score_available,
                 "Risk Score Status": (
-                    "AVAILABLE"
+                    "NUMERIC COMPONENT PRESENT — NOT COMPANY RISK"
                     if risk_score_available
-                    else "UNKNOWN / NOT SCORED"
+                    else "NO NUMERIC COMPONENT"
+                ),
+                "Risk Score Provenance Status": (
+                    "CODE DEFINITION IDENTIFIED; OBSERVATION DATE NOT PROPAGATED"
+                    if risk_score_available
+                    else "NO NUMERIC COMPONENT"
+                ),
+                "Risk Score Provenance": (
+                    "analysis/scorer.py: 10 points when Close > SMA200; "
+                    "2 points otherwise. Included in Technical Score. "
+                    "Not company-risk evidence; observation date is not "
+                    "separately propagated."
                 ),
                 "Risk Evidence": {
                     "COMPANY": legacy_risk_evidence,
@@ -13524,6 +14293,515 @@ def generate_portfolio_reallocation(
         summary
     )
 
+    # ========================================================
+    # SHADOW MARKET AND PORTFOLIO RISK ASSESSMENT
+    # ========================================================
+
+    market_risk_assessment = _build_market_risk_assessment(
+        final_portfolio_decisions,
+        portfolio_value,
+        market_intelligence=market_intelligence,
+        financial_statements_by_ticker=financial_statements_by_ticker,
+        reallocation=reallocation_df,
+        market_context=market_context,
+    )
+
+    # ------------------------------------------------------------
+    # CANDIDATE COMPANY EVIDENCE — FINANCIAL RESILIENCE SUBSET
+    #
+    # Use the latest aligned annual period and the three existing
+    # descriptive metrics. This is not a composite company-risk score.
+    # Even 3/3 available metrics remain PARTIALLY_ASSESSED because
+    # this is only one subset of company risk.
+    # ------------------------------------------------------------
+
+    _financial_inventory_by_ticker = {
+        clean_ticker(item.get("Ticker", "")): item
+        for item in market_risk_assessment.get(
+            "financial_resilience_evidence", []
+        )
+        if (
+            isinstance(item, dict)
+            and clean_ticker(item.get("Ticker", ""))
+        )
+    }
+
+    _financial_metrics_by_ticker = {}
+
+    for _metric_record in market_risk_assessment.get(
+        "financial_resilience_metrics", []
+    ):
+        if not isinstance(_metric_record, dict):
+            continue
+
+        _ticker = clean_ticker(_metric_record.get("Ticker", ""))
+        if not _ticker:
+            continue
+
+        _period = str(
+            _metric_record.get("Period End") or ""
+        ).strip()
+
+        _previous = _financial_metrics_by_ticker.get(_ticker)
+
+        if (
+            _previous is None
+            or _period >= str(_previous.get("Period End") or "")
+        ):
+            _financial_metrics_by_ticker[_ticker] = _metric_record
+
+    _company_metric_definitions = [
+        ("FCF Margin %", "FCF Margin Status", "FCF margin", "%"),
+        (
+            "Reported Net Debt / EBITDA (x)",
+            "Net Debt / EBITDA Status",
+            "Reported net debt / EBITDA",
+            "x",
+        ),
+        (
+            "Gross EBIT / Interest Expense (x)",
+            "Interest Coverage Status",
+            "Gross EBIT / interest expense",
+            "x",
+        ),
+    ]
+
+    _company_evidence_by_ticker = {}
+
+    for _destination in destinations:
+        _ticker = clean_ticker(_destination.get("Ticker", ""))
+        if not _ticker:
+            continue
+
+        _metric = _financial_metrics_by_ticker.get(_ticker)
+        _inventory = _financial_inventory_by_ticker.get(_ticker, {})
+
+        _available_metric_count = 0
+        _metric_details = {}
+        _metric_summary_parts = []
+        _missing_metric_reasons = []
+
+        for _value_key, _status_key, _label, _suffix in (
+            _company_metric_definitions
+        ):
+            _value = (
+                _metric.get(_value_key)
+                if isinstance(_metric, dict)
+                else None
+            )
+            _metric_status = (
+                str(_metric.get(_status_key) or "NOT AVAILABLE").strip()
+                if isinstance(_metric, dict)
+                else "NO ALIGNED METRIC RECORD"
+            )
+
+            _value_present = _value is not None
+            if _value_present:
+                try:
+                    _value_present = not pd.isna(_value)
+                except (TypeError, ValueError):
+                    pass
+
+            _is_available = (
+                _metric_status.upper().startswith("AVAILABLE")
+                and _value_present
+            )
+
+            if _is_available:
+                _available_metric_count += 1
+            else:
+                _missing_metric_reasons.append(
+                    f"{_label}: {_metric_status}"
+                )
+
+            if not _value_present:
+                _display_value = "N/A"
+            else:
+                try:
+                    _display_value = f"{float(_value):.2f}{_suffix}"
+                except (TypeError, ValueError, OverflowError):
+                    _display_value = str(_value)
+
+            _metric_summary_parts.append(
+                f"{_label}={_display_value} [{_metric_status}]"
+            )
+
+            _metric_details[_label] = {
+                "value": _value if _value_present else None,
+                "status": _metric_status,
+            }
+
+        _common_periods = _inventory.get("Common Valid Periods", [])
+        if not isinstance(_common_periods, list):
+            _common_periods = []
+
+        _period_end = (
+            str(_metric.get("Period End") or "").strip()
+            if isinstance(_metric, dict)
+            else ""
+        )
+        if not _period_end and _common_periods:
+            _period_end = str(_common_periods[0])
+
+        _source = _inventory.get("Source")
+        _retrieved_at = _inventory.get("Retrieved At")
+        _business_classification = (
+            _metric.get("Business Classification", "")
+            if isinstance(_metric, dict)
+            else ""
+        )
+
+        if not isinstance(_metric, dict):
+            _missing_metric_reasons.append(
+                "No aligned annual financial-resilience metric record "
+                "was produced for this ticker."
+            )
+
+        if not _source:
+            _missing_metric_reasons.append(
+                "Financial statement source is not recorded."
+            )
+
+        if not _retrieved_at:
+            _missing_metric_reasons.append(
+                "Financial statement retrieval timestamp is not recorded."
+            )
+
+        if not _period_end:
+            _missing_metric_reasons.append(
+                "No validated common fiscal period is available."
+            )
+
+        if (
+            isinstance(_metric, dict)
+            and _metric.get("Statement Period Data Quality Status") != "CLEAN"
+        ):
+            _missing_metric_reasons.append(
+                "Statement-period data quality is not confirmed clean."
+            )
+
+        _coverage_percent = round(
+            _available_metric_count / 3.0 * 100.0,
+            2,
+        )
+
+        if _available_metric_count:
+            _company_status = "PARTIALLY_ASSESSED"
+            _missing_reason = (
+                f"{_available_metric_count}/3 configured financial-resilience "
+                "metrics are available for the latest aligned annual period. "
+                "This remains PARTIALLY_ASSESSED: the metrics are only a "
+                "financial-resilience subset, not a comprehensive company-risk "
+                "assessment, and no calibrated company-risk score is calculated."
+            )
+        else:
+            _company_status = "UNASSESSED"
+            _missing_reason = (
+                "No usable company financial-resilience metrics are available. "
+                "Missing evidence is not treated as low risk."
+            )
+
+        if _missing_metric_reasons:
+            _missing_reason += " " + " ".join(_missing_metric_reasons)
+
+        _coverage_basis = (
+            "Coverage is the number of available metrics out of three: "
+            "FCF margin, reported net debt/EBITDA and gross EBIT/interest "
+            "expense. It measures financial-metric availability only, not "
+            "overall company-risk coverage."
+        )
+
+        _inventory_summary = (
+            f"Statement inventory={_inventory.get('Evidence Status', 'UNAVAILABLE')}; "
+            f"available statement types={_inventory.get('Available Statement Types', 0)}; "
+            f"period alignment={_inventory.get('Period Alignment Status', 'UNAVAILABLE')}"
+        )
+
+        _company_summary = (
+            f"Period={_period_end or 'UNAVAILABLE'}; "
+            f"business classification={_business_classification or 'UNVERIFIED'}; "
+            + "; ".join(_metric_summary_parts)
+            + f"; source={_source or 'UNAVAILABLE'}; "
+            + f"retrieved={_retrieved_at or 'UNAVAILABLE'}; "
+            + _inventory_summary
+        )
+
+        _company_evidence_by_ticker[_ticker] = {
+            "dimension": "COMPANY",
+            "status": _company_status,
+            "value": None,
+            "source": _source,
+            "as_of_date": _period_end or None,
+            "retrieved_at": _retrieved_at,
+            "coverage_percent": _coverage_percent,
+            "coverage_basis": _coverage_basis,
+            "evidence_summary": _company_summary,
+            "metrics": _metric_details,
+            "business_classification": _business_classification or None,
+            "financial_statement_inventory_status": (
+                _inventory.get("Evidence Status", "UNAVAILABLE")
+            ),
+            "missing_reason": _missing_reason,
+            "advisory_only": True,
+        }
+
+    # Destinations are copied when they enter the eligible and deployment
+    # populations. Update all three populations before building the audit.
+    for _population in (
+        destinations,
+        eligible_destinations,
+        deployment_destinations,
+    ):
+        for _candidate in _population:
+            _ticker = clean_ticker(_candidate.get("Ticker", ""))
+            _company_evidence = _company_evidence_by_ticker.get(_ticker)
+
+            if not _company_evidence:
+                continue
+
+            _risk_evidence = dict(
+                _candidate.get("Risk Evidence") or {}
+            )
+            _risk_evidence["COMPANY"] = _company_evidence.copy()
+
+            _candidate["Risk Evidence"] = _risk_evidence
+            _candidate["Risk Evidence Summary"] = (
+                summarise_risk_evidence(_risk_evidence)
+            )
+            _candidate["Company Evidence Coverage Basis"] = (
+                _company_evidence["coverage_basis"]
+            )
+            _candidate["Company Evidence Summary"] = (
+                _company_evidence["evidence_summary"]
+            )
+
+    # SHADOW HUMAN REVIEW OVERLAY — ADVISORY ONLY
+    # Adds review metadata only; does not alter candidate selection,
+    # ranking, funding, allocation weights or transaction amounts.
+
+    _selected_review_tickers = {
+        clean_ticker(item.get("Ticker", ""))
+        for item in deployment_destinations
+        if clean_ticker(item.get("Ticker", ""))
+    }
+
+    _market_stress_status = str(
+        market_risk_assessment.get("market_stress_status", "UNASSESSED")
+        if isinstance(market_risk_assessment, dict)
+        else "UNASSESSED"
+    ).strip().upper()
+
+    _market_stress_detected = _market_stress_status not in {
+        "", "UNASSESSED", "NOT_ASSESSED", "NORMAL", "LOW",
+        "NO_STRESS", "NOT ELEVATED",
+    }
+
+    _human_review_by_ticker = {}
+
+    for _ticker, _company in _company_evidence_by_ticker.items():
+        _ticker = clean_ticker(_ticker)
+        _metrics = _company.get("metrics", {})
+        _metrics = _metrics if isinstance(_metrics, dict) else {}
+
+        _available_count = sum(
+            1
+            for _detail in _metrics.values()
+            if isinstance(_detail, dict)
+            and str(_detail.get("status", "")).upper().startswith("AVAILABLE")
+            and _detail.get("value") is not None
+        )
+
+        _triggers = []
+        _gaps = []
+
+        _missing_reason = str(_company.get("missing_reason") or "").strip()
+        if _missing_reason:
+            _gaps.append(_missing_reason)
+
+        _evidence_summary = str(
+            _company.get("evidence_summary") or ""
+        )
+        _alignment_partial = (
+            "period alignment=PARTIAL" in _evidence_summary.upper()
+            or "period alignment=UNAVAILABLE" in _evidence_summary.upper()
+        )
+
+        if _ticker in _selected_review_tickers:
+            if _available_count == 0:
+                _triggers.append(
+                    "No configured company financial-resilience metrics available"
+                )
+            elif _available_count < 3:
+                _triggers.append(
+                    f"Incomplete company financial-resilience evidence "
+                    f"({_available_count}/3 metrics available)"
+                )
+
+            _fcf = _metrics.get("FCF margin", {})
+            _fcf_value = _fcf.get("value") if isinstance(_fcf, dict) else None
+            try:
+                if _fcf_value is not None and float(_fcf_value) < 0:
+                    _triggers.append("Negative free-cash-flow margin")
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+            if _alignment_partial:
+                _triggers.append(
+                    "Financial-statement period alignment is partial"
+                )
+
+            if _market_stress_detected:
+                _triggers.append(
+                    f"Market stress context: {_market_stress_status} "
+                    "(contextual review; not a hard stop)"
+                )
+
+        _candidate = next(
+            (
+                item for item in destinations
+                if clean_ticker(item.get("Ticker", "")) == _ticker
+            ),
+            {},
+        )
+        _sector = str(_candidate.get("Sector", "")).strip().upper()
+
+        _concentration_review = ""
+        if (
+            _ticker in _selected_review_tickers
+            and "TECH" in _sector
+        ):
+            _concentration_review = (
+                "REVIEW — existing technology concentration 49.34%; "
+                "incremental effect not verified"
+            )
+            _triggers.append(_concentration_review)
+
+        if _ticker not in _selected_review_tickers:
+            _status = "NONE"
+            _priority = "NONE"
+            _triggers = []
+        elif _available_count == 0:
+            _status = "REQUIRED"
+            _priority = "HIGH"
+        elif any(
+            trigger.startswith((
+                "Incomplete company",
+                "Negative free-cash-flow",
+                "Financial-statement period",
+                "REVIEW — existing technology",
+            ))
+            for trigger in _triggers
+        ):
+            _status = "REVIEW"
+            _priority = "MEDIUM"
+        elif _market_stress_detected:
+            _status = "CONTEXT"
+            _priority = "LOW"
+        else:
+            _status = "NONE"
+            _priority = "NONE"
+
+        _human_review_by_ticker[_ticker] = {
+            "Human Review Status": _status,
+            "Review Priority": _priority,
+            "Review Triggers": " | ".join(_triggers) if _triggers else "None",
+            "Evidence Gap Summary": " | ".join(_gaps) if _gaps else (
+                "No specific company evidence gap recorded; "
+                "this is not comprehensive risk clearance."
+            ),
+            "Concentration Review": (
+                _concentration_review or "No specific concentration review flag"
+            ),
+        }
+
+    # Attach review metadata to each candidate population.
+    for _population in (
+        destinations,
+        eligible_destinations,
+        deployment_destinations,
+    ):
+        for _candidate in _population:
+            _ticker = clean_ticker(_candidate.get("Ticker", ""))
+            _review = _human_review_by_ticker.get(_ticker)
+            if _review:
+                _candidate.update(_review)
+
+    # Add the same metadata to the existing transaction detail dataframe.
+    if not reallocation_df.empty and "Destination Ticker" in reallocation_df.columns:
+        for _column in (
+            "Human Review Status",
+            "Review Priority",
+            "Review Triggers",
+            "Evidence Gap Summary",
+            "Concentration Review",
+        ):
+            reallocation_df[_column] = reallocation_df[
+                "Destination Ticker"
+            ].map(
+                lambda _value: _human_review_by_ticker.get(
+                    clean_ticker(_value), {}
+                ).get(_column, "NONE" if _column == "Human Review Status" else "")
+            )
+
+    # Preserve the candidate-level evidence and provenance in the SHADOW
+    # assessment payload, and add selected destination reviews to its
+    # existing transaction-review evidence stream.
+    _human_review_evidence_rows = []
+    for _candidate in deployment_destinations:
+        _ticker = clean_ticker(_candidate.get("Ticker", ""))
+        _review = _human_review_by_ticker.get(_ticker, {})
+        _company = _company_evidence_by_ticker.get(_ticker, {})
+        _human_review_evidence_rows.append({
+            "Ticker": _ticker,
+            **_review,
+            "Company Evidence Summary": _company.get("evidence_summary", ""),
+            "Company Evidence Coverage Basis": _company.get("coverage_basis", ""),
+            "Company Evidence": _company,
+            "Risk Evidence": _candidate.get("Risk Evidence", {}),
+            "Advisory Only": True,
+            "Production Decisions Changed": False,
+        })
+
+    if isinstance(market_risk_assessment, dict):
+        market_risk_assessment["candidate_human_review_overlay"] = (
+            _human_review_evidence_rows
+        )
+        _existing_transaction_reviews = market_risk_assessment.get(
+            "transaction_risk_reviews", []
+        )
+        if not isinstance(_existing_transaction_reviews, list):
+            _existing_transaction_reviews = []
+        _existing_transaction_reviews.extend(
+            {
+                "Ticker": _row["Ticker"],
+                "Review Type": "SHADOW HUMAN REVIEW OVERLAY",
+                **{
+                    _key: _row.get(_key)
+                    for _key in (
+                        "Human Review Status",
+                        "Review Priority",
+                        "Review Triggers",
+                        "Evidence Gap Summary",
+                        "Concentration Review",
+                    )
+                },
+                "Company Evidence Summary": _row["Company Evidence Summary"],
+                "Company Evidence Coverage Basis": _row[
+                    "Company Evidence Coverage Basis"
+                ],
+                "Company Evidence": _row["Company Evidence"],
+                "Risk Evidence": _row["Risk Evidence"],
+                "Advisory Only": True,
+                "Production Decisions Changed": False,
+            }
+            for _row in _human_review_evidence_rows
+        )
+        market_risk_assessment["transaction_risk_reviews"] = (
+            _existing_transaction_reviews
+        )
+
+    # Build the read-only audit after all six destination evidence
+    # dimensions have been attached. No allocation inputs are changed.
     reallocation_audit = build_reallocation_audit(
         destinations=destinations,
         eligible_destinations=eligible_destinations,
@@ -13536,19 +14814,6 @@ def generate_portfolio_reallocation(
         min_trade_value=min_reallocation_trade_value,
         max_destination_share=MAX_DESTINATION_SHARE_OF_REALLOCATION,
         max_destination_count=MAX_REALLOCATION_DESTINATIONS,
-    )
-
-    # ========================================================
-    # SHADOW MARKET AND PORTFOLIO RISK ASSESSMENT
-    # ========================================================
-
-    market_risk_assessment = _build_market_risk_assessment(
-        final_portfolio_decisions,
-        portfolio_value,
-        market_intelligence=market_intelligence,
-        financial_statements_by_ticker=financial_statements_by_ticker,
-        reallocation=reallocation_df,
-        market_context=market_context,
     )
 
     # --------------------------------------------------------
@@ -13925,6 +15190,7 @@ def generate_portfolio_reallocation(
         ("market_stress_indicators", "BROAD-MARKET STRESS INDICATORS"),
         ("market_breadth_indicators", "MARKET BREADTH INDICATORS — CONSTITUENT LEVEL"),
         ("market_sector_breadth", "SECTOR BREADTH AND EQUAL-WEIGHTED ROTATION"),
+        ("industry_risk_assessment", "INDUSTRY BREADTH AND RISK ASSESSMENT"),
         ("market_leadership_indicators", "MARKET LEADERSHIP / RELATIVE STRENGTH"),
         ("macro_stress_scenarios", "MACRO STRESS SCENARIO ASSESSMENT"),
         ("candidate_macro_reviews", "CANDIDATE MACRO SENSITIVITY REVIEWS"),

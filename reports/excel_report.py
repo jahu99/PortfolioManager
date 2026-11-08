@@ -5925,13 +5925,7 @@ def create_report(
 
         ]
 
-        detail_heading_row = (
-
-            len(summary_report)
-
-            + 4
-
-        )
+        detail_heading_row = len(summary_report) + 2
 
         worksheet.cell(
 
@@ -6116,18 +6110,7 @@ def create_report(
 
             )
 
-        destination_heading_row = (
-
-            audit_summary_heading_row
-            + 3
-            + max(
-                1,
-                len(audit_summary)
-                if isinstance(audit_summary, dict)
-                else 1
-            )
-
-        )
+        destination_heading_row = audit_summary_heading_row + 3
 
         worksheet.cell(
 
@@ -6232,6 +6215,88 @@ def create_report(
 
             )
 
+        # -----------------------------------------------------
+        # COMPACT FORMATTING — PORTFOLIO REALLOCATION
+        # -----------------------------------------------------
+        try:
+            from openpyxl.styles import Font, PatternFill, Alignment
+
+            worksheet = writer.sheets[portfolio_reallocation_sheet_name]
+            worksheet.sheet_view.showGridLines = False
+
+            section_titles = {
+                "PORTFOLIO REALLOCATION DETAIL",
+                "REALLOCATION AUDIT SUMMARY",
+                "DESTINATION AUDIT",
+                "FUNDING SOURCE AUDIT",
+            }
+
+            header_rows = {1}
+
+            for row_number in range(1, worksheet.max_row + 1):
+                first_value = worksheet.cell(
+                    row=row_number,
+                    column=1,
+                ).value
+
+                if first_value in section_titles:
+                    for cell in worksheet[row_number]:
+                        cell.fill = PatternFill(
+                            fill_type="solid",
+                            fgColor="1F4E78",
+                        )
+                        cell.font = Font(
+                            bold=True,
+                            color="FFFFFF",
+                        )
+                    worksheet.row_dimensions[row_number].height = 23
+                    if row_number < worksheet.max_row:
+                        header_rows.add(row_number + 1)
+
+            for row_number in header_rows:
+                if row_number <= worksheet.max_row:
+                    for cell in worksheet[row_number]:
+                        if cell.value is not None:
+                            cell.fill = PatternFill(
+                                fill_type="solid",
+                                fgColor="4472C4",
+                            )
+                            cell.font = Font(
+                                bold=True,
+                                color="FFFFFF",
+                            )
+                            cell.alignment = Alignment(
+                                vertical="center",
+                                wrap_text=True,
+                            )
+                    worksheet.row_dimensions[row_number].height = 32
+
+            for row_cells in worksheet.iter_rows():
+                for cell in row_cells:
+                    if cell.value is not None:
+                        cell.alignment = Alignment(
+                            vertical="top",
+                            wrap_text=True,
+                        )
+
+            for column_cells in worksheet.columns:
+                column_letter = column_cells[0].column_letter
+                max_length = max(
+                    (
+                        len(str(cell.value))
+                        for cell in column_cells
+                        if cell.value is not None
+                    ),
+                    default=10,
+                )
+                worksheet.column_dimensions[column_letter].width = min(
+                    max(max_length + 2, 12),
+                    38,
+                )
+
+        except Exception as exc:
+            print("Portfolio Reallocation formatting warning:", exc)
+
         # =====================================================
         # =====================================================
         # =====================================================
@@ -6281,6 +6346,112 @@ def create_report(
             risk_row += 2
 
             frame = risk_frame(data, empty_message)
+
+            # -----------------------------------------------------
+            # EQUITY MARKET EVIDENCE — PRESENTATION ORDER
+            #
+            # Put actual readings, assessment status, coverage
+            # and evidence basis before secondary metadata.
+            #
+            # Existing values only. No calculations or risk
+            # classifications are changed.
+            # -----------------------------------------------------
+
+            market_evidence_sections = {
+                "BROAD-MARKET STRESS INDICATORS",
+                "CONSTITUENT-LEVEL MARKET BREADTH",
+                "SECTOR BREADTH AND EQUAL-WEIGHTED ROTATION",
+                "INDUSTRY BREADTH AND RISK ASSESSMENT",
+                "MARKET LEADERSHIP AND RELATIVE STRENGTH",
+            }
+
+            if title in market_evidence_sections and not frame.empty:
+
+                def _market_evidence_column_priority(column):
+
+                    label = str(column).strip().lower()
+
+                    # Detailed ticker-level provenance belongs at the end.
+                    if "ticker data provenance" in label:
+                        return 6
+
+                    # Instrument or evidence identity.
+                    if any(term in label for term in (
+                        "benchmark",
+                        "ticker",
+                        "indicator",
+                        "sector",
+                    )):
+                        return 0
+
+                    # Actual readings and performance measures.
+                    if any(term in label for term in (
+                        "return",
+                        "volatility",
+                        "drawdown",
+                        "vix",
+                        "level",
+                        "value",
+                        "reading",
+                        "advancer",
+                        "decliner",
+                        "above",
+                        "high",
+                        "low",
+                        "relative",
+                        "performance",
+                        "breadth",
+                        "ratio",
+                        "change",
+                        "strength",
+                    )):
+                        return 1
+
+                    # Assessment outcome and completeness.
+                    if any(term in label for term in (
+                        "status",
+                        "assessment",
+                        "classification",
+                        "signal",
+                    )):
+                        return 2
+
+                    # Data availability and observation coverage.
+                    if any(term in label for term in (
+                        "coverage",
+                        "observed",
+                        "expected",
+                        "missing",
+                        "observation",
+                        "date",
+                        "count",
+                    )):
+                        return 3
+
+                    # Evidence provenance and governance.
+                    if any(term in label for term in (
+                        "threshold",
+                        "evidence",
+                        "source",
+                        "basis",
+                        "advisory",
+                    )):
+                        return 4
+
+                    return 5
+
+                original_columns = list(frame.columns)
+
+                ordered_columns = sorted(
+                    original_columns,
+                    key=lambda column: (
+                        _market_evidence_column_priority(column),
+                        original_columns.index(column),
+                    ),
+                )
+
+                frame = frame.loc[:, ordered_columns]
+
             frame.to_excel(
                 writer,
                 sheet_name=risk_sheet,
@@ -6296,6 +6467,19 @@ def create_report(
             "Macro Risk Status": market_risk_assessment.get(
                 "macro_risk_status", "NOT ASSESSED"
             ),
+            "Equity Market Risk Status": market_risk_assessment.get(
+                "equity_market_risk_status", "UNASSESSED"
+            ),
+            "Overall Risk Interpretation": market_risk_assessment.get(
+                "overall_risk_interpretation", "NOT ASSESSED"
+            ),
+            "Equity Market Risk Coverage": str(
+                market_risk_assessment.get("equity_market_risk_coverage", {})
+            ),
+            "Equity Market Risk Evidence": str(
+                market_risk_assessment.get("equity_market_risk_evidence", [])
+            ),
+
             "Assessment Scope": "Advisory only",
             "Production Decisions Changed": False,
             "Assessment Object Available": bool(market_risk_assessment),
@@ -6305,6 +6489,71 @@ def create_report(
             "RISK OVERVIEW AND GOVERNANCE",
             overview,
             "Risk overview unavailable — NOT ASSESSED",
+        )
+
+        # -----------------------------------------------------
+        # EQUITY MARKET RISK — PRIMARY EVIDENCE
+        # Promoted immediately after the risk overview.
+        # Advisory only; no production decision changes.
+        # -----------------------------------------------------
+
+        write_risk_section(
+            "BROAD-MARKET STRESS INDICATORS",
+            market_risk_assessment.get("market_stress_indicators", []),
+            "No benchmark stress indicators supplied — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "CONSTITUENT-LEVEL MARKET BREADTH",
+            market_risk_assessment.get("market_breadth_indicators", []),
+            "No constituent-level market breadth data supplied — NOT ASSESSED",
+        )
+
+        write_risk_section(
+            "SECTOR BREADTH AND EQUAL-WEIGHTED ROTATION",
+            market_risk_assessment.get("market_sector_breadth", []),
+            "No constituent-level sector breadth or rotation data available — NOT ASSESSED",
+        )
+
+        industry_risk_rows = market_risk_assessment.get(
+            "industry_risk_assessment", []
+        )
+        if not isinstance(industry_risk_rows, list):
+            industry_risk_rows = []
+        else:
+            industry_risk_rows = list(industry_risk_rows)
+
+        industry_coverage = market_risk_assessment.get(
+            "portfolio_industry_risk_coverage", {}
+        )
+        if not isinstance(industry_coverage, dict):
+            industry_coverage = {}
+
+        position_coverage = industry_coverage.get(
+            "Position Assessment Coverage", {}
+        )
+        if isinstance(position_coverage, dict) and position_coverage:
+            industry_risk_rows.append({
+                "Assessment Component": "POSITION ASSESSMENT COVERAGE",
+                **position_coverage,
+            })
+
+        write_risk_section(
+            "INDUSTRY BREADTH AND RISK ASSESSMENT",
+            industry_risk_rows,
+            "No constituent-level industry breadth or risk data available — NOT ASSESSED",
+        )
+
+
+        leadership_rows = market_risk_assessment.get(
+            "market_leadership_indicators", []
+        )
+        if not isinstance(leadership_rows, list):
+            leadership_rows = []
+        write_risk_section(
+            "MARKET LEADERSHIP AND RELATIVE STRENGTH",
+            leadership_rows,
+            "No market-leadership or relative-strength records supplied — NOT ASSESSED",
         )
 
         # Present actionable recommendations before detailed diagnostics.
@@ -6398,35 +6647,14 @@ def create_report(
             "No proposed concentration warnings recorded",
         )
 
-        write_risk_section(
-            "BROAD-MARKET STRESS INDICATORS",
-            market_risk_assessment.get("market_stress_indicators", []),
-            "No benchmark stress indicators supplied — NOT ASSESSED",
-        )
 
-        write_risk_section(
-            "CONSTITUENT-LEVEL MARKET BREADTH",
-            market_risk_assessment.get("market_breadth_indicators", []),
-            "No constituent-level market breadth data supplied — NOT ASSESSED",
-        )
 
-        write_risk_section(
-            "SECTOR BREADTH AND EQUAL-WEIGHTED ROTATION",
-            market_risk_assessment.get("market_sector_breadth", []),
-            "No constituent-level sector breadth or rotation data available — NOT ASSESSED",
-        )
 
-        leadership_rows = market_risk_assessment.get(
-            "market_leadership_indicators", []
-        )
-        if not isinstance(leadership_rows, list):
-            leadership_rows = []
 
-        write_risk_section(
-            "MARKET LEADERSHIP AND RELATIVE STRENGTH",
-            leadership_rows,
-            "No market-leadership or relative-strength records supplied — NOT ASSESSED",
-        )
+
+
+
+
 
         macro_assessment = market_risk_assessment.get(
             "macro_risk_assessment", {}
@@ -7681,36 +7909,6 @@ def create_report(
             sheet_name="Alerts",
             index=False
         )
-        # --------------------------------------------------------
-        # PORTFOLIO REALLOCATION AUDIT — READ-ONLY REPORT OUTPUT
-        # --------------------------------------------------------
-        if isinstance(reallocation_audit, dict):
-            destination_audit_df = reallocation_audit.get(
-                "destination_audit"
-            )
-            if isinstance(destination_audit_df, pd.DataFrame):
-                destination_audit_df.to_excel(
-                    writer,
-                    sheet_name="Reallocation Destination Audit",
-                    index=False,
-                )
-            funding_audit_df = reallocation_audit.get(
-                "funding_audit"
-            )
-            if isinstance(funding_audit_df, pd.DataFrame):
-                funding_audit_df.to_excel(
-                    writer,
-                    sheet_name="Reallocation Funding Audit",
-                    index=False,
-                )
-            audit_summary = reallocation_audit.get("summary")
-            if isinstance(audit_summary, dict):
-                pd.DataFrame([audit_summary]).to_excel(
-                    writer,
-                    sheet_name="Reallocation Audit Summary",
-                    index=False,
-                )
-
     # =========================================================
     # WORKBOOK VERIFICATION
     # =========================================================

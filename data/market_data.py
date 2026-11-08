@@ -1,4 +1,5 @@
 import os
+import math
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -124,24 +125,107 @@ def _latest_completed_us_trading_date():
     return candidate
 
 
-def _cache_is_current(df):
+def _ohlc_is_valid(df, observation_date=None):
     """
-    Determine whether cached data contains the latest completed
-    US trading session.
+    Validate OHLC values for a specific completed observation.
     """
 
-    cached_date = _latest_cached_date(
-        df
-    )
+    required_columns = [
+        "Open",
+        "High",
+        "Low",
+        "Close",
+    ]
+
+    if df is None or df.empty:
+        return False
+
+    if not all(
+        column in df.columns
+        for column in required_columns
+    ):
+        return False
+
+    try:
+        index_dates = pd.to_datetime(df.index).date
+
+        if observation_date is not None:
+            mask = [
+                date == observation_date
+                for date in index_dates
+            ]
+
+            rows = df.loc[mask]
+
+            if rows.empty:
+                return False
+
+            row = rows.iloc[-1]
+
+        else:
+            row = df.iloc[-1]
+
+        values = {}
+
+        for column in required_columns:
+            value = pd.to_numeric(
+                pd.Series([row[column]]),
+                errors="coerce"
+            ).iloc[0]
+
+            if pd.isna(value):
+                return False
+
+            value = float(value)
+
+            if not math.isfinite(value) or value <= 0:
+                return False
+
+            values[column] = value
+
+        if not (
+            values["High"] >= max(
+                values["Open"],
+                values["Close"]
+            )
+            and
+            values["Low"] <= min(
+                values["Open"],
+                values["Close"]
+            )
+            and
+            values["High"] >= values["Low"]
+        ):
+            return False
+
+        return True
+
+    except (TypeError, ValueError, IndexError, KeyError):
+        return False
+
+
+def _cache_is_current(df):
+    """
+    Require the latest completed US trading session
+    and a structurally valid OHLC observation.
+    """
+
+    cached_date = _latest_cached_date(df)
 
     if cached_date is None:
         return False
 
-    latest_expected_date = (
+    expected_date = (
         _latest_completed_us_trading_date()
     )
 
-    return cached_date >= latest_expected_date
+    if cached_date < expected_date:
+        return False
+
+    return _ohlc_is_valid(
+        df,
+        observation_date=expected_date
+    )
 
 
 # ============================================================
@@ -269,7 +353,7 @@ def get_stock_data(
 
             # If fresh download fails but a cache exists,
             # use the cache rather than losing the stock.
-            if os.path.exists(cache_file):
+            if not force_refresh and os.path.exists(cache_file):
 
                 try:
 
@@ -332,16 +416,54 @@ def get_stock_data(
             pass
 
         # ====================================================
-        # SAVE RAW DATA
+        # VALIDATE AND SAVE RAW DATA
         # ====================================================
 
-        try:
+        expected_date = (
+            _latest_completed_us_trading_date()
+        )
 
-            # Only cache datasets large enough to support the
-            # technical indicators used by the application.
-            if len(df) >= 200:
+        if not _ohlc_is_valid(
+            df,
+            observation_date=expected_date
+        ):
+            print(
+                f"{ticker}: DATA_QUALITY_FAILURE - "
+                f"invalid or incomplete OHLC data "
+                f"for {expected_date}; "
+                f"existing cache preserved."
+            )
 
+            if not force_refresh and os.path.exists(cache_file):
+                try:
+                    cached = pd.read_parquet(
+                        cache_file
+                    )
+
+                    if not cached.empty:
+                        return cached
+
+                except Exception:
+                    pass
+
+            return pd.DataFrame()
+
+        # Only cache datasets large enough to support the
+        # technical indicators used by the application.
+
+        if len(df) >= 200:
+
+            temp_cache_file = (
+                cache_file + ".tmp.parquet"
+            )
+
+            try:
                 df.to_parquet(
+                    temp_cache_file
+                )
+
+                os.replace(
+                    temp_cache_file,
                     cache_file
                 )
 
@@ -351,16 +473,19 @@ def get_stock_data(
 
                 print(
                     f"{ticker}: "
-                    f"fresh data cached "
+                    f"FRESH_DOWNLOAD_VALIDATED "
                     f"(latest: {latest_date})"
                 )
 
-        except Exception as e:
+            except Exception as e:
 
-            print(
-                f"{ticker}: "
-                f"cache save failed: {e}"
-            )
+                if os.path.exists(temp_cache_file):
+                    os.remove(temp_cache_file)
+
+                print(
+                    f"{ticker}: "
+                    f"cache save failed: {e}"
+                )
 
         return df
 
@@ -384,7 +509,7 @@ def get_stock_data(
         # available.
         # ----------------------------------------------------
 
-        if os.path.exists(cache_file):
+        if not force_refresh and os.path.exists(cache_file):
 
             try:
 
